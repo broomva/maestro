@@ -1,5 +1,5 @@
-# The legacy folder reader ratchet (BRO-4083): the code files that name a repo's legacy state
-# folder without the matching new name may not grow in number (unified-layout ADR). This job is
+# The legacy folder ratchet (BRO-4083): the list of code files that mention a repo's legacy state
+# folder at all may not gain a file (unified-layout ADR). This job is
 # the fast signal, a few seconds of Python and git. The required `ci` check runs the same two
 # commands from scripts/ci.sh, so the ratchet binds a merge even though this job is not required.
 name: control-readers

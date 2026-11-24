@@ -5,6 +5,7 @@ Each test builds a small repository in a temporary directory, copies the checker
 it there, so nothing here reads or changes this checkout. The folder names are spelled in two
 halves so that this file is not itself a reader.
 """
+import importlib.util
 import json
 import os
 import shutil
@@ -20,6 +21,13 @@ OLD = "." + "control"
 NEW = "." + "broomva"
 # Run from a git hook, these would point the fixture repository at the hook's repository.
 ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+def load_checker():
+    spec = importlib.util.spec_from_file_location("check_control_readers", SOURCE / CHECKER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class RatchetTest(unittest.TestCase):
@@ -68,7 +76,7 @@ class RatchetTest(unittest.TestCase):
     def test_fixture_starts_at_its_baseline(self):
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Unpaired readers: 1; baseline: 1", result.stdout)
+        self.assertIn(f"Files mentioning {OLD}: 1; baseline: 1", result.stdout)
 
     def test_added_rust_reader_fails_and_names_file(self):
         self.write("crates/mcp/src/new.rs", f'let policy = root.join("{OLD}/policy.yaml");\n')
@@ -77,7 +85,7 @@ class RatchetTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("  crates/mcp/src/new.rs\n", result.stdout)
         self.assertNotIn("  crates/store/src/old.rs\n", result.stdout)
-        self.assertIn("Unpaired readers: 2; baseline: 1", result.stdout)
+        self.assertIn(f"Files mentioning {OLD}: 2; baseline: 1", result.stdout)
         # The hint states when the base comparison is skipped.
         self.assertIn("base has no\nbaseline file yet", result.stdout)
 
@@ -95,24 +103,6 @@ class RatchetTest(unittest.TestCase):
         self.assertIn("fell to 0", result.stdout)
         self.assertIn("  crates/store/src/old.rs\n", result.stdout)
 
-    def test_paired_reader_passes(self):
-        # Both names with the same suffix: the file handles the rename, so it is not listed.
-        self.write("crates/mcp/src/new.rs",
-                   f'let new = root.join("{NEW}/policy.yaml");\nlet old = root.join("{OLD}/policy.yaml");\n')
-        self.stage()
-        result = self.check()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Unpaired readers: 1; baseline: 1", result.stdout)
-
-    def test_both_names_with_different_suffixes_fails(self):
-        # Naming the new folder is not enough: the legacy path itself must have its twin.
-        self.write("crates/mcp/src/new.rs",
-                   f'let new = root.join("{NEW}/flows");\nlet old = root.join("{OLD}/policy.yaml");\n')
-        self.stage()
-        result = self.check()
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("  crates/mcp/src/new.rs\n", result.stdout)
-
     def test_swapping_one_reader_for_another_fails(self):
         # The count stays at the baseline, but new.rs was never in it.
         self.write("crates/store/src/old.rs", "fn main() {}\n")
@@ -121,7 +111,7 @@ class RatchetTest(unittest.TestCase):
         result = self.check()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("  crates/mcp/src/new.rs\n", result.stdout)
-        self.assertIn("Unpaired readers: 1; baseline: 1", result.stdout)
+        self.assertIn(f"Files mentioning {OLD}: 1; baseline: 1", result.stdout)
 
     def test_prose_and_fixtures_are_not_readers(self):
         self.write("README.md", f"Asks live in `{OLD}/asks`.\n")
@@ -130,7 +120,7 @@ class RatchetTest(unittest.TestCase):
         self.stage()
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Unpaired readers: 1; baseline: 1", result.stdout)
+        self.assertIn(f"Files mentioning {OLD}: 1; baseline: 1", result.stdout)
 
     def test_directory_ending_in_a_skipped_name_is_code(self):
         # The round-4 reproduction: the skipped directory names are whole path components, not
@@ -158,28 +148,6 @@ class RatchetTest(unittest.TestCase):
             self.assertNotIn(path, listed)
         for path in counted:
             self.assertIn(path, listed)
-
-    def test_folder_reference_is_a_whole_name(self):
-        # `my.broomva/asks` is not the new folder, so it does not pair the legacy reference; and
-        # `my.control/asks` is not the legacy folder, so alone it is not a reader.
-        self.write("crates/mcp/src/a.rs", f'let a = "{OLD}/asks"; let b = "my{NEW}/asks";\n')
-        self.write("crates/mcp/src/b.rs", f'let a = "my{OLD}/asks";\n')
-        self.stage()
-        listed = json.loads(self.check("--print-baseline").stdout)["readers"]
-        self.assertIn("crates/mcp/src/a.rs", listed)
-        self.assertNotIn("crates/mcp/src/b.rs", listed)
-
-    def test_machine_scope_is_home_by_whole_name(self):
-        # HOME and BROOMVA_HOME name the home directory; REPO_HOME does not, so its new-name
-        # reference pairs the legacy one.
-        self.write("crates/mcp/src/a.rs", f'let a = "{OLD}/asks"; let b = "$REPO_HOME/{NEW}/asks";\n')
-        self.write("crates/mcp/src/b.rs", f'let a = "{OLD}/asks"; let b = "$BROOMVA_HOME/{NEW}/asks";\n')
-        self.write("crates/mcp/src/c.rs", f'let a = "{OLD}/asks"; let b = "$HOME/{NEW}/asks";\n')
-        self.stage()
-        listed = json.loads(self.check("--print-baseline").stdout)["readers"]
-        self.assertNotIn("crates/mcp/src/a.rs", listed)
-        self.assertIn("crates/mcp/src/b.rs", listed)
-        self.assertIn("crates/mcp/src/c.rs", listed)
 
     def test_baseline_count_must_match_its_list(self):
         (self.root / "scripts/control_readers_baseline.json").write_text(
@@ -293,22 +261,6 @@ class RatchetTest(unittest.TestCase):
         result = self.check("--base-ref", "no-such-ref")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
 
-    def test_file_handling_both_names_for_an_area_may_add_legacy_reference_in_it(self):
-        # A documented limit, the workspace sensor's unit: a file and an area (the first path
-        # component after the folder name), not a pairing of individual references.
-        self.write("pair_gap.py", f'legacy = "{OLD}/asks/private"\ncurrent = "{NEW}/asks/unrelated"\n')
-        self.stage()
-        result = self.check()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Unpaired readers: 1; baseline: 1", result.stdout)
-        # The hint states the unit when another file fails.
-        self.write("crates/mcp/src/new.rs", f'let policy = root.join("{OLD}/policy.yaml");\n')
-        self.stage()
-        result = self.check()
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("The unit is a file and an area", result.stdout)
-        self.assertNotIn("  pair_gap.py\n", result.stdout)
-
     def test_constructed_path_is_not_counted(self):
         # A documented limit, pinned so that changing it is deliberate: the scan is literal, and a
         # path assembled from pieces is not found.
@@ -316,18 +268,75 @@ class RatchetTest(unittest.TestCase):
         self.stage()
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Unpaired readers: 1; baseline: 1", result.stdout)
+        self.assertIn(f"Files mentioning {OLD}: 1; baseline: 1", result.stdout)
 
     def test_comment_counts_as_reader(self):
-        # A documented limit: a comment naming only the legacy folder counts, and naming both pairs.
+        # A documented limit: a comment naming the legacy folder counts.
         self.write("crates/mcp/src/note.rs", f"// migration note: {OLD}/asks\nfn f() {{}}\n")
         self.stage()
         result = self.check()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("comments included", result.stdout)
-        self.write("crates/mcp/src/note.rs", f"// migration note: {OLD}/asks becomes {NEW}/asks\nfn f() {{}}\n")
+        self.assertIn("a comment\ncounts", result.stdout)
+
+    def test_file_naming_both_folders_is_listed(self):
+        # Nothing is paired: naming the new folder as well does not take a file off the list.
+        self.write("crates/mcp/src/both.rs",
+                   f'let new = root.join("{NEW}/asks");\nlet old = root.join("{OLD}/asks");\n')
         self.stage()
-        self.assertEqual(self.check().returncode, 0)
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("  crates/mcp/src/both.rs\n", result.stdout)
+        self.assertIn("generated path reader", result.stdout)
+
+    def test_reviewer_strings(self):
+        # The strings review rounds used against the old pairing rule, here and in broomva/bstack,
+        # and what each is now: listed exactly when it mentions the legacy folder.
+        cases = {
+            "r4_mydocs.py": (f'p = "{OLD}/asks"\n', True),
+            "r5_double_dot.py": (f'a = "{OLD}/asks"; b = "my.{NEW}/asks"\n', True),
+            "r5_double_dot_legacy.py": (f'a = "my.{OLD}/asks"\n', True),
+            "r5_repo_dash_home.py": (f'a = "{OLD}/asks"; b = "REPO-HOME/{NEW}/asks"\n', True),
+            "r5_tmp_tilde.py": (f'a = "{OLD}/asks"; b = "/tmp/~/{NEW}/asks"\n', True),
+            "bstack_r3_area.py": (f'a = "{OLD}/asks/private"; b = "{NEW}/asks/unrelated"\n', True),
+            "bstack_r5_plus_suffix.py": (f'p = "{OLD}/asks+old"; q = "{NEW}/asks+new"\n', True),
+            "bstack_r5_plus_left.py": (f'p = "my+{OLD}/asks"\n', True),
+            "bstack_r5_somehome.py": (f'p = "{OLD}/asks"; q = "SOMEHOME/{NEW}/asks"\n', True),
+            "member_access.py": (f"x = self{OLD}\ny = f(){OLD}/2\n", False),
+            "longer_name.py": (f'import x{OLD}ler\np = "{OLD}ler/x"\n', False),
+            "new_folder_only.py": (f'p = "{NEW}/asks"\n', False),
+        }
+        for name, (text, _) in cases.items():
+            self.write(f"probe/{name}", text)
+        self.write(f"{OLD}led/x.py", f'p = "{OLD}/asks"\n')
+        self.stage()
+        listed = set(json.loads(self.check("--print-baseline").stdout)["readers"])
+        for name, (_, want) in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(f"probe/{name}" in listed, want)
+        self.assertIn(f"{OLD}led/x.py", listed)
+
+    def test_mention_pattern_generated(self):
+        # Every left context crossed with every right context, built from the rule, not from the
+        # pattern: a mention is a dot at the text start or after anything but a letter, digit,
+        # `_`, `)` or `]`, followed by "/", a quote, a backtick or the end of the line.
+        left_no = {"letter": "a", "upper": "Z", "digit": "7", "underscore": "_", "paren": ")",
+                   "bracket": "]"}
+        left_yes = {"start": "", "slash": "/", "single": "'", "double": '"', "backtick": "`",
+                    "space": " ", "tab": "\t", "newline": "x\n", "equals": "=", "open": "(",
+                    "comma": ",", "dot": "."}
+        right_yes = {"slash": "/asks", "single": "'", "double": '"', "backtick": "`",
+                     "eol": "\nnext", "eot": ""}
+        right_no = {"letter": "ler", "digit": "2", "underscore": "_x", "open": "(", "dot": ".x"}
+        module = load_checker()
+        cases = 0
+        for lname, lchar in {**left_no, **left_yes}.items():
+            for rname, rtext in {**right_yes, **right_no}.items():
+                text = f"{lchar}{OLD}{rtext}"
+                want = lname in left_yes and rname in right_yes
+                with self.subTest(left=lname, right=rname, text=text):
+                    self.assertEqual(module.mentions(text), want)
+                cases += 1
+        self.assertEqual(cases, (len(left_no) + len(left_yes)) * (len(right_yes) + len(right_no)))
 
     def test_classifier_controls(self):
         result = self.check("--selftest")
