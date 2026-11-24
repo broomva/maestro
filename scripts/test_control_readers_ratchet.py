@@ -241,6 +241,22 @@ class RatchetTest(unittest.TestCase):
         result = self.check("--base-ref", "no-such-ref")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
 
+    def test_file_handling_both_names_for_an_area_may_add_legacy_reference_in_it(self):
+        # A documented limit, the workspace sensor's unit: a file and an area (the first path
+        # component after the folder name), not a pairing of individual references.
+        self.write("pair_gap.py", f'legacy = "{OLD}/asks/private"\ncurrent = "{NEW}/asks/unrelated"\n')
+        self.stage()
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Unpaired readers: 1; baseline: 1", result.stdout)
+        # The hint states the unit when another file fails.
+        self.write("crates/mcp/src/new.rs", f'let policy = root.join("{OLD}/policy.yaml");\n')
+        self.stage()
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("The unit is a file and an area", result.stdout)
+        self.assertNotIn("  pair_gap.py\n", result.stdout)
+
     def test_constructed_path_is_not_counted(self):
         # A documented limit, pinned so that changing it is deliberate: the scan is literal, and a
         # path assembled from pieces is not found.

@@ -7,17 +7,20 @@ with the committed baseline (scripts/control_readers_baseline.json): a file may 
 file may join it. Ported from the workspace's sensor and ratchet (broomva/workspace,
 scripts/control_readers_count.py and scripts/check_control_readers.py; BRO-3200, BRO-4083).
 
-It answers one question per file: does every legacy reference have a matching new one?
+The unit is a file and an area: the first path component after the folder name (`asks` in
+`.control/asks/private`). It answers one question per file: does this file handle both names for
+every area it reads under the legacy name? It does not pair individual references.
 
-  unpaired  some legacy `<X>` has no new `<X>` in the same file: a reader that is not dual-keyed.
-  paired    every legacy `<X>` is matched. The file is not listed.
+  unpaired  some legacy area `<X>` has no new `<X>` in the same file: a reader that is not
+            dual-keyed.
+  paired    every legacy area is matched. The file is not listed.
 
 A reader switched to the path registry names neither and is not listed.
 
 Pairing is by SUFFIX, not by "the file mentions both names": in the workspace's review 24 of 25
 files that mentioned both were single-keyed, because the second name was the machine folder under
 the home directory, the loops folder or a launchd label. So:
-  - a slash path and a join of quoted segments both normalise to the suffix after the folder name;
+  - a slash path and a join of quoted segments both normalise to the area after the folder name;
   - machine-scope mentions of the new name (under ~, $HOME or BROOMVA_HOME) are ignored, as is the
     loops folder under it, which is not a renamed path;
   - a bare legacy name (the directory itself) pairs with a bare new name.
@@ -33,6 +36,10 @@ the added file as a rename of the removed one (`git diff --name-status -M REF...
 `--base-ref`, or when REF has no baseline yet, that comparison is skipped and a note says so.
 
 What this check does not do. It is a ratchet against drift, not a defence against evasion:
+  - It does not pair individual references, only areas within a file. A file that names
+    `.broomva/asks/unrelated` may add `.control/asks/private` and is not listed, because both are
+    in the `asks` area. This is the unit of the workspace's sensor, kept so that counts compare
+    across the repos that run this ratchet. Review covers the paths inside an area.
   - It finds literal references only. A path assembled from pieces, such as
     `format!("{}{}", ".", "control/asks")` or a chain of `.join` calls on separate segments, is
     not found, and a textual scan cannot be made to find every one. Review covers those.
@@ -223,6 +230,9 @@ def check(root: Path, base_ref: str | None = None) -> int:
             print(f"  {path}")
         print(f"Each file above names the legacy {LEGACY} folder without the matching {CURRENT} name.")
         print("Make it read both names, or read through the path registry. Do not add it to the baseline.")
+        print("The unit is a file and an area (the first path component after the folder name): the check")
+        print("asks whether the file handles both names for each area, and does not pair individual paths.")
+        print(f"A file that names {CURRENT}/asks/unrelated may add {LEGACY}/asks/private and is not listed.")
         print(f"The check finds literal {LEGACY} references in code files, comments included: a comment")
         print("that names only the legacy folder counts, so mention both names or reword it. It does not")
         print("find a path assembled from pieces; review covers those.")

@@ -701,6 +701,12 @@ check prints a note.
 What it catches and what it does not. It finds literal `.control` references in code files. It is a
 ratchet against drift, not a defence against someone evading it:
 
+- The unit is a file and an area, the first path component after the folder name (`asks` in
+  `.control/asks/private`). The check asks whether a file handles both names for each area it reads,
+  and does not pair individual references: a file that names `.broomva/asks/unrelated` may add
+  `.control/asks/private` and is not listed. This is the unit of the workspace's sensor
+  (`scripts/control_readers_count.py`), kept so that counts compare across the repos that run this
+  ratchet. Review covers the paths inside an area.
 - A path assembled from pieces, such as `format!("{}{}", ".", "control/asks")` or a chain of
   `.join` calls on separate segments, is not found. A textual scan cannot be made complete, and the
   check does not try to parse Rust. Review covers constructed paths.
