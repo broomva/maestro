@@ -681,5 +681,51 @@ python3 scripts/parity-delegation.py --workspace ~/broomva   # the delegation an
 
 Tests run against `fixtures/machine/`, a miniature machine layout, so they never touch real ledgers.
 
+### The legacy folder ratchet
+
+The contract, in two sentences. The ratchet lists every code file that mentions the legacy folder
+name `.control` at all; a pull request may not add a file to that list. New code spells neither
+folder name and resolves paths through the generated path reader; existing mentions are
+grandfathered in `scripts/control_readers_baseline.json`, and the list only shrinks.
+
+`scripts/check_control_readers.py` reads the tracked code files (Rust, scripts, workflows, TOML)
+and lists those with a mention: `.control` where the character before the dot is not a letter,
+digit, `_`, `)` or `]` (so `self.control` is not a mention) and the character after is `/`, a
+quote, a backtick or the end of the line. That is one pattern, `MENTION`, used for every file. Nothing
+is paired: a file that also names `.broomva` is listed all the same. The count is of mentioning
+files; it is not the workspace sensor's "unpaired" count, and the two do not compare. A file under a
+directory named exactly `docs`, `research`, `archive`, `node_modules`, `.control` or `.broomva` is
+skipped (whole path components: `crates/mydocs/x.rs` is code). It runs first in `scripts/ci.sh` and
+in the `control-readers` workflow, on every pull request and on pushes to main, with
+`scripts/test_control_readers_ratchet.py`, which proves on a fixture repository that it fails.
+
+On a pull request the check is given `--base-ref origin/<base>` and also compares the PR's baseline
+with the base branch's. A path the base's baseline does not list fails, so a PR cannot add a file
+and regenerate the baseline to match. The exception is a rename: the new path passes when the same
+PR removes the old path from the baseline and `git diff -M` reports the file as renamed. On a push
+to main or in a local run that comparison is skipped and the check prints a note; it is also skipped,
+with a note, when the base branch has no baseline file yet (the change that introduces it), and the
+failure output says so.
+
+What it does not catch. It is a ratchet against drift, not a defence against someone evading it:
+
+- A mention assembled from pieces, such as `format!("{}{}", ".", "control/asks")`, is not found.
+  Review covers constructed paths.
+- A comment counts. A code file whose comment names the legacy folder is listed. Reword it.
+
+```bash
+python3 scripts/check_control_readers.py                    # exit 1 and the new files, if any
+python3 scripts/check_control_readers.py --base-ref origin/main   # also: the baseline did not grow
+python3 scripts/test_control_readers_ratchet.py             # the ratchet's own test
+```
+
+To resolve a failure, do not spell the folder name: resolve the path through the generated path
+reader, `maestro_store::broomva_paths` (`crates/store/src/broomva_paths.rs`), which reads
+`.broomva` or the legacy folder as the tree has it. It is generated in bstack by
+`scripts/gen_paths.py` and vendored here byte for byte by `scripts/vendor-paths.sh`; it is the one
+file meant to keep naming both folders. Do not add the file to the baseline. When a file leaves the
+list the check passes and prints the lines to delete from the baseline. A change that adds a line
+to it fails on a pull request, unless the line is a renamed file's new path.
+
 Design system: `DESIGN.md` and `design-system/broomva/` are the Broomva foundation profile. Work-state
 labels in `maestro-core::work::WorkState` are the canonical agentic-work vocabulary, and they are tested.

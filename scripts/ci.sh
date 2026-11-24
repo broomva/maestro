@@ -7,6 +7,16 @@ cd "$(dirname "$0")/.."
 # hook's repository.
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 step() { echo "== $*"; "$@"; }
+# The legacy folder ratchet (BRO-4083): seconds of Python and git, so it runs first.
+step python3 scripts/test_control_readers_ratchet.py
+# On a pull request GitHub sets GITHUB_BASE_REF, and the baseline is also compared with the base
+# branch's, so a PR cannot grow it (the job checks out full history so origin/<base> exists).
+# Elsewhere (a push to main, a local run) that comparison is skipped and the check says so.
+if [ -n "${GITHUB_BASE_REF:-}" ]; then
+  step python3 scripts/check_control_readers.py --base-ref "origin/$GITHUB_BASE_REF"
+else
+  step python3 scripts/check_control_readers.py
+fi
 step cargo fmt --all --check
 step cargo clippy --workspace --all-targets --locked -- -D warnings
 step cargo test --workspace --locked

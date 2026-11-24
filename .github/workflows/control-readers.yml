@@ -1,0 +1,39 @@
+# The legacy folder ratchet (BRO-4083): the list of code files that mention a repo's legacy state
+# folder at all may not gain a file (unified-layout ADR). This job is
+# the fast signal, a few seconds of Python and git. The required `ci` check runs the same two
+# commands from scripts/ci.sh, so the ratchet binds a merge even though this job is not required.
+name: control-readers
+on:
+  pull_request:
+  push:
+    branches: [main]
+concurrency:
+  group: control-readers-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  ratchet:
+    name: control reader ratchet
+    # Self-hosted labels (BRO-3227) never run a fork's pull request: this repository is public.
+    runs-on: ${{ (vars.CI_RUNNER_LABELS && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON(vars.CI_RUNNER_LABELS) || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      # The job runs the PR's scripts: keep the token out of .git/config.
+      # Full history, so the PR's base branch (origin/<base>) and the merge base exist for the
+      # baseline comparison.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # The runner's own python3 and git: both scripts use the standard library only.
+      - name: The ratchet bites (fixture test)
+        run: python3 scripts/test_control_readers_ratchet.py
+      # On a pull request the baseline is also compared with the base branch's: it may not grow.
+      - name: No new reader since the baseline
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            python3 scripts/check_control_readers.py --base-ref "origin/$GITHUB_BASE_REF"
+          else
+            python3 scripts/check_control_readers.py
+          fi
