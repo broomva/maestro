@@ -712,6 +712,15 @@ ratchet against drift, not a defence against someone evading it:
   check does not try to parse Rust. Review covers constructed paths.
 - A comment counts. A code file whose comment names only the legacy folder is listed as a reader,
   as in the workspace's checker. Mention both names in the comment, or reword it.
+- The file filter is deliberately stricter than the workspace sensor's. A file is skipped only when
+  one of its directories is named exactly `docs`, `research`, `archive`, `node_modules`, `.control`
+  or `.broomva`; `crates/mydocs/x.rs`, `archived/x.rs` and `my.control/x.py` are code and are
+  counted. The sensor tests those names as substrings of the path, which skips such files and lets
+  a plain unpaired reference in them pass. So this repo's count can be higher than the sensor's for
+  the same tree. Folder references and the home directory are matched as whole names in the same
+  way: `my.control/asks` is not the legacy folder, and `$REPO_HOME/.broomva` is not the home one.
+- The base comparison is skipped, with a note, when the base branch has no baseline file yet: the
+  change that introduces the baseline cannot be compared with one. The failure output says so.
 
 ```bash
 python3 scripts/check_control_readers.py                    # exit 1 and the new files, if any

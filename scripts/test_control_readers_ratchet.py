@@ -78,6 +78,8 @@ class RatchetTest(unittest.TestCase):
         self.assertIn("  crates/mcp/src/new.rs\n", result.stdout)
         self.assertNotIn("  crates/store/src/old.rs\n", result.stdout)
         self.assertIn("Unpaired readers: 2; baseline: 1", result.stdout)
+        # The hint states when the base comparison is skipped.
+        self.assertIn("base has no\nbaseline file yet", result.stdout)
 
     def test_added_script_reader_fails_and_names_file(self):
         self.write("scripts/new.sh", f'cat "$ROOT/{OLD}/policy.yaml"\n')
@@ -130,6 +132,55 @@ class RatchetTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Unpaired readers: 1; baseline: 1", result.stdout)
 
+    def test_directory_ending_in_a_skipped_name_is_code(self):
+        # The round-4 reproduction: the skipped directory names are whole path components, not
+        # substrings, so `mydocs/` is an ordinary code directory.
+        for path in ("scripts/mydocs/probe.py", "crates/mydocs/src/probe.rs"):
+            with self.subTest(path=path):
+                self.write(path, f'p = "{OLD}/asks"\n')
+                self.stage()
+                result = self.check()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"  {path}\n", result.stdout)
+                (self.root / path).unlink()
+                self.stage()
+
+    def test_skipped_directories_are_whole_components(self):
+        skipped = ("docs/x.rs", "crates/a/docs/x.rs", "a/research/x.py", "node_modules/x.js",
+                   f"{OLD}/x.py", f"{NEW}/x.py", "a/archive/x.rs")
+        counted = ("scripts/research_notes/x.py", "archived/x.rs", "my.control/x.py",
+                   "crates/mydocs/src/x.rs", "docsx/x.py")
+        for path in skipped + counted:
+            self.write(path, f'p = "{OLD}/asks"\n')
+        self.stage()
+        listed = json.loads(self.check("--print-baseline").stdout)["readers"]
+        for path in skipped:
+            self.assertNotIn(path, listed)
+        for path in counted:
+            self.assertIn(path, listed)
+
+    def test_folder_reference_is_a_whole_name(self):
+        # `my.broomva/asks` is not the new folder, so it does not pair the legacy reference; and
+        # `my.control/asks` is not the legacy folder, so alone it is not a reader.
+        self.write("crates/mcp/src/a.rs", f'let a = "{OLD}/asks"; let b = "my{NEW}/asks";\n')
+        self.write("crates/mcp/src/b.rs", f'let a = "my{OLD}/asks";\n')
+        self.stage()
+        listed = json.loads(self.check("--print-baseline").stdout)["readers"]
+        self.assertIn("crates/mcp/src/a.rs", listed)
+        self.assertNotIn("crates/mcp/src/b.rs", listed)
+
+    def test_machine_scope_is_home_by_whole_name(self):
+        # HOME and BROOMVA_HOME name the home directory; REPO_HOME does not, so its new-name
+        # reference pairs the legacy one.
+        self.write("crates/mcp/src/a.rs", f'let a = "{OLD}/asks"; let b = "$REPO_HOME/{NEW}/asks";\n')
+        self.write("crates/mcp/src/b.rs", f'let a = "{OLD}/asks"; let b = "$BROOMVA_HOME/{NEW}/asks";\n')
+        self.write("crates/mcp/src/c.rs", f'let a = "{OLD}/asks"; let b = "$HOME/{NEW}/asks";\n')
+        self.stage()
+        listed = json.loads(self.check("--print-baseline").stdout)["readers"]
+        self.assertNotIn("crates/mcp/src/a.rs", listed)
+        self.assertIn("crates/mcp/src/b.rs", listed)
+        self.assertIn("crates/mcp/src/c.rs", listed)
+
     def test_baseline_count_must_match_its_list(self):
         (self.root / "scripts/control_readers_baseline.json").write_text(
             json.dumps({"count": 5, "readers": ["crates/store/src/old.rs"]})
@@ -169,6 +220,7 @@ class RatchetTest(unittest.TestCase):
         result = self.check("--base-ref", "base")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("Paths added to the baseline since base:\n  actual.py\n", result.stdout)
+        self.assertIn("skipped only when the base has no baseline file yet", result.stdout)
 
     def test_removed_baseline_entry_passes_against_base(self):
         self.base()

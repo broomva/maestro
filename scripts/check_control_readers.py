@@ -26,7 +26,11 @@ the home directory, the loops folder or a launchd label. So:
   - a bare legacy name (the directory itself) pairs with a bare new name.
 
 Only code is counted (by extension), from the tracked files of the checkout. Prose, snapshots,
-event logs, JSON and YAML fixtures and ledgers are not readers.
+event logs, JSON and YAML fixtures and ledgers are not readers. A file under a directory named
+exactly docs, research, archive, node_modules or either folder name is skipped; the names are
+whole path components, so `crates/mydocs/x.rs` and `archived/x.rs` are counted. The workspace
+sensor matches those names as substrings and skips such files, so this count can be higher than
+the sensor's for the same tree. Folder references are whole names too: `my.control/x` is not one.
 
 The baseline can only shrink. Given `--base-ref REF` (CI passes the pull request's base branch),
 the check also reads the baseline at REF (`git show REF:scripts/control_readers_baseline.json`)
@@ -73,17 +77,27 @@ CURRENT = ".broomva"
 CODE_EXT = {".py", ".sh", ".bash", ".zsh", ".ts", ".tsx", ".js", ".mjs", ".cjs",
             ".rs", ".go", ".yml", ".toml", ".template"}
 CODE_NAMES = {"Makefile", "pre-commit", "pre-push", "commit-msg"}
-SKIP_PARTS = ("docs/", "research/", "archive/", LEGACY + "/", CURRENT + "/", "node_modules/")
+# A file is skipped when one of its DIRECTORY components equals one of these names. Whole
+# components, compared exactly: `crates/mydocs/x.rs`, `archived/x.rs` and `my.control/x.py` are
+# code. The workspace sensor tests these as substrings ("docs/" in path), which skips them, so this
+# repo's count can be higher than that sensor's for the same tree.
+SKIP_DIRS = frozenset({"docs", "research", "archive", LEGACY, CURRENT, "node_modules"})
 
-# Files that name the legacy folder at all: the cheap filter before the classifier.
+# Files that name the legacy folder at all: the cheap filter before the classifier. It may match
+# more than the patterns below (git grep -E has no lookbehind); the classifier decides.
 MENTIONS = r"\.control([/\"'`]|$)"
+# Not preceded by a name character: `my.control/x` and `self.control/2` are not the folder.
+START = r"(?<![A-Za-z0-9_\-])"
 # The folder name followed by `/suffix`, or a quoted folder name followed by further quoted
 # segments (a join of segments), or a bare final segment.
-SLASH = re.compile(r"\.(control|broomva)/([A-Za-z0-9_.\-]+)")
+SLASH = re.compile(START + r"\.(control|broomva)/([A-Za-z0-9_.\-]+)")
 JOINED = re.compile(r"""["'`]\.(control|broomva)["'`]\s*,\s*["'`]([A-Za-z0-9_.\-]+)["'`]""")
 BARE = re.compile(r"""[/"'`]\.(control|broomva)(?=["'`]|$|\s)""", re.M)
-# Machine scope: these name the folder under the home directory, never a repo root.
-MACHINE = re.compile(r"""(~|HOME\}?|HOME["']?\s*[,)]|home\(\)|homedir\(\))\s*/?\s*\.broomva""")
+# Machine scope: these name the folder under the home directory, never a repo root. HOME and
+# BROOMVA_HOME are whole names: `REPO_HOME/.broomva` and `my_home()` are not the home directory.
+_HOME = r"(?<![A-Za-z0-9_])(?:BROOMVA_)?HOME"
+MACHINE = re.compile(r"(~|" + _HOME + r"\}?|" + _HOME + r"""["']?\s*[,)]|(?<![A-Za-z0-9_])home\(\)"""
+                     r"|(?<![A-Za-z0-9_])homedir\(\))\s*/?\s*\.broomva")
 NOT_RENAMED = {"loops"}
 
 
@@ -118,9 +132,9 @@ def refs(text: str) -> tuple[set[str], set[str]]:
 
 
 def is_code(path: str) -> bool:
-    if any(part in path for part in SKIP_PARTS) or path.startswith((LEGACY, CURRENT)):
+    *dirs, name = path.split("/")
+    if any(part in SKIP_DIRS for part in dirs):
         return False
-    name = path.rsplit("/", 1)[-1]
     return name in CODE_NAMES or Path(name).suffix in CODE_EXT
 
 
@@ -206,6 +220,7 @@ def compare_with_base(root: Path, listed: set[str], base_ref: str) -> int:
         for path in refused:
             print(f"  {path}")
         print("The baseline only shrinks. Make each file read both names instead of listing it.")
+        print("(This comparison is skipped only when the base has no baseline file yet.)")
         return 1
     return 0
 
@@ -236,6 +251,8 @@ def check(root: Path, base_ref: str | None = None) -> int:
         print(f"The check finds literal {LEGACY} references in code files, comments included: a comment")
         print("that names only the legacy folder counts, so mention both names or reword it. It does not")
         print("find a path assembled from pieces; review covers those.")
+        print("With --base-ref, the baseline is also compared with the base's, except when the base has no")
+        print("baseline file yet (the change that introduces it): that comparison is skipped with a note.")
         return 1
     if count < limit:
         print(f"Reader count fell to {count}; tighten the baseline. Remove:")
@@ -257,6 +274,8 @@ def controls() -> tuple[tuple[str, str], ...]:
         ('ASKS = "@C/asks"; DEFAULT = HOME + "/@B"', "unpaired"),
         ('read("@C/asks"); read("@B/initiatives")', "unpaired"),
         ('let asks = ws.join("@C/asks");', "unpaired"),
+        ('read("@C/asks"); q = "my@B/asks"', "unpaired"),
+        ('read("@C/asks"); q = "$REPO_HOME/@B/asks"', "paired"),
     )
     return tuple((text.replace("@C", LEGACY).replace("@B", CURRENT), want) for text, want in rows)
 
@@ -270,13 +289,15 @@ def selftest() -> int:
         if got != want:
             print(f"[FAIL] {text!r}: {got}, wanted {want}")
             bad += 1
-    for path, want in (("crates/store/src/lib.rs", True), ("scripts/ci.sh", True),
-                       ("docs/adrs/layout.rs", False), ("fixtures/machine/asks.yaml", False),
-                       ("README.md", False)):
+    paths = (("crates/store/src/lib.rs", True), ("scripts/ci.sh", True),
+             ("docs/adrs/layout.rs", False), ("fixtures/machine/asks.yaml", False),
+             ("README.md", False), ("crates/mydocs/src/probe.rs", True),
+             ("archived/x.rs", True), ("a/research/x.py", False))
+    for path, want in paths:
         if is_code(path) != want:
             print(f"[FAIL] is_code({path!r}) is {not want}, wanted {want}")
             bad += 1
-    total = len(rows) + 5
+    total = len(rows) + len(paths)
     print(f"selftest: {total - bad}/{total}")
     return 1 if bad else 0
 
