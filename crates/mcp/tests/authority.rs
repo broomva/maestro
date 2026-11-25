@@ -196,7 +196,7 @@ fn a_read_tool_writes_nothing() {
     let before = tree(tmp.path());
     for spec in TOOLS.iter().filter(|t| t.authority == Authority::Read) {
         let args = match spec.name {
-            "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
+            "maestro_ask_get" | "maestro_wait_for_decision" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
             "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
             "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
             "maestro_flow_next" | "maestro_flow_status" => json!({ "instance": "fi_none" }),
