@@ -214,7 +214,7 @@ mutate $mcp 'if task.task.status == rmcp::model::TaskStatus::InputRequired && !S
 mutate $mcp 'store.report_retry(&owner, &key, report.section)' 'Ok(None)'
 mutate crates/mcp/src/tasks.rs 'serde_json::to_vec(&result).map_err(internal)?.len() > MAX_RESULT' 'report.to_string().len() > MAX_RESULT'
 mutate crates/mcp/src/web.rs 'async fn fixture_download(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
-    if !admitted(&uri, &headers, &web.hosts) {' 'async fn fixture_download(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    if headers.contains_key(header::ORIGIN) || !admitted(&uri, &headers, &web.hosts) {' 'async fn fixture_download(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
     if false {'
 mutate $http 'if addr.ip().is_loopback() || is_tailnet(addr.ip()) {' 'if !addr.ip().is_unspecified() {'
 mutate $http 'a == 100 && (b & 0xc0) == 64' 'a == 100'

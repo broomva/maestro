@@ -88,7 +88,7 @@ pub fn router_with(server: MaestroServer, local: SocketAddr, owner: Result<crate
 }
 
 async fn fixture_download(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
-    if !admitted(&uri, &headers, &web.hosts) {
+    if headers.contains_key(header::ORIGIN) || !admitted(&uri, &headers, &web.hosts) {
         return refused();
     }
     crate::file_pilot::download().await.into_response()

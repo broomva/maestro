@@ -173,7 +173,8 @@ def verify(binary, root):
             conn = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=5)
             try:
                 conn.request("GET", target["path"], headers=headers)
-                assert conn.getresponse().status == 403
+                response = conn.getresponse()
+                assert response.status == 403, (headers, response.status)
             finally:
                 conn.close()
         assert content == (REPO / "fixtures/health/loop-health.json").read_bytes()
