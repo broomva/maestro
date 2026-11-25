@@ -571,8 +571,7 @@ impl DirectRegistry {
         self.lookup(id).ok().flatten()
     }
 
-    /// Session `id`, or why the registry file did not read (BRO-3846): a configured file that does
-    /// not read or parse fails identity closed, never falls back to the sessions held in memory.
+    /// A configured file is authoritative. Reads fail closed, and removing a row revokes it.
     fn lookup(&self, id: &str) -> Result<Option<DirectSession>, IdentityRefusal> {
         if !is_safe_id(id) {
             return Ok(None);

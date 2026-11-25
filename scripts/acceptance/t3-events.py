@@ -4,9 +4,12 @@
 import argparse
 from datetime import datetime, timezone
 import http.client
+from io import BytesIO
 import json
+import os
 from pathlib import Path
 import sqlite3
+import stat
 import statistics
 import tempfile
 from urllib.parse import urlsplit
@@ -16,6 +19,28 @@ EXTENSION = "io.modelcontextprotocol/events"
 NAME = "thread.needs_input"
 VERSION = "2026-07-28"
 
+
+
+def decode_sse(stream, limit):
+    fields = []
+    remaining = limit
+    while remaining > 0:
+        line = stream.readline(remaining + 1)
+        remaining -= len(line)
+        if not line:
+            break
+        if remaining < 0:
+            raise ValueError("event stream reply exceeded the pilot limit")
+        line = line.rstrip(b"\r\n")
+        if line.startswith(b"data:"):
+            value = line[5:]
+            fields.append(value[1:] if value.startswith(b" ") else value)
+        elif not line and fields:
+            reply = json.loads(b"\n".join(fields))
+            if reply.get("id") == 1:
+                return reply
+            fields = []
+    raise ValueError("no complete RPC reply in the event stream")
 
 def client(endpoint, token):
     url = urlsplit(endpoint)
@@ -53,15 +78,15 @@ def client(endpoint, token):
             response = conn.getresponse()
             if response.status != 200:
                 raise ValueError(f"{method} returned HTTP {response.status}")
-            body = response.read(2_000_001)
+            if response.headers.get_content_type() == "text/event-stream":
+                decoded = decode_sse(response, 2_000_000)
+            else:
+                body = response.read(2_000_001)
+                if len(body) > 2_000_000:
+                    raise ValueError(f"{method} response exceeded the pilot limit")
+                decoded = json.loads(body)
         finally:
             conn.close()
-        if len(body) > 2_000_000:
-            raise ValueError(f"{method} response exceeded the pilot limit")
-        # A JSON or single-reply SSE response is sufficient for the poll transport.
-        if body.startswith(b"event:") or body.startswith(b"data:"):
-            body = next((line[6:] for line in body.splitlines() if line.startswith(b"data: ")), b"")
-        decoded = json.loads(body)
         if "result" not in decoded:
             raise ValueError(f"{method} returned RPC error {decoded.get('error', {}).get('code')}")
         return decoded["result"]
@@ -81,7 +106,13 @@ def read_thread(request, thread):
 
 def open_receipts(path):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.touch(mode=0o600, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode) or mode & 0o077:
+            raise ValueError("the Events receipt database must be a private regular file")
+    finally:
+        os.close(fd)
     db = sqlite3.connect(path)
     db.executescript("""
         CREATE TABLE IF NOT EXISTS subscription (
@@ -124,6 +155,8 @@ def poll_once(db, request, endpoint, thread, clock):
 
 
 def fixture():
+    frames = b': heartbeat\r\n\r\ndata: {"method":"progress"}\r\n\r\ndata:{"id":1,\r\ndata: "result":{}}\r\n\r\n'
+    assert decode_sse(BytesIO(frames), len(frames)) == {"id": 1, "result": {}}
     event_reads = []
     scan_delays = []
     current = {"threadId": "fixture", "pendingRequestCount": 1}
@@ -137,6 +170,15 @@ def fixture():
 
     with tempfile.TemporaryDirectory() as root:
         path = Path(root) / "receipts.sqlite"
+        path.touch()
+        path.chmod(0o644)
+        try:
+            open_receipts(path)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("the pilot opened a shared receipt file")
+        path.chmod(0o600)
         db = open_receipts(path)
         run = lambda now: poll_once(db, request, "fixture", "fixture", lambda: datetime.fromtimestamp(now, timezone.utc))
         assert run(0)["threadReads"] == 1

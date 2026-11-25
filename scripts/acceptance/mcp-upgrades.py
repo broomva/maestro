@@ -169,6 +169,13 @@ def verify(binary, root):
             assert response.status == 200 and len(content) == target["size"]
         finally:
             conn.close()
+        for headers in ({"Host": "untrusted.invalid"}, {"Origin": "https://untrusted.invalid"}):
+            conn = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=5)
+            try:
+                conn.request("GET", target["path"], headers=headers)
+                assert conn.getresponse().status == 403
+            finally:
+                conn.close()
         assert content == (REPO / "fixtures/health/loop-health.json").read_bytes()
         assert base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode() == target["digest"]["value"]
         print(f"Files: {len(content)} redacted fixture bytes verified by SHA-256")

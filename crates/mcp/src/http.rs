@@ -140,12 +140,8 @@ pub async fn serve_server(
         crate::tasks::TaskStore::run(server.clone(), worker);
     }
     let mcp = service(server.clone(), local, cancel.child_token());
-    let files = server.file_pilot;
     // The owner pages share the listener and its bind rule.
-    let mut router = crate::web::router(server, local).nest_service(PATH, mcp);
-    if files {
-        router = router.route(crate::file_pilot::PATH, axum::routing::get(crate::file_pilot::download));
-    }
+    let router = crate::web::router(server, local).nest_service(PATH, mcp);
     let graceful = axum::serve(listener, router).with_graceful_shutdown(cancel.clone().cancelled_owned());
     tokio::select! {
         done = graceful.into_future() => done,

@@ -206,9 +206,16 @@ mutate crates/mcp/src/tasks.rs '#[serde(deny_unknown_fields)]
         struct Response' 'struct Response'
 mutate crates/mcp/src/tasks.rs "AND state='running' AND attempt=?6 AND lease_until>?2" "AND state='running' AND ?6 IS NOT NULL AND lease_until>?2"
 mutate crates/mcp/src/tasks.rs 'SELECT {COLUMNS} FROM task WHERE id=?1 AND owner=?2 AND workspace=?3' 'SELECT {COLUMNS} FROM task WHERE id=?1 AND ?2 IS NOT NULL AND workspace=?3'
+mutate crates/hosts/src/lib.rs 'return Ok(rows.into_iter().find(|s| s.id == id));' 'let mut cache = self.sessions.lock().unwrap();
+            cache.extend(rows.into_iter().map(|s| (s.id.clone(), s)));
+            return Ok(cache.get(id).cloned());'
+mutate crates/mcp/src/tasks.rs 'FROM task WHERE owner=?2 AND workspace=?3' 'FROM task WHERE owner=?2 AND ?3 IS NOT NULL'
 mutate $mcp 'if task.task.status == rmcp::model::TaskStatus::InputRequired && !Self::client_accepts_url(&context) {' 'if false {'
 mutate $mcp 'store.report_retry(&owner, &key, report.section)' 'Ok(None)'
 mutate crates/mcp/src/tasks.rs 'serde_json::to_vec(&result).map_err(internal)?.len() > MAX_RESULT' 'report.to_string().len() > MAX_RESULT'
+mutate crates/mcp/src/web.rs 'async fn fixture_download(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    if !admitted(&uri, &headers, &web.hosts) {' 'async fn fixture_download(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    if false {'
 mutate $http 'if addr.ip().is_loopback() || is_tailnet(addr.ip()) {' 'if !addr.ip().is_unspecified() {'
 mutate $http 'a == 100 && (b & 0xc0) == 64' 'a == 100'
 mutate $http "v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]" "v6.segments()[..2] == [0xfd7a, 0x115c]"

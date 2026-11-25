@@ -375,8 +375,8 @@ impl TaskStore {
             let (active, rows, reserved) = tx.query_row(
                 &format!("SELECT COUNT(CASE WHEN {ACTIVE} THEN 1 END), COUNT(*),
                     COALESCE(SUM(CASE WHEN {ACTIVE} THEN ?1 ELSE COALESCE(length(CAST(body AS BLOB)),0) END),0)
-                 FROM task WHERE owner=?2"),
-                params![MAX_RESULT as i64, owner],
+                 FROM task WHERE owner=?2 AND workspace=?3"),
+                params![MAX_RESULT as i64, owner, self.workspace],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             ).map_err(internal)?;
             if active >= MAX_ACTIVE || rows >= MAX_ROWS || reserved + MAX_RESULT as i64 > MAX_RETAINED_BYTES {
@@ -722,6 +722,8 @@ mod tests {
             store.report("a", &key(now, nonce), ReportSection::Census).unwrap();
         }
         assert!(store.report("a", &key(now, 7), ReportSection::Census).is_err());
+        let isolated = TaskStore::open(&path, &other).unwrap();
+        assert!(isolated.report("a", &key(now, 7), ReportSection::Census).is_ok());
     }
 
     #[test]
