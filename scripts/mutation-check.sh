@@ -1838,9 +1838,9 @@ mutate crates/flow/src/kernel/asks.rs '        let cmd = maestro_store::tree::ls
 mutate crates/flow/src/kernel/asks.rs '                Found::Row(previous) if previous.row == row.row =>' '                Found::Row(previous) if false && previous.row == row.row =>'
 mutate crates/flow/src/kernel/asks.rs '                Found::Ambiguous => return Err("an ancestor has an ambiguous ask".into()),' '                Found::Ambiguous => {}'
 mutate crates/flow/src/kernel/asks.rs '    for _ in 0..10_000 {' '    for _ in 0..1 {'
-mutate crates/flow/src/kernel/asks.rs '        maestro_store::passkey::verify_answer_proof(&message, &rec.ledger, &row, &keys, &party).map_err(|e| {
-            Refusal::AnswerUnproven { ask_id: rec.ask_id.clone(), at: source.clone(), detail: clip(&e) }
-        })?;' '        let _ = maestro_store::passkey::verify_answer_proof(&message, &rec.ledger, &row, &keys, &party);'
+mutate crates/flow/src/kernel/asks.rs '        maestro_store::passkey::verify_answer_proof(&message, ledger, &row, &keys, &party).map_err(|e| {
+            Refusal::AnswerUnproven { ask_id: ask_id.to_string(), at: source.clone(), detail: clip(&e) }
+        })?;' '        let _ = maestro_store::passkey::verify_answer_proof(&message, ledger, &row, &keys, &party);'
 mutate crates/flow/src/kernel/asks.rs '    // A crash may leave an already-pushed amendment unlinked. Recover it from the remote tip
     // before invoking the writer again, so a completed supersede is never repeated.
     if rec.amends {' '    // A crash may leave an already-pushed amendment unlinked. Recover it from the remote tip
@@ -1916,7 +1916,7 @@ mutate $asks '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&r
         .map_err(unread)?' '    let sha = maestro_store::tree::remote_ref(answers_ls_remote(&remote), MAIN, REMOTE_TIMEOUT)
         .or_else(|_| Ok::<_, String>(Store::new(paths.clone(), TreeSource::GitRev("refs/remotes/origin/main".into())).tree.commit))
         .map_err(unread)?'
-mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), &rec.ledger, &rec.ask_id) {'
+mutate $asks '    match local.ask_ledger_verified(ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev("refs/heads/maestro/answers".into())), ledger, ask_id) {'
 mutate $asks '    if !maestro_store::tree::has_object(&paths.workspace, &sha, READ_TIMEOUT).map_err(unread)? {' '    if false {'
 mutate $asks 'Ok(Found::Row(row)) if row.state() == AskState::Answered => Some(label.to_string()),' 'Ok(Found::Row(_)) if false => Some(label.to_string()),'
 mutate $replay '                    Class::Human { .. } => return Ok(Err("wrong_class")),' ''
@@ -1938,8 +1938,8 @@ mutate $asks '    if found != rec.body_hash {
         return Err(Refusal::AnswerMismatch {'
 mutate $asks '        Err(e) => return Err(Refusal::AnswersUnread { at: source, detail: clip(&e) }.into()),' '        Err(_) => {}'
 mutate $asks '        Ok(Found::Ambiguous) => {
-            let at = format!("{source}:{}", rec.ledger);' '        Ok(Found::Ambiguous) if false => {
-            let at = format!("{source}:{}", rec.ledger);'
+            let at = format!("{source}:{ledger}");' '        Ok(Found::Ambiguous) if false => {
+            let at = format!("{source}:{ledger}");'
 mutate $asks 'if size > MAX_OUTPUTS {' 'if false {'
 mutate $asks '        Some(now) if now == *expect => {}' '        _ => {}'
 # The question is relayed toward a T3 owner's thread, and only once its ask is filed.
@@ -1966,7 +1966,7 @@ mutate $tree $'    check(&format, "commit", commit, &body)?;\n    let tree = Str
 mutate $tree $'        check(&format, "tree", &id, &body)?;\n        let last = i + 1 == parts.len();' $'        let last = i + 1 == parts.len();'
 mutate $tree '    check(&format, "blob", &id, &blob)?;' ''
 mutate $tree '    if hex != id {' '    if false {'
-mutate $asks '    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev(sha.clone())), &rec.ledger, &rec.ask_id) {'
+mutate $asks '    match local.ask_ledger_verified(ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, ask_id)) {' '    match find(&Store::new(paths.clone(), TreeSource::GitRev(sha.clone())), ledger, ask_id) {'
 mutate $tree '        _ => "/usr/bin/git",' '        _ => "git",'
 mutate $tree '        "macos" => "/Library/Developer/CommandLineTools/usr/bin/git",' '        "macos" => "/usr/bin/git",'
 mutate $tree '    let mut cmd = Command::new(git());
@@ -2839,7 +2839,7 @@ mutate $hp '            unread.push((at(&self.dir), "the Paseo registry is disco
 mutate $hp '                unread.push((at(&self.dir), format!("the agents folder does not read: {why}")));' ''
 mutate $hp '                    unread.push((at(&folder), format!("the agent folder does not read: {why}")));' ''
 mutate $hp '                    Read::Present(Err(why)) | Read::Unreadable(why) => unread.push((at(&path), why)),' '                    Read::Present(Err(_)) | Read::Unreadable(_) => {}'
-mutate $hlb '                Err(why) => unread.push((at, why)),' '                Err(_) => {}'
+mutate $hlb '                    unread.push((format!("direct registry {}", path.display()), why));' '                    let _ = why;'
 mutate $hlb '            unreadable(Surface::Paseo, failed);' ''
 mutate $hlb '            unreadable(Surface::Direct, failed);' ''
 # Joint round 7 (BRO-3846, Codex at 875c1af): one read rule (crate::read) for every registry probe
