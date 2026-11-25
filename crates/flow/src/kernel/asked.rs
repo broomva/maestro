@@ -1104,6 +1104,27 @@ fn branch_answer_fixture(case: &str, branch: &str) -> (Fx, InstanceId) {
 fn remote_branch_answer_needs_a_proof_for_its_row_and_owner() {
     for case in ["valid", "unsigned", "forged", "option", "note", "party", "unenrolled"] {
         let (mut f, fi) = branch_answer_fixture(case, "maestro/ledger");
+        let pinned = f.events(&fi).into_iter().find(|e| e["kind"] == "AskPinned").unwrap();
+        let body = &pinned["body"];
+        let before = f.events(&fi);
+        let observer = crate::kernel::asks::observe_answer(
+            &f.paths,
+            "ledger.yaml",
+            body["ask_id"].as_str().unwrap(),
+            body["body_hash"].as_str().unwrap(),
+        );
+        assert_eq!(f.events(&fi), before, "observing must not consume an answer or append a receipt");
+        if case == "valid" {
+            assert!(observer.unwrap().is_some());
+            assert_eq!(
+                crate::kernel::asks::observe_answer(&f.paths, "ledger.yaml", body["ask_id"].as_str().unwrap(), "stale")
+                    .unwrap_err()
+                    .code(),
+                "answer_mismatch"
+            );
+        } else {
+            assert_eq!(observer.unwrap_err().code(), "answer_unproven", "{case}");
+        }
         let result = f.ask(&fi, None);
         if case == "valid" {
             assert!(matches!(result, Ok(Asked::Answered { .. })), "{case}: {result:?}");

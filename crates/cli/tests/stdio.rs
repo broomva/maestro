@@ -93,6 +93,7 @@ fn mcp_handshake_lists_and_calls_tools() {
             "maestro_flow_start",
             "maestro_flow_status",
             "maestro_handback",
+            "maestro_health_report",
             "maestro_initiatives_list",
             "maestro_loops_get",
             "maestro_needs_list",
@@ -101,6 +102,7 @@ fn mcp_handshake_lists_and_calls_tools() {
             "maestro_ui_catalog",
             "maestro_ui_poll",
             "maestro_ui_render",
+            "maestro_wait_for_decision",
             "maestro_work_list",
             "maestro_work_queue",
         ],
@@ -336,4 +338,17 @@ fn a_100_mb_ticks_ledger_is_read_by_its_tail() {
     assert!(small.contains(receipts), "{small}");
     assert_eq!(big, small.replacen(receipts, "", 1));
     assert!(took < std::time::Duration::from_secs(1), "took {took:?}");
+}
+
+#[test]
+fn current_mcp_extensions_on_the_cli_listener() {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/acceptance/mcp-upgrades.py");
+    let output =
+        Command::new("python3").arg(script).args(["--binary", env!("CARGO_BIN_EXE_maestro")]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

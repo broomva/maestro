@@ -200,6 +200,15 @@ mutate $views 'if active && ticks.is_some_and(TickTail::whole) && names_receipts
 # HTTP (BRO-3264): where the daemon may listen, which requests it takes, and a store per request.
 http=crates/mcp/src/http.rs
 mcp=crates/mcp/src/lib.rs
+mutate $mcp 'Some(catalog) if context.protocol_version() == Some(rmcp::model::ProtocolVersion::V_2026_07_28) =>' 'Some(catalog) =>'
+mutate crates/mcp/src/skills.rs '.or_else(|| self.previous.as_ref()?.files.get(uri))' ''
+mutate crates/mcp/src/tasks.rs '#[serde(deny_unknown_fields)]
+        struct Response' 'struct Response'
+mutate crates/mcp/src/tasks.rs "AND state='running' AND attempt=?6 AND lease_until>?2" "AND state='running' AND ?6 IS NOT NULL AND lease_until>?2"
+mutate crates/mcp/src/tasks.rs 'SELECT {COLUMNS} FROM task WHERE id=?1 AND owner=?2 AND workspace=?3' 'SELECT {COLUMNS} FROM task WHERE id=?1 AND ?2 IS NOT NULL AND workspace=?3'
+mutate $mcp 'if task.task.status == rmcp::model::TaskStatus::InputRequired && !Self::client_accepts_url(&context) {' 'if false {'
+mutate $mcp 'store.report_retry(&owner, &key, report.section)' 'Ok(None)'
+mutate crates/mcp/src/tasks.rs 'serde_json::to_vec(&result).map_err(internal)?.len() > MAX_RESULT' 'report.to_string().len() > MAX_RESULT'
 mutate $http 'if addr.ip().is_loopback() || is_tailnet(addr.ip()) {' 'if !addr.ip().is_unspecified() {'
 mutate $http 'a == 100 && (b & 0xc0) == 64' 'a == 100'
 mutate $http "v6.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]" "v6.segments()[..2] == [0xfd7a, 0x115c]"

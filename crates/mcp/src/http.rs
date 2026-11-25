@@ -128,9 +128,24 @@ pub async fn serve_server(
 ) -> std::io::Result<()> {
     let server = server.shared();
     let local = listener.local_addr()?;
+    if (server.tasks.is_some() || server.file_pilot) && !local.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "MCP Tasks and Files pilots require a loopback listener",
+        ));
+    }
+    let worker = cancel.child_token();
+    let _stop_worker = worker.clone().drop_guard();
+    if server.tasks.is_some() {
+        crate::tasks::TaskStore::run(server.clone(), worker);
+    }
     let mcp = service(server.clone(), local, cancel.child_token());
-    // The web pages (BRO-3588) share the listener and its bind rule; `/mcp` is unchanged.
-    let router = crate::web::router(server, local).nest_service(PATH, mcp);
+    let files = server.file_pilot;
+    // The owner pages share the listener and its bind rule.
+    let mut router = crate::web::router(server, local).nest_service(PATH, mcp);
+    if files {
+        router = router.route(crate::file_pilot::PATH, axum::routing::get(crate::file_pilot::download));
+    }
     let graceful = axum::serve(listener, router).with_graceful_shutdown(cancel.clone().cancelled_owned());
     tokio::select! {
         done = graceful.into_future() => done,

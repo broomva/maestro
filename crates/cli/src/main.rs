@@ -42,6 +42,28 @@ struct Cli {
     command: Command,
 }
 
+#[derive(clap::Args)]
+struct SkillArgs {
+    /// Publish a local release directory of Agent Skills on MCP 2026-07-28.
+    #[arg(long)]
+    skills_dir: Option<PathBuf>,
+    /// Keep the preceding skill release readable by its existing URIs.
+    #[arg(long, requires = "skills_dir")]
+    previous_skills_dir: Option<PathBuf>,
+}
+
+impl SkillArgs {
+    fn server(&self, store: Store) -> Result<maestro_mcp::MaestroServer> {
+        let server = maestro_mcp::MaestroServer::new(store);
+        let Some(dir) = self.skills_dir.as_deref() else {
+            return Ok(server);
+        };
+        let catalog = maestro_mcp::skills::Catalog::load(dir, self.previous_skills_dir.as_deref())
+            .with_context(|| format!("loading MCP skills from {}", dir.display()))?;
+        Ok(server.with_skills(catalog))
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Counts across the control plane.
@@ -107,7 +129,10 @@ enum Command {
         max_needs: usize,
     },
     /// Serve the MCP server on stdio.
-    Mcp,
+    Mcp {
+        #[command(flatten)]
+        skills: SkillArgs,
+    },
     /// Serve the MCP server over Streamable HTTP (run once per machine, as `maestrod`).
     Serve {
         /// Streamable HTTP at /mcp (the only transport `serve` offers; stdio is `maestro mcp`).
@@ -116,6 +141,20 @@ enum Command {
         /// Listen here instead of 127.0.0.1:7171. Only a loopback or tailnet address is accepted.
         #[arg(long)]
         bind: Option<std::net::SocketAddr>,
+        /// Enable MCP Tasks with a private SQLite database on the loopback HTTP daemon.
+        #[arg(long, requires = "http")]
+        task_db: Option<PathBuf>,
+        /// Allow new URL Elicitation observers for filed asks on the owner HTTPS origin.
+        #[arg(long, requires = "task_db")]
+        task_decisions: bool,
+        /// Keep serving persisted task handles while new calls use synchronous results.
+        #[arg(long, requires = "task_db")]
+        drain_tasks: bool,
+        /// Offer one synthetic health fixture through the MCP Files download draft.
+        #[arg(long, requires = "http")]
+        fixture_file_transfer: bool,
+        #[command(flatten)]
+        skills: SkillArgs,
     },
     /// What each surface may do, and the standing invariants.
     Authority,
@@ -706,11 +745,24 @@ fn main() -> std::process::ExitCode {
 fn run(cli: &Cli) -> Result<()> {
     let store = store(cli)?;
     match &cli.command {
-        Command::Mcp => {
+        Command::Mcp { skills } => {
+            let server = skills.server(store)?;
             let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-            runtime.block_on(maestro_mcp::serve_stdio(store)).map_err(|e| anyhow::anyhow!("{e}"))?;
+            runtime
+                .block_on(async { maestro_mcp::serve_io_with(server, (tokio::io::stdin(), tokio::io::stdout())).await })
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        Command::Serve { http, bind } => serve(store, *http, *bind)?,
+        Command::Serve { http, bind, task_db, task_decisions, drain_tasks, fixture_file_transfer, skills } => {
+            let workspace = store.paths.workspace.clone();
+            let mut server = skills.server(store)?.with_file_pilot(*fixture_file_transfer);
+            if let Some(database) = task_db {
+                let tasks = maestro_mcp::tasks::TaskStore::open(database, &workspace)
+                    .map_err(|e| anyhow::anyhow!("opening MCP Task database: {e}"))?;
+                server = server.with_tasks(tasks).with_task_creation(*task_decisions, *drain_tasks);
+            }
+            serve(server, *http, *bind)?;
+        }
+
         Command::Context { .. } => println!("{}", context(cli, &store)?),
         Command::Authority => authority(cli.json),
         Command::Hosts => hosts(cli.json),
@@ -1076,7 +1128,7 @@ fn doctor(cli: &Cli, store: &Store, bstack: Option<&std::path::Path>) -> Result<
     Ok(())
 }
 
-fn serve(store: Store, http: bool, bind: Option<std::net::SocketAddr>) -> Result<()> {
+fn serve(server: maestro_mcp::MaestroServer, http: bool, bind: Option<std::net::SocketAddr>) -> Result<()> {
     use maestro_mcp::http::{self, Bind};
     if !http {
         bail!("`serve` needs --http (stdio is `maestro mcp`)");
@@ -1094,7 +1146,7 @@ fn serve(store: Store, http: bool, bind: Option<std::net::SocketAddr>) -> Result
             stop.cancel();
         });
         eprintln!("maestro: serving MCP on http://{local}{}", http::PATH);
-        http::serve(store, listener, cancel).await?;
+        http::serve_server(server, listener, cancel).await?;
         Ok(())
     })
 }

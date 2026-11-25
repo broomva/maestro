@@ -1251,15 +1251,18 @@ dependencies = [
  "maestro-view",
  "p256",
  "rmcp",
+ "rusqlite",
  "rustix",
  "schemars",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "shlex",
  "tempfile",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
