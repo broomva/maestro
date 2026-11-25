@@ -97,7 +97,7 @@ def verify(binary, root):
     identity = {"Authorization": "Bearer synthetic-local-fixture-credential",
                 "Maestro-Session": "direct:-/fixture", "Maestro-Cwd": str(workspace)}
     caps = {"extensions": {TASKS: {}}, "elicitation": {"url": {}}}
-    ledger = workspace / ".control/asks/demo-arc.yaml"
+    ledger, = workspace.rglob("demo-arc.yaml")
     before = ledger.read_bytes()
     handle = {"ledger": "demo-arc.yaml", "id": "merge-now"}
     scope = dict(skills_dir=REPO / "skills/mcp", task_db=root / "tasks.sqlite",
