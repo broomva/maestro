@@ -1,11 +1,11 @@
 //! Read-only machine-local fleet telemetry. Producer timestamps, never file mtimes, establish age.
 use crate::{Store, Tree, TreeSource};
 use maestro_core::{Section, SourceError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{Read, Seek, SeekFrom};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Census {
     pub host_load: Value,
     pub host_caps: Value,
@@ -26,7 +26,7 @@ pub struct Census {
     pub errors: Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Capacity {
     pub host: Value,
     pub lanes: Vec<Value>,
@@ -41,7 +41,7 @@ pub struct Capacity {
     pub errors: Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LoopHealth {
     pub loops: Value,
     #[serde(default)]

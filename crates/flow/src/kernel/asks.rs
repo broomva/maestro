@@ -817,18 +817,18 @@ fn landed_main(paths: &Paths) -> Result<String, KernelError> {
 
 /// The linked ask's answer, as main has it at the commit the remote names; failing that, whether
 /// one waits to land on Maestro's answers branch.
-fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
+fn read_answer(paths: &Paths, ledger: &str, ask_id: &str) -> Result<Answer, KernelError> {
     let sha = landed_main(paths)?;
     // The asks folder as the registry names it here; the ledger is read at `sha`, every object on
     // the way checked against its id, so nothing planted in the object store under the commit's,
     // a tree's or the ledger's id reads as genuine.
     let local = Store::new(paths.clone(), TreeSource::GitRev(sha.clone()));
     let source = format!("main@{sha}");
-    match local.ask_ledger_verified(&rec.ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
+    match local.ask_ledger_verified(ledger, &sha, READ_TIMEOUT).and_then(|l| rows(l, ask_id)) {
         Err(e) => return Err(Refusal::AnswersUnread { at: source, detail: clip(&e) }.into()),
         Ok(Found::Ambiguous) => {
-            let at = format!("{source}:{}", rec.ledger);
-            return Err(Refusal::AskAmbiguous { ledger: rec.ledger.clone(), ask_id: rec.ask_id.clone(), at }.into());
+            let at = format!("{source}:{ledger}");
+            return Err(Refusal::AskAmbiguous { ledger: ledger.to_string(), ask_id: ask_id.to_string(), at }.into());
         }
         Ok(Found::Row(row)) if row.state() == AskState::Answered => return Ok(Answer::Landed { row, source }),
         Ok(_) => {}
@@ -840,12 +840,12 @@ fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
         let cmd = maestro_store::tree::ls_remote_command(&remote, branch, ANSWERS_GIT_CONFIG);
         let Some(tip) = maestro_store::tree::remote_ref(cmd, branch, REMOTE_TIMEOUT).map_err(unread)? else { continue };
         let source = format!("{branch}@{tip}");
-        let row = match local.ask_ledger_verified(&rec.ledger, &tip, READ_TIMEOUT).and_then(|l| rows(l, &rec.ask_id)) {
+        let row = match local.ask_ledger_verified(ledger, &tip, READ_TIMEOUT).and_then(|l| rows(l, ask_id)) {
             Err(e) => return Err(unread(e).into()),
             Ok(Found::Ambiguous) => {
                 return Err(Refusal::AskAmbiguous {
-                    ledger: rec.ledger.clone(),
-                    ask_id: rec.ask_id.clone(),
+                    ledger: ledger.to_string(),
+                    ask_id: ask_id.to_string(),
                     at: source,
                 }
                 .into());
@@ -855,26 +855,26 @@ fn read_answer(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
         };
         let owner = proof_owner_dir();
         let (keys, party) = maestro_store::passkey::load_answer_verifier(&owner).map_err(unread)?;
-        let message = answer_change_message(&local, rec, &tip, &row).map_err(unread)?;
-        maestro_store::passkey::verify_answer_proof(&message, &rec.ledger, &row, &keys, &party).map_err(|e| {
-            Refusal::AnswerUnproven { ask_id: rec.ask_id.clone(), at: source.clone(), detail: clip(&e) }
+        let message = answer_change_message(&local, ledger, ask_id, &tip, &row).map_err(unread)?;
+        maestro_store::passkey::verify_answer_proof(&message, ledger, &row, &keys, &party).map_err(|e| {
+            Refusal::AnswerUnproven { ask_id: ask_id.to_string(), at: source.clone(), detail: clip(&e) }
         })?;
         return Ok(Answer::Landed { row, source });
     }
-    Ok(match waiting_to_land(paths, &rec.ledger, &rec.ask_id) {
+    Ok(match waiting_to_land(paths, ledger, ask_id) {
         Some(at) => Answer::Landing { at },
         None => Answer::Open,
     })
 }
 
 /// Read verified parent objects until reaching the commit that changed this exact row.
-fn answer_change_message(store: &Store, rec: &AskRec, tip: &str, row: &Ask) -> Result<String, String> {
+fn answer_change_message(store: &Store, ledger: &str, ask_id: &str, tip: &str, row: &Ask) -> Result<String, String> {
     let mut at = tip.to_string();
     for _ in 0..10_000 {
         let commit = maestro_store::tree::verified_commit(&store.paths.workspace, &at, READ_TIMEOUT)?;
         let mut same = None;
         for parent in &commit.parents {
-            let parent_row = rows(store.ask_ledger_verified(&rec.ledger, parent, READ_TIMEOUT)?, &rec.ask_id)?;
+            let parent_row = rows(store.ask_ledger_verified(ledger, parent, READ_TIMEOUT)?, ask_id)?;
             match parent_row {
                 Found::Ambiguous => return Err("an ancestor has an ambiguous ask".into()),
                 Found::Row(previous) if previous.row == row.row => {
@@ -1022,7 +1022,7 @@ pub fn landing(paths: &Paths, unmet: &mut [super::Reason]) {
 /// The linked ask's answer as [`read_answer`] reads it, the one answer source; an answer landed
 /// on main counts only for the body that was linked (`answer_mismatch` otherwise).
 pub(super) fn landed(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError> {
-    let answer = read_answer(paths, rec)?;
+    let answer = read_answer(paths, &rec.ledger, &rec.ask_id)?;
     let Answer::Landed { row, source } = &answer else { return Ok(answer) };
     let found = comparable_hash(&row.row);
     if found != rec.body_hash {
@@ -1035,6 +1035,30 @@ pub(super) fn landed(paths: &Paths, rec: &AskRec) -> Result<Answer, KernelError>
         .into());
     }
     Ok(answer)
+}
+
+/// Read the authoritative answer for an already-filed ask, bound to the body that was observed.
+/// This uses the flow's proof checks without appending a flow event or taking delivery ownership.
+pub fn observe_answer(
+    paths: &Paths,
+    ledger: &str,
+    ask_id: &str,
+    body_hash: &str,
+) -> Result<Option<String>, KernelError> {
+    let Answer::Landed { row, source } = read_answer(paths, ledger, ask_id)? else {
+        return Ok(None);
+    };
+    let found = comparable_hash(&row.row);
+    if found != body_hash {
+        return Err(Refusal::AnswerMismatch {
+            ask_id: ask_id.to_string(),
+            at: source,
+            linked: body_hash.to_string(),
+            found,
+        }
+        .into());
+    }
+    Ok(Some(source))
 }
 
 /// An answered row's answer fields that are set, as text (see the module docs).

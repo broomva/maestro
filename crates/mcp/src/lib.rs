@@ -32,11 +32,14 @@ use std::future::Future;
 use std::sync::Arc;
 
 pub mod answers;
+mod file_pilot;
 pub mod flow;
 pub mod http;
 pub mod owner_web;
 pub mod passkey;
+pub mod skills;
 pub mod stop;
+pub mod tasks;
 pub mod web;
 
 /// One tool: its name, what it may do, and its argument type.
@@ -221,6 +224,26 @@ pub const TOOLS: &[ToolSpec] = &[
         scope: "read",
         ui: Ui::None,
         schema: schema_of::<NoArgs>,
+    },
+    ToolSpec {
+        name: "maestro_health_report",
+        title: "Health report",
+        description: "Read the workspace health report or a single section. Verified HTTP clients that declare Tasks may supply a UUIDv7 retry_key to receive a durable task.",
+        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::None,
+        schema: schema_of::<tasks::ReportArgs>,
+    },
+    ToolSpec {
+        name: "maestro_wait_for_decision",
+        title: "Follow a decision",
+        description: "Inspect a filed ask or follow it with an interactive Task. URL consent opens Decisions, where the owner can authenticate and answer. Use an explicit interactive opt-in and UUIDv7 retry_key when your HTTP client supports Tasks and URL Elicitation.",
+        authority: Authority::Read,
+        request: None,
+        scope: "read",
+        ui: Ui::None,
+        schema: schema_of::<tasks::DecisionArgs>,
     },
     ToolSpec {
         name: "maestro_needs_list",
@@ -603,6 +626,14 @@ fn dispatch(
                 list.extend(live.needs);
             }
             Ok(json!(snap))
+        }
+        "maestro_wait_for_decision" => {
+            let decision = tasks::DecisionView::read(store, parse(args)?, false);
+            Ok(decision.fallback("inspect"))
+        }
+        "maestro_health_report" => {
+            let report: tasks::ReportArgs = parse(args)?;
+            report.section.read(store)
         }
         "maestro_needs_list" => {
             let a: NeedsArgs = parse(args)?;
@@ -1221,6 +1252,11 @@ pub struct MaestroServer {
     source: maestro_store::TreeSource,
     hosts: Arc<maestro_hosts::SurfaceRegistry>,
     ambient: Ambient,
+    skills: Option<Arc<skills::Catalog>>,
+    tasks: Option<Arc<tasks::TaskStore>>,
+    task_decisions: bool,
+    drain_tasks: bool,
+    file_pilot: bool,
 }
 
 impl MaestroServer {
@@ -1231,6 +1267,11 @@ impl MaestroServer {
             source: store.tree.source,
             hosts: Arc::new(maestro_hosts::SurfaceRegistry::from_env()),
             ambient: Ambient::Caller,
+            skills: None,
+            tasks: None,
+            task_decisions: false,
+            drain_tasks: false,
+            file_pilot: false,
         }
     }
 
@@ -1243,6 +1284,82 @@ impl MaestroServer {
     pub fn with_hosts(mut self, hosts: maestro_hosts::SurfaceRegistry) -> Self {
         self.hosts = Arc::new(hosts);
         self
+    }
+
+    pub fn with_skills(mut self, catalog: skills::Catalog) -> Self {
+        self.skills = Some(Arc::new(catalog));
+        self
+    }
+
+    pub fn with_tasks(mut self, store: tasks::TaskStore) -> Self {
+        self.tasks = Some(Arc::new(store));
+        self
+    }
+
+    pub fn with_task_creation(mut self, decisions: bool, drain: bool) -> Self {
+        self.task_decisions = decisions;
+        self.drain_tasks = drain;
+        self
+    }
+
+    fn client_accepts_url(context: &RequestContext<RoleServer>) -> bool {
+        context.meta.client_capabilities().and_then(|caps| caps.elicitation).is_some_and(|cap| cap.url.is_some())
+    }
+
+    fn decision_call(
+        &self,
+        args: tasks::DecisionArgs,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let mut reason = "inspect";
+        let mut request = None;
+        if args.interactive {
+            reason = "interactive_tasks_unavailable";
+            if let Some(store) = self.negotiated_tasks(context)
+                && Self::client_accepts_url(context)
+                && let Ok(owner) = tasks::caller(self, context)
+                && let Some(key) = args.retry_key.as_deref()
+            {
+                if let Some(task) = store.decision_retry(&owner, key, &args.ledger, &args.id)? {
+                    return Ok(task_created(task));
+                }
+                if self.task_decisions && !self.drain_tasks {
+                    request = Some((store, owner, key.to_string()));
+                    reason = "ask_or_https_origin_unavailable";
+                }
+            }
+        }
+        let mut view = tasks::DecisionView::read(&self.store(), args, request.is_some());
+        if let Some((store, owner, key)) = request
+            && let Some(decision) = view.decision.take()
+        {
+            return Ok(task_created(store.decision(&owner, &key, decision)?));
+        }
+        Ok(CallToolResult::structured(view.fallback(reason)).into())
+    }
+
+    pub fn with_file_pilot(mut self, enabled: bool) -> Self {
+        self.file_pilot = enabled;
+        self
+    }
+
+    fn negotiated_download(&self, context: &RequestContext<RoleServer>) -> bool {
+        self.file_pilot
+            && context.protocol_version() == Some(rmcp::model::ProtocolVersion::V_2026_07_28)
+            && context
+                .meta
+                .client_capabilities()
+                .and_then(|caps| caps.extensions)
+                .and_then(|mut ext| ext.remove(file_pilot::EXTENSION))
+                .and_then(|mut settings| settings.remove("download"))
+                .is_some_and(|download| download.is_object())
+    }
+
+    fn negotiated_tasks(&self, context: &RequestContext<RoleServer>) -> Option<&tasks::TaskStore> {
+        self.tasks.as_deref().filter(|_| {
+            context.protocol_version() == Some(rmcp::model::ProtocolVersion::V_2026_07_28)
+                && context.meta.client_capabilities().is_some_and(|cap| cap.supports_tasks())
+        })
     }
 
     pub fn hosts(&self) -> &maestro_hosts::SurfaceRegistry {
@@ -1296,6 +1413,14 @@ impl MaestroServer {
     }
 }
 
+fn task_created(mut detailed: rmcp::model::DetailedTask) -> CallToolResponse {
+    // Input requests are delivered only by tasks/get, never in the creation response.
+    if detailed.task.status == rmcp::model::TaskStatus::InputRequired {
+        detailed.task.status = rmcp::model::TaskStatus::Working;
+    }
+    rmcp::model::CreateTaskResult::new(detailed.task).into()
+}
+
 /// The MCP Apps `_meta` for a tool: `ui.resourceUri` and `ui.visibility`, plus the flat
 /// `ui/resourceUri` key older hosts read.
 fn ui_meta(ui: Ui) -> Option<MetaObject> {
@@ -1320,12 +1445,59 @@ fn prompt_arg(name: &str, description: &str) -> PromptArgument {
 }
 
 impl ServerHandler for MaestroServer {
+    async fn initialize(
+        &self,
+        request: rmcp::model::InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::InitializeResult, McpError> {
+        context.peer.set_peer_info(request.clone());
+        let mut result = self.negotiate_initialize(&request)?;
+        result.capabilities.extensions = None;
+        Ok(result)
+    }
+
+    async fn discover(&self, _context: RequestContext<RoleServer>) -> Result<rmcp::model::DiscoverResult, McpError> {
+        let mut info = self.get_info();
+        if self.skills.is_some() {
+            info.capabilities
+                .extensions
+                .get_or_insert_default()
+                .insert(skills::EXTENSION.to_string(), Default::default());
+        }
+        if self.file_pilot {
+            info.capabilities
+                .extensions
+                .get_or_insert_default()
+                .insert(file_pilot::EXTENSION.to_string(), Default::default());
+        }
+        Ok(rmcp::model::DiscoverResult::from_server_info(self.supported_protocol_versions().into_owned(), info))
+    }
+
+    async fn on_custom_request(
+        &self,
+        request: rmcp::model::CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::CustomResult, McpError> {
+        match self.skills.as_ref() {
+            Some(catalog) if context.protocol_version() == Some(rmcp::model::ProtocolVersion::V_2026_07_28) => {
+                catalog.handle(request)
+            }
+            _ => Err(skills::unsupported(request.method)),
+        }
+    }
+
     fn get_info(&self) -> ServerConfig {
         let mut implementation = Implementation::new("maestro", env!("CARGO_PKG_VERSION"));
         implementation.title = Some("Maestro".to_string());
         implementation.description = Some("Governance and orchestration metalayer for agent fleets".to_string());
         let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().enable_prompts().enable_resources().build();
+        if self.tasks.is_some() {
+            info.capabilities
+                .extensions
+                .get_or_insert_default()
+                .insert(rmcp::model::TASKS_EXTENSION_ID.to_string(), Default::default());
+        }
         info.server_info = implementation;
         info.instructions = Some(
             "Maestro reports the governance state of the workspace: what needs the owner, open asks, \
@@ -1345,20 +1517,53 @@ impl ServerHandler for MaestroServer {
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(Self::tools())))
+        let mut tools = Self::tools();
+        if self.negotiated_download(&context) {
+            tools.push(file_pilot::tool());
+        }
+        std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
     }
 
     fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         let this = self.clone();
         async move {
             let name = request.name.to_string();
             let args = Value::Object(request.arguments.unwrap_or_default());
+            if name == "maestro_download_health_fixture" && this.negotiated_download(&context) {
+                return Ok(file_pilot::result().into());
+            }
+            if name == "maestro_wait_for_decision" && args.get("interactive") == Some(&Value::Bool(true)) {
+                let decision = parse(args)?;
+                return tokio::task::spawn_blocking(move || this.decision_call(decision, &context))
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            }
+            if name == "maestro_health_report" && this.negotiated_tasks(&context).is_some() {
+                let report: tasks::ReportArgs = parse(args.clone())?;
+                if let Some(key) = report.retry_key {
+                    let pending = this.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        let Some(store) = pending.negotiated_tasks(&context) else { return Ok(None) };
+                        let Ok(owner) = tasks::caller(&pending, &context) else { return Ok(None) };
+                        if pending.drain_tasks {
+                            store.report_retry(&owner, &key, report.section)
+                        } else {
+                            store.report(&owner, &key, report.section).map(Some)
+                        }
+                    })
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))??;
+                    if let Some(task) = result {
+                        return Ok(task_created(task));
+                    }
+                }
+            }
             // Reads shell out to git; keep them off the async workers.
             let outcome = tokio::task::spawn_blocking(move || this.call(&name, args))
                 .await
@@ -1379,6 +1584,56 @@ impl ServerHandler for MaestroServer {
                 Err(e) => Err(e),
             }
         }
+    }
+
+    async fn get_task(
+        &self,
+        request: rmcp::model::GetTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::GetTaskResult, McpError> {
+        let server = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = server.negotiated_tasks(&context).ok_or_else(|| tasks::invalid("Tasks were not negotiated"))?;
+            let task = store.poll_decision(&tasks::caller(&server, &context)?, &request.task_id, &server.paths)?;
+            if task.task.status == rmcp::model::TaskStatus::InputRequired && !Self::client_accepts_url(&context) {
+                let mut required = rmcp::model::ClientCapabilities::default();
+                required.elicitation = Some(
+                    rmcp::model::ElicitationCapability::new().with_url(rmcp::model::UrlElicitationCapability::new()),
+                );
+                return Err(McpError::missing_required_client_capability(required));
+            }
+            Ok(rmcp::model::GetTaskResult::new(task))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?
+    }
+
+    async fn update_task(
+        &self,
+        request: rmcp::model::UpdateTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        let server = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = server.negotiated_tasks(&context).ok_or_else(|| tasks::invalid("Tasks were not negotiated"))?;
+            store.respond(&tasks::caller(&server, &context)?, &request.task_id, request.input_responses)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?
+    }
+
+    async fn cancel_task(
+        &self,
+        request: rmcp::model::CancelTaskParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        let server = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = server.negotiated_tasks(&context).ok_or_else(|| tasks::invalid("Tasks were not negotiated"))?;
+            store.cancel(&tasks::caller(&server, &context)?, &request.task_id)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?
     }
 
     fn list_prompts(
@@ -1439,10 +1694,28 @@ impl ServerHandler for MaestroServer {
     fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ReadResourceResponse, McpError>> + Send + '_ {
         let this = self.clone();
         async move {
+            if context.protocol_version() == Some(rmcp::model::ProtocolVersion::V_2026_07_28)
+                && let Some(text) = this.skills.as_ref().and_then(|catalog| catalog.read(&request.uri))
+            {
+                let mime = if request.uri.ends_with(".md") { "text/markdown" } else { "text/plain" };
+                let mut contents = ResourceContents::text(text, request.uri);
+                if let ResourceContents::TextResourceContents { mime_type, .. } = &mut contents {
+                    *mime_type = Some(mime.into());
+                }
+                let result = ReadResourceResult::new(vec![contents])
+                    .with_cache_scope(rmcp::model::CacheScope::Public)
+                    .with_ttl_ms(skills::CACHE_MS);
+                return Ok(result.into());
+            }
+            if request.uri.starts_with("skill://")
+                && context.protocol_version() == Some(rmcp::model::ProtocolVersion::V_2026_07_28)
+            {
+                return Err(McpError::invalid_params("unknown skill resource URI", None));
+            }
             let uri = request.uri.clone();
             let (text, mime) = tokio::task::spawn_blocking(move || this.read_resource_text(&uri))
                 .await

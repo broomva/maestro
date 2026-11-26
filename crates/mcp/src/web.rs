@@ -62,8 +62,9 @@ pub fn router_with(server: MaestroServer, local: SocketAddr, owner: Result<crate
     if let Ok(o) = &owner {
         hosts.push(o.party.id.clone());
     }
+    let files = server.file_pilot;
     let web = Web { server, hosts: Arc::new(hosts), owner };
-    Router::new()
+    let mut router = Router::new()
         .route("/", get(root))
         .route("/owner", get(owner_page))
         .route("/owner/enroll/begin", post(enroll_begin))
@@ -79,8 +80,18 @@ pub fn router_with(server: MaestroServer, local: SocketAddr, owner: Result<crate
         .route("/manifest.webmanifest", get(manifest))
         .route("/apple-touch-icon.png", get(icon_180))
         .route("/icon-192.png", get(icon_192))
-        .route("/icon-512.png", get(icon_512))
-        .with_state(web)
+        .route("/icon-512.png", get(icon_512));
+    if files {
+        router = router.route(crate::file_pilot::PATH, get(fixture_download));
+    }
+    router.with_state(web)
+}
+
+async fn fixture_download(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    if headers.contains_key(header::ORIGIN) || !admitted(&uri, &headers, &web.hosts) {
+        return refused();
+    }
+    crate::file_pilot::download().await.into_response()
 }
 
 /// How a `Host` header names the bound address: an IPv6 address in brackets.

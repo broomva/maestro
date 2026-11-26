@@ -173,7 +173,7 @@ async fn every_tool_scenario_is_identical_over_stdio_and_http() {
     // every_tool_answers_on_the_fixture
     for spec in maestro_mcp::TOOLS {
         let args = match spec.name {
-            "maestro_ask_get" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
+            "maestro_ask_get" | "maestro_wait_for_decision" => json!({ "ledger": "demo-arc.yaml", "id": "merge-now" }),
             "maestro_ui_render" => json!({ "root": "s", "blocks": { "s": { "type": "snapshot" } } }),
             "maestro_ui_poll" => json!({ "spec": { "root": "s", "blocks": { "s": { "type": "snapshot" } } } }),
             // A flow read with no ledger is a result: ok false, no_ledger.
@@ -422,4 +422,228 @@ async fn http_takes_the_bound_address_as_host() {
     assert_eq!(status(addr, &[("Host", "100.100.100.100:7171")]).await, 200);
     assert_eq!(status(addr, &[("Host", "100.100.100.101:7171")]).await, 403);
     cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skills_are_versioned_and_readable_only_on_the_current_protocol() {
+    use rmcp::model::{ClientRequest, CustomRequest, ServerResult};
+    use sha2::{Digest, Sha256};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/mcp");
+    let previous = tempfile::tempdir().unwrap();
+    let old = previous.path().join("brief");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::write(old.join("SKILL.md"), "---\nname: brief\ndescription: Prior release\n---\n\nPrior bytes.\n")
+        .unwrap();
+    let prior = maestro_mcp::skills::Catalog::load(previous.path(), None).unwrap();
+    let catalog = maestro_mcp::skills::Catalog::load(&root, Some(previous.path())).unwrap();
+
+    let cancel = CancellationToken::new();
+    let mut clients = Vec::new();
+    for (catalog, lifecycle) in [(prior, discover()), (catalog, discover())] {
+        let listener = http::listen(Bind::named("127.0.0.1:0".parse().unwrap()).unwrap()).await.unwrap();
+        let url = format!("http://{}{}", listener.local_addr().unwrap(), http::PATH);
+        tokio::spawn(http::serve_server(
+            MaestroServer::new(fixture()).with_hosts(isolated()).with_skills(catalog),
+            listener,
+            cancel.clone(),
+        ));
+        let transport =
+            StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(url.clone()));
+        clients.push(((), url, ().serve_with_lifecycle(transport, lifecycle).await.unwrap()));
+    }
+    async fn skills_method(client: &Client, method: &str, params: Value) -> Value {
+        match client.send_request(ClientRequest::CustomRequest(CustomRequest::new(method, Some(params)))).await.unwrap()
+        {
+            ServerResult::CustomResult(result) => result.0,
+            other => panic!("unexpected {method} result: {other:?}"),
+        }
+    }
+    let (_, _, prior) = &clients[0];
+    let (_, url, current) = &clients[1];
+    assert!(
+        current
+            .peer_info()
+            .unwrap()
+            .capabilities
+            .extensions
+            .as_ref()
+            .unwrap()
+            .contains_key("io.modelcontextprotocol/skills")
+    );
+    let old_list = skills_method(prior, "skills/list", json!({})).await;
+    let previous_uri = old_list["skills"][0]["uri"].as_str().unwrap();
+    let before = prior.read_resource(ReadResourceRequestParams::new(previous_uri)).await.unwrap();
+    let listed = skills_method(current, "skills/list", json!({})).await;
+    assert_eq!(listed["resultType"], "complete");
+    assert_eq!(listed["cacheScope"], "public");
+    let entries = listed["skills"].as_array().unwrap();
+    assert_eq!(entries.len(), 5);
+    for entry in entries {
+        let name = entry["frontmatter"]["name"].as_str().unwrap();
+        let uri = entry["uri"].as_str().unwrap();
+        assert_ne!(uri, previous_uri);
+        assert_eq!(skills_method(current, "skills/get", json!({ "uri": uri })).await["skill"], *entry);
+        for file in entry["resources"].as_array().unwrap() {
+            let file_uri = file["uri"].as_str().unwrap();
+            let data = current.read_resource(ReadResourceRequestParams::new(file_uri)).await.unwrap();
+            let rmcp::model::ResourceContents::TextResourceContents { text, .. } = &data.contents[0] else {
+                panic!("expected text at {file_uri}");
+            };
+            let relative = file_uri.split_once(&format!("/{name}/")).unwrap().1;
+            assert_eq!(*text, std::fs::read_to_string(root.join(name).join(relative)).unwrap());
+            assert_eq!(file["size"], text.len());
+            assert_eq!(file["digest"], format!("sha256:{:x}", Sha256::digest(text.as_bytes())));
+        }
+    }
+    let after = current.read_resource(ReadResourceRequestParams::new(previous_uri)).await.unwrap();
+    assert_eq!(serde_json::to_value(before).unwrap(), serde_json::to_value(after).unwrap());
+    let transport =
+        StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(url.clone()));
+    let legacy = ().serve_with_lifecycle(transport, initialize()).await.unwrap();
+    assert!(legacy.peer_info().unwrap().capabilities.extensions.is_none());
+    assert!(
+        legacy
+            .send_request(ClientRequest::CustomRequest(CustomRequest::new("skills/list", Some(json!({})))))
+            .await
+            .is_err()
+    );
+    assert!(legacy.read_resource(ReadResourceRequestParams::new(previous_uri)).await.is_err());
+    let _ = legacy.cancel().await;
+    for (_, _, client) in clients {
+        let _ = client.cancel().await;
+    }
+    cancel.cancel();
+}
+
+#[tokio::test]
+async fn report_tasks_negotiate_per_call_and_survive_an_http_restart() {
+    use maestro_hosts::{DirectRegistry, SurfaceRegistry};
+    use maestro_mcp::tasks::TaskStore;
+    use rmcp::model::{
+        CallToolRequest, CallToolResponse, ClientCapabilities, GetTaskParams, GetTaskRequest, RequestMetaObject,
+        ServerResult, TaskPayload,
+    };
+    use rmcp::service::PeerRequestOptions;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("tasks.sqlite");
+    let mut store = fixture();
+    store.paths.fleet_meta = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/health");
+    let workspace = store.paths.workspace.canonicalize().unwrap();
+    let cwd = workspace.to_str().unwrap();
+    let registry = tmp.path().join("direct.json");
+    let direct_rows = ["report-test", "foreign"]
+        .map(|id| json!({"id": id, "cwd": cwd, "token": format!("{id}-test-credential"), "liveness": "live"}));
+    std::fs::write(&registry, serde_json::to_vec(&direct_rows).unwrap()).unwrap();
+    let start = |drain| {
+        let store = &store;
+        let registry = &registry;
+        let db = &db;
+        let workspace = &workspace;
+        async move {
+            let cancel = CancellationToken::new();
+            let listener = http::listen(Bind::named("127.0.0.1:0".parse().unwrap()).unwrap()).await.unwrap();
+            let url = format!("http://{}{}", listener.local_addr().unwrap(), http::PATH);
+            let server = MaestroServer::new(store.clone())
+                .with_hosts(SurfaceRegistry::new(None, None, Some(DirectRegistry::from_file(registry))))
+                .with_tasks(TaskStore::open(db, workspace).unwrap())
+                .with_task_creation(false, drain);
+            let join = tokio::spawn(http::serve_server(server, listener, cancel.clone()));
+            (url, cancel, join)
+        }
+    };
+    async fn connect(url: &str, cwd: &str, id: &str, lifecycle: ClientLifecycleMode) -> Client {
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(url.to_string())
+                .auth_header(format!("{id}-test-credential"))
+                .custom_headers(
+                    [
+                        ("maestro-session".parse().unwrap(), format!("direct:-/{id}").parse().unwrap()),
+                        ("maestro-cwd".parse().unwrap(), cwd.parse().unwrap()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+        );
+        ().serve_with_lifecycle(transport, lifecycle).await.unwrap()
+    }
+
+    let mut task_meta = RequestMetaObject::default();
+    task_meta.set_client_capabilities(ClientCapabilities::builder().enable_tasks().build());
+    let retry_key =
+        uuid::Uuid::from_u128(((jiff::Timestamp::now().as_millisecond() as u128) << 80) | 0x7000_8000_0000_0000_0000)
+            .to_string();
+    let mut request = CallToolRequestParams::new("maestro_health_report");
+    request.arguments = json!({"section": "loops", "retry_key": retry_key}).as_object().cloned();
+    let (url, cancel, server) = start(false).await;
+    let caller = connect(&url, cwd, "report-test", discover()).await;
+    assert!(caller.peer_info().unwrap().capabilities.supports_tasks());
+    let CallToolResponse::Complete(ordinary) = caller.call_tool_once(request.clone()).await.unwrap() else {
+        panic!("per-request capability omission must use the synchronous result");
+    };
+    let legacy = connect(&url, cwd, "report-test", initialize()).await;
+    assert!(!legacy.peer_info().unwrap().capabilities.supports_tasks());
+    assert!(matches!(legacy.call_tool_once(request.clone()).await.unwrap(), CallToolResponse::Complete(_)));
+    legacy.cancel().await.unwrap();
+
+    async fn request_with_options(
+        client: &Client,
+        request: rmcp::model::ClientRequest,
+        options: PeerRequestOptions,
+    ) -> Result<ServerResult, rmcp::service::ServiceError> {
+        client.send_request_with_option(request, options).await?.await_response().await
+    }
+    let options = || PeerRequestOptions::no_options().with_meta(task_meta.clone());
+    let call = || CallToolRequest::new(request.clone()).into();
+    let unverified = connect(&url, cwd, "unknown", discover()).await;
+    assert!(matches!(
+        request_with_options(&unverified, call(), options()).await.unwrap(),
+        ServerResult::CallToolResult(_)
+    ));
+    unverified.cancel().await.unwrap();
+    let ServerResult::CreateTaskResult(handle) = request_with_options(&caller, call(), options()).await.unwrap() else {
+        panic!("verified current caller must receive a task");
+    };
+    let get = || GetTaskRequest::new(GetTaskParams::new(&handle.task.task_id)).into();
+    assert!(caller.get_task(GetTaskParams::new(&handle.task.task_id)).await.is_err());
+    let outsider = connect(&url, cwd, "foreign", discover()).await;
+    assert!(request_with_options(&outsider, get(), options()).await.is_err());
+    outsider.cancel().await.unwrap();
+    std::fs::write(&registry, "[]").unwrap();
+    assert!(request_with_options(&caller, get(), options()).await.is_err());
+    std::fs::write(&registry, serde_json::to_vec(&direct_rows).unwrap()).unwrap();
+
+    caller.cancel().await.unwrap();
+    cancel.cancel();
+    server.await.unwrap().unwrap();
+
+    let (url, cancel, server) = start(true).await;
+    let caller = connect(&url, cwd, "report-test", discover()).await;
+    let ServerResult::CreateTaskResult(retry) = request_with_options(&caller, call(), options()).await.unwrap() else {
+        panic!("expected task");
+    };
+    assert_eq!(retry.task.task_id, handle.task.task_id);
+    let mut changed = request.clone();
+    changed.arguments.as_mut().unwrap().insert("section".into(), json!("capacity"));
+    assert!(request_with_options(&caller, CallToolRequest::new(changed).into(), options()).await.is_err());
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let ServerResult::GetTaskResult(state) = request_with_options(&caller, get(), options()).await.unwrap()
+            else {
+                panic!("expected task state");
+            };
+            match state.task.payload {
+                TaskPayload::Completed { result } => break result,
+                TaskPayload::Working => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                other => panic!("unexpected task status: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(result["structuredContent"], ordinary.structured_content.unwrap());
+    caller.cancel().await.unwrap();
+    cancel.cancel();
+    server.await.unwrap().unwrap();
 }

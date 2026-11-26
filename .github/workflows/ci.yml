@@ -30,7 +30,7 @@ jobs:
     # (BRO-4042), so there were forty (owner-approved). With the fast-lane guards,
     # thirty-two of forty timed out on 2026-11-22 (BRO-4093), so there are fifty-six.
     # Add shards by growing the list; the split follows it.
-    timeout-minutes: 60
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:

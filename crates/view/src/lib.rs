@@ -13,3 +13,11 @@ mod screens;
 
 pub use catalog::{Drop, Validated, catalog, validate};
 pub use render::{Rendered, render, render_app, render_at, render_web, render_with};
+
+/// The Decisions page for an existing ask, with both locator pieces confined to path segments.
+pub fn decision_path(ledger: &str, id: &str) -> Option<String> {
+    if [ledger, id].iter().any(|s| s.is_empty() || matches!(*s, "." | "..") || s.contains(['/', '\\'])) {
+        return None;
+    }
+    Some(format!("/decisions/{}/{}", screens::web::segment(ledger), screens::web::segment(id)))
+}

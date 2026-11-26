@@ -533,15 +533,7 @@ impl DirectRegistry {
     }
 
     pub fn from_file(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        // What reads now; every later read of the file goes through the read rule again.
-        let mut sessions = HashMap::new();
-        if let Ok(rows) = Self::rows_in(&path) {
-            for s in rows {
-                sessions.insert(s.id.clone(), s);
-            }
-        }
-        Self { sessions: Mutex::new(sessions), file_path: Some(path), expected_uid: None }
+        Self { file_path: Some(path.into()), ..Self::default() }
     }
 
     /// The registry file's sessions by the [`read`] rule: none when it is not there; an error, with
@@ -579,8 +571,7 @@ impl DirectRegistry {
         self.lookup(id).ok().flatten()
     }
 
-    /// Session `id`, or why the registry file did not read (BRO-3846): a configured file that does
-    /// not read or parse fails identity closed, never falls back to the sessions held in memory.
+    /// A configured file is authoritative. Reads fail closed, and removing a row revokes it.
     fn lookup(&self, id: &str) -> Result<Option<DirectSession>, IdentityRefusal> {
         if !is_safe_id(id) {
             return Ok(None);
@@ -589,9 +580,7 @@ impl DirectRegistry {
             let rows = Self::rows_in(path).map_err(|why| {
                 IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("Direct registry: {why}."))
             })?;
-            if let Some(found) = rows.into_iter().find(|s| s.id == id) {
-                return Ok(Some(found));
-            }
+            return Ok(rows.into_iter().find(|s| s.id == id));
         }
         Ok(self.sessions.lock().map(|s| s.get(id).cloned()).unwrap_or_default())
     }
@@ -604,25 +593,23 @@ impl DirectRegistry {
     /// is missing, does not read or does not parse is unread, never only the in-memory sessions
     /// shown as complete.
     pub fn list_live_report(&self) -> (Vec<DirectSession>, Vec<(String, String)>) {
-        let mut combined: HashMap<String, DirectSession> = self.sessions.lock().map(|s| s.clone()).unwrap_or_default();
         let mut unread = Vec::new();
-        if let Some(path) = &self.file_path {
-            let at = format!("direct registry {}", path.display());
-            // Configured but not there is unread too: the listing cannot show its sessions.
+        let sessions = if let Some(path) = &self.file_path {
             let rows = match read::is_file(path) {
                 Read::Absent => Err(format!("the registry file {} is not there", path.display())),
                 _ => Self::rows_in(path),
             };
             match rows {
-                Ok(rows) => {
-                    for s in rows {
-                        combined.insert(s.id.clone(), s);
-                    }
+                Ok(rows) => rows,
+                Err(why) => {
+                    unread.push((format!("direct registry {}", path.display()), why));
+                    Vec::new()
                 }
-                Err(why) => unread.push((at, why)),
             }
-        }
-        let mut out: Vec<DirectSession> = combined.into_values().filter(|s| s.liveness.is_live()).collect();
+        } else {
+            self.sessions.lock().map(|s| s.values().cloned().collect()).unwrap_or_default()
+        };
+        let mut out: Vec<DirectSession> = sessions.into_iter().filter(|s| s.liveness.is_live()).collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         (out, unread)
     }
@@ -635,18 +622,7 @@ impl DirectRegistry {
         if owner.session().surface != Surface::Direct {
             return Err(unverified("only a direct owner names a direct performer".into()));
         }
-        // The file, when one is configured, is the registry: a row it no longer holds is absent,
-        // never the copy held in memory since the registry was loaded.
-        let found = match &self.file_path {
-            Some(path) if is_safe_id(id) => Self::rows_in(path)
-                .map_err(|why| {
-                    IdentityRefusal::new(RefusalReason::RegistryDisconnected, format!("Direct registry: {why}."))
-                })?
-                .into_iter()
-                .find(|s| s.id == id),
-            _ => self.lookup(id)?,
-        };
-        let Some(session) = found else {
+        let Some(session) = self.lookup(id)? else {
             return Err(unverified(format!("no direct session has the id {id}")));
         };
         if session.liveness == SessionLiveness::Closed {

@@ -729,3 +729,71 @@ to it fails on a pull request, unless the line is a renamed file's new path.
 
 Design system: `DESIGN.md` and `design-system/broomva/` are the Broomva foundation profile. Work-state
 labels in `maestro-core::work::WorkState` are the canonical agentic-work vocabulary, and they are tested.
+
+
+## Agent Skills over MCP
+
+Opt in to the pilot catalog with `maestro serve --http --skills-dir skills/mcp` or
+`maestro mcp --skills-dir skills/mcp` from this checkout. A catalog directory contains one
+directory per skill. Maestro reads the full bundle at startup, and MCP 2026-07-28 clients
+discover it with `server/discover`. A host without Skills over MCP can install the same
+directories in its local Agent Skills location.
+
+Set `--previous-skills-dir` to the exact bundle used by the preceding release during a
+rollout. Previous URIs still resolve to the previous bytes. Drop that directory from the
+configuration when its release is retired. Pass only release directories prepared by the
+operator.
+
+The `bstack`, `dogfood`, `handback`, and `disambiguate` packages in `skills/mcp` come from
+`broomva/skills` at `5d11f9da35a120c0d097817392a221fbd18ae85f`. Their frontmatter
+descriptions were shortened for the Agent Skills limit. The bundle includes each workflow's
+local references and the license. The Maestro brief is maintained here.
+
+For a host with a local skill of the same name, use the host's server-qualified
+MCP skill identity when selecting the published copy. The companion workflows
+expect the local Bstack tools when their instructions call for them.
+
+## Durable MCP tasks and decision links
+
+Run `maestro serve --http --task-db /private/path/mcp-tasks.sqlite` on loopback to
+enable Tasks. Use a local, private state directory. The database holds temporary
+protocol state and can be recreated if it is lost. Losing it also loses outstanding
+handles. The report reads fleet health from the same telemetry as the Health page.
+
+A verified client supplies `Maestro-Session`, `Maestro-Cwd`, and its bearer
+credential as transport headers on every task request. Direct uses its registered
+launch token. A bridge uses the base64url encoding, without padding, of the
+signed credential JSON and includes `Maestro-Node` when the bridge requires it.
+The current MCP client's per-request capabilities must declare
+`io.modelcontextprotocol/tasks`. Set a stable UUIDv7 `retry_key` in
+`maestro_health_report` to get a task handle. Reusing that key with different
+arguments returns an error. Clients can otherwise read the report synchronously.
+
+Enable `--task-decisions` to pilot `maestro_wait_for_decision` on the daemon with
+the configured HTTPS Decisions relying party. A client that declares URL
+Elicitation and Tasks can request `interactive: true` with a retry key. Accepting
+the URL returns the task to working. It completes after Maestro reads the
+authoritative answer. Decisions still owns passkey confirmation and the
+eight-second undo window. An ordinary call gives the ask handle, Decisions URL
+when available, and `maestro_ask_get` for clients that need to inspect it later.
+
+Stop accepting new observers by removing `--task-decisions`. Use
+`--drain-tasks` with the existing database to stop all new task creation and
+keep serving stored handles. The daemon retains terminal results for 24 hours.
+Reports have a five-minute deadline, and a decision observer has 30 minutes.
+
+## MCP extension pilots
+
+`maestro serve --http --fixture-file-transfer` offers the synthetic loop health
+fixture to clients that declare Files download support. The result supplies
+the file's size and SHA-256 digest in protocol metadata. Production evidence
+transfer needs an approved storage and retention decision.
+
+Run the isolated HTTP smoke check with
+`cargo build --locked -p maestro` and `python3 scripts/acceptance/mcp-upgrades.py`.
+It checks all bundle bytes, restart recovery, URL consent and fallback, and
+the Files download. `python3 scripts/acceptance/t3-events.py --fixture` verifies
+cursor and gap handling over 20 simulated T3 transitions. The Events pilot's
+live mode runs one scoped poll against a local T3 endpoint with an external
+client credential and records each observation before advancing the cursor.
+Maestro continues to reconcile through its existing T3 source.
