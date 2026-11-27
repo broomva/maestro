@@ -864,32 +864,30 @@ mod tests {
         assert_eq!(candidates, vec![bin_cli, stale_cli]);
     }
 
+    /// Write an executable script in a short-lived child process so the multi-threaded test
+    /// binary never holds a writable fd across a sibling thread's fork() (Linux ETXTBSY).
+    fn write_executable(path: &Path, body: &str) {
+        use std::io::Write;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 0755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
     #[test]
     fn wake_candidates_retries_when_first_cli_hits_server_owns_database_error() {
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("bad-t3");
         let good = dir.path().join("good-t3");
-        std::fs::write(
+        write_executable(
             &bad,
-            "#!/bin/sh
-echo 'Error: failed to send' >&2\necho '  Caused by: ServerOwnsDatabaseError: mismatch' >&2
-exit 1
-",
-        )
-        .unwrap();
-        std::fs::write(
-            &good,
-            "#!/bin/sh
-exit 0
-",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
-            std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+            "#!/bin/sh\necho 'Error: failed to send' >&2\necho '  Caused by: ServerOwnsDatabaseError: mismatch' >&2\nexit 1\n",
+        );
+        write_executable(&good, "#!/bin/sh\nexit 0\n");
         assert_eq!(wake_candidates(&[bad, good], Some("t3:env/th-9"), "msg"), "told T3 thread th-9");
     }
 
@@ -898,20 +896,14 @@ exit 0
         let dir = tempfile::tempdir().unwrap();
         let log_file = dir.path().join("calls.log");
         let fake_t3 = dir.path().join("fake-t3");
-        std::fs::write(
+        write_executable(
             &fake_t3,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf \"CALL::%s\\n%s\\n\" \"$3\" \"$4\" >> '{}'\nif [ \"$3\" = \"dead-thread\" ] || [ \"$3\" = \"meta-orch\" -a -f '{}' ]; then echo 'Error: thread not found' >&2; exit 1; fi\nexit 0\n",
                 log_file.display(),
                 dir.path().join("fail-meta").display()
             ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake_t3, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let r = receipt(Intent::answer("l.yaml", "a1", "h1", "yes", None), 0);
         let cands = vec![fake_t3];
 
