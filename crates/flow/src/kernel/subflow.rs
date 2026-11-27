@@ -15,19 +15,21 @@
 //! - Recursive child performer union attestation for downstream `different_from(map_node)`
 
 use super::events::{
-    Adopted, Completed, EffectReconciled, EffectStarted, KernelEvent, MapExpanded, MapItemSpec, Owner, ParentRef,
-    Performer, Retired, Started, SubflowCompleted, SubflowFailed, SubflowQuiesced, SubflowStarted, Superseded, digest,
-    performers_receipt_digest,
+    Adopted, Answered, Claimed, Completed, EffectReconciled, EffectStarted, KernelEvent, MapExpanded, MapItemSpec,
+    Owner, ParentRef, Performer, Retired, Started, SubflowCompleted, SubflowFailed, SubflowQuiesced, SubflowStarted,
+    Superseded, digest, performers_receipt_digest,
 };
 use super::ir::{Class, Iteration, OnItemFailure, ReadyWhen};
-use super::replay::pinned;
+use super::replay::{Reason, State, next_of, pinned};
 use super::write::{PROVIDERS, provider_of};
-use super::writeset::{validate_write_set, write_sets_intersect};
+use super::writeset::{validate_write_set, verify_worktree_writes_auto, write_sets_intersect};
+use crate::clock;
 use crate::ids::InstanceId;
 use crate::ledger::WriteGuard;
 use crate::log::Log;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 /// Stable refusal codes for IR v10 map & subflow operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -42,6 +44,12 @@ pub enum SubflowError {
     SubflowSuperseded { child: String },
     #[error("write_set_conflict: item {item_key} overlaps active or unquiesced sibling {sibling}")]
     WriteSetConflict { item_key: String, sibling: String },
+    #[error("write_set_violation: item {item_key} wrote outside declared write_set: {violations:?}")]
+    WriteSetViolation { item_key: String, violations: Vec<String> },
+    #[error("invalid_child: {detail}")]
+    InvalidChild { detail: String },
+    #[error("child_not_terminal: child {child} is not terminal ({detail})")]
+    ChildNotTerminal { child: String, detail: String },
     #[error("concurrency_limit: {in_flight} in-flight >= max {limit}")]
     ConcurrencyLimit { in_flight: usize, limit: usize },
     #[error("provider_pool_exhausted: {detail}")]
@@ -62,6 +70,9 @@ impl SubflowError {
             SubflowError::FormerOwnersClaim { .. } => "former_owners_claim",
             SubflowError::SubflowSuperseded { .. } => "subflow_superseded",
             SubflowError::WriteSetConflict { .. } => "write_set_conflict",
+            SubflowError::WriteSetViolation { .. } => "write_set_violation",
+            SubflowError::InvalidChild { .. } => "invalid_child",
+            SubflowError::ChildNotTerminal { .. } => "child_not_terminal",
             SubflowError::ConcurrencyLimit { .. } => "concurrency_limit",
             SubflowError::ProviderPoolExhausted { .. } => "provider_pool_exhausted",
             SubflowError::QuiescenceRefused { .. } => "quiescence_refused",
@@ -69,6 +80,25 @@ impl SubflowError {
             SubflowError::Storage(_) => "storage_error",
         }
     }
+}
+
+/// Returns the parent-declared `write_set` for a child instance spawned by a `map` node, if any.
+pub fn child_declared_write_set(parent_log: &Log, parent_ref: &ParentRef) -> Option<Vec<String>> {
+    let st = fold_map_state(parent_log, &parent_ref.node, &parent_ref.iteration);
+    let item = st.items.get(&parent_ref.item_key)?;
+    if item.write_set.is_empty() { None } else { Some(item.write_set.clone()) }
+}
+
+/// Returns the `owner_epoch` recorded when `parent_log` spawned `child_instance`.
+pub fn child_spawn_owner_epoch(parent_log: &Log, child_instance: &str) -> Option<u64> {
+    parent_log
+        .events
+        .iter()
+        .rev()
+        .filter(|e| e.kind == SubflowStarted::KIND)
+        .filter_map(|e| serde_json::from_value::<SubflowStarted>(e.body.clone()).ok())
+        .find(|s| s.child_instance == child_instance)
+        .map(|s| s.owner_epoch)
 }
 
 /// Derives the deterministic child `InstanceId` for Crash Points A/B/C idempotency:
@@ -763,6 +793,13 @@ pub fn collect_child_performers(child_log: &Log) -> Vec<Performer> {
     };
     for ev in &child_log.events {
         match ev.kind.as_str() {
+            Claimed::KIND => {
+                if let Ok(cl) = serde_json::from_value::<Claimed>(ev.body.clone())
+                    && let Some(p) = cl.performer
+                {
+                    push(p);
+                }
+            }
             Completed::KIND => {
                 if let Ok(c) = serde_json::from_value::<Completed>(ev.body.clone()) {
                     if let Some(p) = c.performer {
@@ -823,11 +860,37 @@ pub fn finalize_map_item(
     let child_log = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?;
     let state = fold_map_state(&parent_log, node, &iteration);
     let map_epoch = state.latest_epoch.unwrap_or(0);
-    let performers = collect_child_performers(&child_log);
 
     // Idempotent Crash Point C check: already finalized for this child?
     if state.completed.get(item_key).is_some_and(|c| c.child_instance == child.as_str()) {
         return Ok(false);
+    }
+
+    // 1. Verify `child` is actually the active (`in_flight`) child spawned for THIS item_key (not
+    //    unrelated, not belonging to another item, and not superseded/quiesced).
+    let Some(active_started) = state.in_flight.get(item_key) else {
+        return Err(SubflowError::InvalidChild {
+            detail: format!("item {item_key:?} has no active in-flight child (supplied {child})"),
+        });
+    };
+    if active_started.child_instance != child.as_str() {
+        return Err(SubflowError::InvalidChild {
+            detail: format!(
+                "supplied child {child} is not the active child {} for item {item_key:?}",
+                active_started.child_instance
+            ),
+        });
+    }
+    if state.superseded_unquiesced.contains_key(child.as_str()) || state.quiesced_children.contains(child.as_str()) {
+        return Err(SubflowError::SubflowSuperseded { child: child.to_string() });
+    }
+
+    let mut performers = collect_child_performers(&child_log);
+    if let Some(sp) = active_started.performer.clone() {
+        let key = (sp.harness.clone(), sp.model.clone(), sp.session.clone());
+        if !performers.iter().any(|p| (p.harness.clone(), p.model.clone(), p.session.clone()) == key) {
+            performers.push(sp);
+        }
     }
 
     if let Some(err) = failed_error {
@@ -846,6 +909,65 @@ pub fn finalize_map_item(
         { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, ev) }
             .map_err(|e| SubflowError::Storage(e.to_string()))?;
     } else {
+        // 2. Verify the child instance is genuinely terminal (never convert an empty or unfinished
+        //    child log into SubflowCompleted with null outputs!).
+        let child_started = pinned(&child_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        let child_next =
+            next_of(&child_log, &child_started, clock::now()).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        if !child_next.enabled.is_empty() {
+            let names: Vec<&str> = child_next.enabled.iter().map(|e| e.node.as_str()).collect();
+            return Err(SubflowError::ChildNotTerminal {
+                child: child.to_string(),
+                detail: format!("enabled nodes still remain: {names:?}"),
+            });
+        }
+        let non_done: Vec<(&String, State)> = child_next
+            .pending
+            .iter()
+            .filter(|(_, s)| {
+                !matches!(s.state, State::Done)
+                    && !s.unmet.iter().any(|r| matches!(r, Reason::Unreachable { .. } | Reason::Switch { .. }))
+            })
+            .map(|(k, s)| (k, s.state))
+            .collect();
+        if !non_done.is_empty() {
+            return Err(SubflowError::ChildNotTerminal {
+                child: child.to_string(),
+                detail: format!("pending non-terminal nodes remain: {non_done:?}"),
+            });
+        }
+        let has_terminal_receipt = child_log
+            .events
+            .iter()
+            .any(|e| e.kind == Completed::KIND || e.kind == Answered::KIND);
+        if !has_terminal_receipt {
+            return Err(SubflowError::ChildNotTerminal {
+                child: child.to_string(),
+                detail: "child log contains no Completed or Answered receipt".to_string(),
+            });
+        }
+
+        // 3. Enforce 6-surface post-write isolation if the item declared a write_set and the
+        //    child's workdir is a git worktree!
+        if let Some(item_spec) = state.items.get(item_key)
+            && !item_spec.write_set.is_empty()
+            && let Some(raw_wd) = child_started.ir.workdir.as_deref()
+        {
+            let wd_str = resolve_simple_workdir(raw_wd, &child_started.params);
+            let wd = PathBuf::from(&wd_str);
+            if wd.is_dir() && wd.join(".git").exists() {
+                let base_sha = child_started.params.get("base_sha").and_then(Value::as_str);
+                let ver = verify_worktree_writes_auto(&wd, base_sha, &item_spec.write_set)
+                    .map_err(|e| SubflowError::Storage(format!("write_set verification failed: {e}")))?;
+                if !ver.is_ok() {
+                    return Err(SubflowError::WriteSetViolation {
+                        item_key: item_key.to_string(),
+                        violations: ver.violations,
+                    });
+                }
+            }
+        }
+
         // Extract child's terminal Completed outputs directly from the child log (never say-so).
         let child_outputs = child_log
             .events
@@ -891,12 +1013,28 @@ pub fn finalize_map_item(
         return Ok(false);
     }
 
-    // Build deterministic `item_key`-sorted outputs + deduplicated union of attested performers.
+    // Build deterministic `item_key`-sorted outputs + deduplicated union of attested performers
+    // across BOTH completed AND failed attempts (so a provider that participated in a failed
+    // attempt before a retry succeeded can NEVER review its own work downstream!).
     let mut items_out = Map::new();
     let mut spine_entries = Vec::new();
     let mut all_performers = Vec::new();
     let mut seen_perf = BTreeSet::new();
+    let mut push_perf = |p: &Performer| {
+        let pk = (p.harness.clone(), p.model.clone(), p.session.clone());
+        if seen_perf.insert(pk) {
+            all_performers.push(p.clone());
+        }
+    };
     for k in updated.items.keys() {
+        // Always include every failed-attempt performer even when a retry later succeeded!
+        if let Some(fails) = updated.failed_attempts.get(k) {
+            for f in fails {
+                for p in &f.performers {
+                    push_perf(p);
+                }
+            }
+        }
         if let Some(c) = updated.completed.get(k) {
             items_out.insert(
                 k.clone(),
@@ -913,10 +1051,7 @@ pub fn finalize_map_item(
                 "terminal_status": c.terminal_status,
             }));
             for p in &c.performers {
-                let pk = (p.harness.clone(), p.model.clone(), p.session.clone());
-                if seen_perf.insert(pk) {
-                    all_performers.push(p.clone());
-                }
+                push_perf(p);
             }
         } else if let Some(fails) = updated.failed_attempts.get(k) {
             let last_err = fails.last().map(|f| f.error.as_str()).unwrap_or("failed");
@@ -929,14 +1064,6 @@ pub fn finalize_map_item(
                 "child_ir_hash": subflow_ir_hash,
                 "terminal_status": "failed",
             }));
-            for f in fails {
-                for p in &f.performers {
-                    let pk = (p.harness.clone(), p.model.clone(), p.session.clone());
-                    if seen_perf.insert(pk) {
-                        all_performers.push(p.clone());
-                    }
-                }
-            }
         }
     }
 
@@ -961,4 +1088,16 @@ pub fn finalize_map_item(
     { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, ev) }
         .map_err(|e| SubflowError::Storage(e.to_string()))?;
     Ok(true)
+}
+
+fn resolve_simple_workdir(template: &str, params: &Value) -> String {
+    let mut out = template.to_string();
+    if let Some(obj) = params.as_object() {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                out = out.replace(&format!("{{{{params.{k}}}}}"), s);
+            }
+        }
+    }
+    out
 }

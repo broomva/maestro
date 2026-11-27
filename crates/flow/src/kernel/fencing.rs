@@ -119,10 +119,7 @@ impl FencingStore {
         }
     }
 
-    /// Write-time atomic check and single-use consumption:
-    /// Requires `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`.
-    /// If `incoming_epoch == written_epoch` AND exact `(op_id, payload_digest)` match the already
-    /// committed operation, returns `IdempotentReplay` without executing a second mutation.
+    /// Write-time atomic check and single-use consumption without an auxiliary SQLite mutation.
     pub fn commit_fenced_write(
         &self,
         resource_id: &str,
@@ -131,6 +128,30 @@ impl FencingStore {
         payload_digest: &str,
         result_json: &str,
     ) -> Result<FencedWriteOutcome, FencingError> {
+        self.commit_fenced_write_with_tx(resource_id, incoming_epoch, op_id, payload_digest, result_json, |_| Ok(()))
+    }
+
+    /// Write-time atomic check, protected mutation callback, and single-use consumption inside
+    /// ONE SQLite `BEGIN IMMEDIATE` transaction.
+    ///
+    /// Requires `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`.
+    /// Runs `mutate_tx(&conn)` ONLY after verifying epoch validity and BEFORE committing
+    /// `written_epoch = incoming_epoch`; if `mutate_tx` returns `Err`, the entire transaction
+    /// rolls back so the epoch is not spuriously consumed and no partial mutation commits.
+    /// If `incoming_epoch == written_epoch` AND exact `(op_id, payload_digest)` match, returns
+    /// `IdempotentReplay` without invoking `mutate_tx` a second time.
+    pub fn commit_fenced_write_with_tx<F>(
+        &self,
+        resource_id: &str,
+        incoming_epoch: u64,
+        op_id: &str,
+        payload_digest: &str,
+        result_json: &str,
+        mutate_tx: F,
+    ) -> Result<FencedWriteOutcome, FencingError>
+    where
+        F: FnOnce(&Connection) -> Result<(), FencingError>,
+    {
         let conn = self.connect()?;
         conn.execute_batch("BEGIN IMMEDIATE;")
             .map_err(|e| FencingError::Storage(e.to_string()))?;
@@ -191,6 +212,7 @@ impl FencingStore {
                     written,
                 });
             }
+            mutate_tx(&conn)?;
             conn.execute(
                 "UPDATE resource_epochs
                  SET written_epoch = ?1, last_op_id = ?2, last_payload_digest = ?3, last_result_json = ?4
@@ -210,6 +232,10 @@ impl FencingStore {
                 Err(e)
             }
         }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 

@@ -244,6 +244,9 @@ pub enum Refusal {
         "This session has pinned {limit} proposals on instance {instance}, as many as one session may; nothing was pinned."
     )]
     ProposalsExhausted { instance: String, limit: usize },
+    /// A child subflow instance was fenced off by its parent's owner, epoch, or supersession state.
+    #[error("Child instance {child} is fenced ({code}): {detail}.")]
+    ChildFenced { child: String, code: &'static str, detail: String },
 }
 
 impl Refusal {
@@ -292,6 +295,7 @@ impl Refusal {
             Refusal::ProposalStale { .. } => "proposal_stale",
             Refusal::ProposalChanged { .. } => "proposal_changed",
             Refusal::ProposalsExhausted { .. } => "proposals_exhausted",
+            Refusal::ChildFenced { code, .. } => code,
         }
     }
 }

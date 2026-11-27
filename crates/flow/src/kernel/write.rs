@@ -138,10 +138,13 @@ use super::events::{
     VerifyRecord, digest, marker_digest,
 };
 use super::exec::{self, Feed, Limits, Ran, Search};
+use super::fencing::FencingStore;
 use super::guard::{self, GUARD_TIMEOUT, Judged};
 use super::ir::{Class, Ir, Iteration, Node, RouteRef};
 use super::replay::{Awaiting, Next, Reason, State, awaiting, guard_input, next_of, pinned, secs};
 use super::snapshot;
+use super::subflow::{check_child_write_fence, child_declared_write_set, child_spawn_owner_epoch};
+use super::writeset::verify_worktree_writes_auto;
 use crate::FlowError;
 use crate::clock;
 use crate::ids::InstanceId;
@@ -635,6 +638,7 @@ pub fn claim_as(
     } else {
         check_owner(&log, &started, instance, session)?;
     }
+    check_child_fence_in_guard(&guard, &log, &started, session, false)?;
     let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {
         return Err(Refusal::UnknownNode { node: node.to_string() }.into());
@@ -1049,6 +1053,7 @@ pub fn complete_as(
     };
     limits.check().map_err(|detail| Refusal::InvalidLimits { detail })?;
     let (instance, sha) = parse_token(token)?;
+    let fence_db_path = ledger.layout.root.join("fencing_epochs.sqlite");
     let mut guard = ledger.lock()?;
     let log = guard.log(&instance)?;
     let now = wall(&log)?;
@@ -1061,9 +1066,12 @@ pub fn complete_as(
         Ok(plan) => plan,
         Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
     };
+    let is_reconcile = plan.step == Step::Reconcile;
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, is_reconcile)?;
     if let Err(unfit) = check_receipt(&held, session, &outputs, &plan.argv) {
         return refuse(&mut guard, &held, unfit, &[]);
     }
+    let mut granted_fence: Option<(String, u64, PathBuf)> = None;
     if let Step::Effect { preconditions } = &plan.step {
         // The preconditions run with the lock released; then everything again under it.
         let input = guard_input(&held.log, &held.started, &held.rec.node)?;
@@ -1074,6 +1082,7 @@ pub fn complete_as(
         let log = guard.log(&instance)?;
         let judged_at = wall(&log)?;
         held = name(hold(log, session, &instance, &sha, judged_at)?);
+        check_child_fence_in_guard(&guard, &held.log, &held.started, session, false)?;
         // Another completion of this claim started the effect meanwhile: it is never run twice.
         if held.effect_started {
             let reason = "another completion started this effect; complete again to reconcile it";
@@ -1086,6 +1095,16 @@ pub fn complete_as(
             Ok(digest) => digest,
             Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
         };
+        // Grant-time barrier: allocate monotonic resource fencing epoch BEFORE EffectStarted and
+        // before running the external effect command so stale workers are invalidated immediately.
+        let fence_db = fence_db_path.clone();
+        let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
+        let fence_store = FencingStore::open(&fence_db)
+            .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
+        let epoch = fence_store
+            .grant_epoch(&fence_resource)
+            .map_err(|e| KernelError::Encode(format!("fencing grant failed: {e}")))?;
+        granted_fence = Some((fence_resource, epoch, fence_db));
         let intent = EffectStarted {
             node: held.rec.node.clone(),
             iteration: held.rec.iteration.clone(),
@@ -1099,7 +1118,16 @@ pub fn complete_as(
     let limits = &cancel_capped(limits, held.rec.cancel_at);
     // The command runs with the flows lock released, so other writers and readers go on.
     // Every command but the project's own in a snapshot searches the system's PATH (`exec`).
-    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref() };
+    let fence_env_owned: Vec<(&'static str, String)> = match &granted_fence {
+        Some((res, epoch, db)) => vec![
+            ("MAESTRO_FENCING_EPOCH", epoch.to_string()),
+            ("MAESTRO_FENCING_RESOURCE", res.clone()),
+            ("MAESTRO_FENCING_DB", db.display().to_string()),
+        ],
+        None => Vec::new(),
+    };
+    let fence_env_refs: Vec<(&str, &str)> = fence_env_owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &fence_env_refs };
     drop(guard);
     let ran_at = clock::now();
     let ran = match &plan.snapshot {
@@ -1113,6 +1141,7 @@ pub fn complete_as(
     let log = guard.log(&instance)?;
     let after = wall(&log)?;
     let held = name(hold(log, session, &instance, &sha, after)?);
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, is_reconcile)?;
     // The command and its input are bound to the pinned IR, params and claim inputs.
     if let Err(unfit) = prepare(&held, &outputs) {
         return refuse(&mut guard, &held, unfit, &[]);
@@ -1146,11 +1175,100 @@ pub fn complete_as(
     if let Some(unfit) = unfit {
         return refuse(&mut guard, &held, unfit, &stderr);
     }
+    // Write-time atomic fencing commit for Class::Effect: rejects completion if a newer epoch
+    // superseded this worker while the external command ran.
+    if let Some((fence_resource, epoch, fence_db)) = &granted_fence {
+        let fence_store = FencingStore::open(fence_db)
+            .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
+        let op_id = format!("{}:{}:{}", instance.as_str(), held.rec.node, held.rec.attempt);
+        let payload_digest = digest(&outputs);
+        let res_json = serde_json::to_string(&outputs).unwrap_or_else(|_| "null".to_string());
+        if let Err(e) = fence_store.commit_fenced_write(fence_resource, *epoch, &op_id, &payload_digest, &res_json) {
+            return refuse(&mut guard, &held, ("stale_fencing_epoch", e.to_string()), &stderr);
+        }
+    }
+    // 6-surface post-write isolation check for child subflow Work/Effect nodes in git worktrees.
+    if let Some(parent_ref) = &held.started.parent_ref
+        && matches!(held.node()?.class, Class::Work { .. } | Class::Effect { .. })
+        && plan.cwd.join(".git").exists()
+        && let Ok(parent_id) = InstanceId::new(&parent_ref.parent_instance)
+        && let Ok(parent_log) = guard.log(&parent_id)
+        && let Some(ws) = child_declared_write_set(&parent_log, parent_ref)
+    {
+        let base_sha = held.started.params.get("base_sha").and_then(Value::as_str);
+        match verify_worktree_writes_auto(&plan.cwd, base_sha, &ws) {
+            Ok(ver) if !ver.is_ok() => {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    ("write_set_violation", format!("worktree wrote outside declared write_set: {:?}", ver.violations)),
+                    &stderr,
+                );
+            }
+            Err(e) => {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    ("write_set_verification_failed", e),
+                    &stderr,
+                );
+            }
+            Ok(_) => {}
+        }
+    }
     let completed = receipt(&held, session, outputs, verify.clone());
     let appended = append_writable(&mut guard, &instance, held.log.seq(), completed.to_event()?)?;
     drop(guard);
     let verdicts = settled(ledger, session, &instance);
     Ok(Completion::Completed { appended, verify, stderr: String::from_utf8_lossy(&stderr).into_owned(), verdicts })
+}
+
+/// Enforces parent-delegated ownership, `owner_epoch` adoption fencing, and `Superseded` fencing
+/// on every normal write verb (`claim_as`, `complete_as`, `choose`) for child subflow instances.
+fn check_child_fence_in_guard(
+    guard: &WriteGuard,
+    child_log: &Log,
+    child_started: &Started,
+    session: &VerifiedSession,
+    reconcile_only: bool,
+) -> Result<(), KernelError> {
+    let Some(parent_ref) = &child_started.parent_ref else {
+        return Ok(());
+    };
+    let parent_id = InstanceId::new(&parent_ref.parent_instance).map_err(|_| Refusal::ChildFenced {
+        child: child_log.instance.to_string(),
+        code: "invalid_parent_ref",
+        detail: format!("invalid parent instance id {:?}", parent_ref.parent_instance),
+    })?;
+    let parent_log = guard.log(&parent_id)?;
+    let caller_owner = owner(session)?;
+    let claim_owner_epoch = child_spawn_owner_epoch(&parent_log, child_log.instance.as_str()).ok_or_else(|| {
+        Refusal::ChildFenced {
+            child: child_log.instance.to_string(),
+            code: "unregistered_child",
+            detail: format!("parent {} has no SubflowStarted record for child {}", parent_id, child_log.instance),
+        }
+    })?;
+    check_child_write_fence(&parent_log, child_log, &caller_owner, claim_owner_epoch, reconcile_only).map_err(
+        |err| {
+            Refusal::ChildFenced {
+                child: child_log.instance.to_string(),
+                code: err.code(),
+                detail: err.to_string(),
+            }
+            .into()
+        },
+    )
+}
+
+/// Computes the resource key fenced by `FencingStore` for a `Class::Effect` node.
+fn effect_fencing_resource(started: &Started, node: &str, inputs: &BTreeMap<String, String>) -> String {
+    if let Some(res) = started.params.get("fencing_resource").and_then(Value::as_str)
+        && !res.is_empty()
+    {
+        return res.to_string();
+    }
+    format!("effect:{}:{}:{}", started.ir.flow, node, digest(&serde_json::json!(inputs)))
 }
 
 /// `limits`, with the timeout no longer than what is left before `cancel_at` (at least 1 ms, the
@@ -1192,6 +1310,7 @@ pub fn choose(
     let log = guard.log(&instance)?;
     let now = wall(&log)?;
     let held = hold(log, session, &instance, &sha, now)?;
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, false)?;
     check_verb(&held, true)?;
     let reject = |guard: &mut WriteGuard, held: &Held, (code, reason): Unfit| {
         refused(guard, held, code, &reason).map(|appended| Choosing::Refused { appended, code, reason })
@@ -1214,6 +1333,7 @@ pub fn choose(
     let log = guard.log(&instance)?;
     let judged_at = wall(&log)?;
     let held = hold(log, session, &instance, &sha, judged_at)?;
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, false)?;
     if let Err(unfit) = enabled(&held) {
         return reject(&mut guard, &held, unfit);
     }

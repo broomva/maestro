@@ -41,7 +41,7 @@ pub fn normalize_pattern(raw: &str) -> Result<String, String> {
         if seg == ".." {
             return Err(format!("parent traversal (..) forbidden in write_set: {raw:?}"));
         }
-        parts.push(seg.to_ascii_lowercase());
+        parts.push(seg.to_lowercase());
     }
     if parts.is_empty() {
         return Err(format!("write_set pattern resolves to empty path: {raw:?}"));
@@ -58,21 +58,21 @@ pub fn validate_write_set(patterns: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Wildcard match on a single path segment (`*` matches 0+ chars, `?` matches 1 char).
-fn seg_match(pat: &[u8], target: &[u8]) -> bool {
+/// Wildcard match on a single path segment (`*` matches 0+ Unicode chars, `?` matches 1 Unicode char).
+fn seg_match(pat: &[char], target: &[char]) -> bool {
     let (m, n) = (pat.len(), target.len());
     let mut dp = vec![vec![false; n + 1]; m + 1];
     dp[0][0] = true;
     for i in 1..=m {
-        if pat[i - 1] == b'*' {
+        if pat[i - 1] == '*' {
             dp[i][0] = dp[i - 1][0];
         }
     }
     for i in 1..=m {
         for j in 1..=n {
-            if pat[i - 1] == b'*' {
+            if pat[i - 1] == '*' {
                 dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
-            } else if pat[i - 1] == b'?' || pat[i - 1] == target[j - 1] {
+            } else if pat[i - 1] == '?' || pat[i - 1] == target[j - 1] {
                 dp[i][j] = dp[i - 1][j - 1];
             }
         }
@@ -81,18 +81,18 @@ fn seg_match(pat: &[u8], target: &[u8]) -> bool {
 }
 
 /// Returns true if two single-segment glob patterns can both match at least one common non-empty
-/// segment string (exact DP over `*` and `?`).
-fn seg_patterns_intersect(a: &[u8], b: &[u8]) -> bool {
+/// segment string (exact DP over `*` and `?` on Unicode scalar chars).
+fn seg_patterns_intersect(a: &[char], b: &[char]) -> bool {
     let (m, n) = (a.len(), b.len());
     let mut dp = vec![vec![false; n + 1]; m + 1];
     dp[0][0] = true;
     for i in 1..=m {
-        if a[i - 1] == b'*' {
+        if a[i - 1] == '*' {
             dp[i][0] = dp[i - 1][0];
         }
     }
     for j in 1..=n {
-        if b[j - 1] == b'*' {
+        if b[j - 1] == '*' {
             dp[0][j] = dp[0][j - 1];
         }
     }
@@ -100,11 +100,11 @@ fn seg_patterns_intersect(a: &[u8], b: &[u8]) -> bool {
         for j in 1..=n {
             let ca = a[i - 1];
             let cb = b[j - 1];
-            if ca == b'*' && cb == b'*' {
+            if ca == '*' && cb == '*' {
                 dp[i][j] = dp[i - 1][j] || dp[i][j - 1] || dp[i - 1][j - 1];
-            } else if ca == b'*' || cb == b'*' {
+            } else if ca == '*' || cb == '*' {
                 dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
-            } else if ca == b'?' || cb == b'?' || ca == cb {
+            } else if ca == '?' || cb == '?' || ca == cb {
                 dp[i][j] = dp[i - 1][j - 1];
             }
         }
@@ -125,8 +125,12 @@ fn match_segments(pat: &[&str], path: &[&str]) -> bool {
         for j in 1..=n {
             if pat[i - 1] == "**" {
                 dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
-            } else if seg_match(pat[i - 1].as_bytes(), path[j - 1].as_bytes()) {
-                dp[i][j] = dp[i - 1][j - 1];
+            } else {
+                let pc: Vec<char> = pat[i - 1].chars().collect();
+                let tc: Vec<char> = path[j - 1].chars().collect();
+                if seg_match(&pc, &tc) {
+                    dp[i][j] = dp[i - 1][j - 1];
+                }
             }
         }
     }
@@ -155,8 +159,12 @@ fn segment_lists_intersect(a: &[&str], b: &[&str]) -> bool {
                 dp[i][j] = dp[i - 1][j] || dp[i][j - 1] || dp[i - 1][j - 1];
             } else if sa == "**" || sb == "**" {
                 dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
-            } else if seg_patterns_intersect(sa.as_bytes(), sb.as_bytes()) {
-                dp[i][j] = dp[i - 1][j - 1];
+            } else {
+                let ca: Vec<char> = sa.chars().collect();
+                let cb: Vec<char> = sb.chars().collect();
+                if seg_patterns_intersect(&ca, &cb) {
+                    dp[i][j] = dp[i - 1][j - 1];
+                }
             }
         }
     }
@@ -259,6 +267,23 @@ fn walk_dir_entries(root: &Path, dir: &Path, tracked: &BTreeSet<String>, out: &m
 }
 
 /// Independent 6-surface post-write verifier for a child lane executed in an isolated git worktree:
+/// Convenience wrapper for kernel completion/finalization sites: resolves `head_sha` from
+/// `git rev-parse HEAD` in `worktree_root`, uses `base_sha_opt` when supplied (else `head_sha`),
+/// and runs the full 6-surface [`verify_worktree_writes`] check.
+pub fn verify_worktree_writes_auto(
+    worktree_root: &Path,
+    base_sha_opt: Option<&str>,
+    declared_write_set: &[String],
+) -> Result<WriteVerification, String> {
+    let head_lines = git_lines(worktree_root, &["rev-parse", "HEAD"])?;
+    let head_sha = head_lines
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| "git rev-parse HEAD returned empty output".to_string())?;
+    let base_sha = base_sha_opt.filter(|s| !s.is_empty()).unwrap_or(head_sha);
+    verify_worktree_writes(worktree_root, base_sha, head_sha, declared_write_set)
+}
+
 /// 1. Committed diff (`base_sha..head_sha`)
 /// 2. Staged index (`git diff --cached --name-only`)
 /// 3. Unstaged modifications (`git diff --name-only`)
