@@ -238,6 +238,7 @@ fn claimed(attempt: u32, until: Timestamp, token: &str) -> NewEvent {
         tool_use_id: None,
         cancel_at: None,
         audit: None,
+        owner_epoch: None,
     };
     c.to_event().unwrap()
 }

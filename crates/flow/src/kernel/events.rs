@@ -124,6 +124,9 @@ pub struct Claimed {
     /// the spine and every check ignore. Absent in logs written before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<Audit>,
+    /// Parent `owner_epoch` when a child subflow claim was created (IR v10 adoption fencing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_epoch: Option<u64>,
 }
 
 /// The receipt: a node accepted in an iteration, with the verify the kernel ran.

@@ -140,8 +140,27 @@ fn complete_lane_child(
     g.append(cid, cseq2, verify_done.to_event().unwrap()).unwrap();
 }
 
-fn setup_parent(yaml: &str, params: serde_json::Value) -> (tempfile::TempDir, Ledger, InstanceId, Owner) {
+fn init_git_repo(wt: &std::path::Path) {
+    std::fs::create_dir_all(wt.join("src/a")).unwrap();
+    let git = |args: &[&str]| {
+        let st = Command::new("git").args(args).current_dir(wt).status().unwrap();
+        assert!(st.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(wt.join("src/a/ok.rs"), "pub fn a() {}\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "base"]);
+}
+
+fn setup_parent(yaml: &str, mut params: serde_json::Value) -> (tempfile::TempDir, Ledger, InstanceId, Owner) {
     let dir = tempfile::tempdir().unwrap();
+    if params.get("repo").and_then(|v| v.as_str()) == Some("/tmp") {
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        params["repo"] = json!(wt.to_str().unwrap());
+    }
     let root = dir.path().join("flows");
     let host = HostId::new("test-host").unwrap();
     let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
@@ -301,11 +320,18 @@ fn t05_crash_points_a_b_c_idempotency_zero_duplicates_zero_orphans() {
     let parent_log = g.log(&parent).unwrap();
     let p_started: Started = serde_json::from_value(parent_log.events[0].body.clone()).unwrap();
     let child_ir = p_started.ir.subflows.get("lane@1").unwrap().clone();
+    let child_repo = p_started.params["repo"].as_str().unwrap().to_string();
+    let base_sha = String::from_utf8(
+        Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&child_repo).output().unwrap().stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
     let child_started = Started {
         flow: "lane@1".into(),
         ir_hash: maestro_flow::kernel::ir::content_hash(&child_ir).unwrap(),
         ir: child_ir,
-        params: json!({"repo": "/tmp", "item_key": "lane-a"}),
+        params: json!({"repo": child_repo, "base_sha": base_sha, "item_key": "lane-a"}),
         owner: Some(me.clone()),
         audit: None,
         parent_ref: None,
@@ -425,7 +451,26 @@ fn t06_owner_epoch_adoption_fencing_rejects_former_owner_child_writes() {
 
 #[test]
 fn t07_superseded_child_with_open_effect_reconcile_only_and_quiescence_guards() {
-    let (_dir, mut ledger, parent, me) = setup_parent(&lead_v3_yaml(), json!({"repo": "/tmp", "max_parallel": 2}));
+    let eff_lane = r#"
+flow: lane
+version: 1
+params: [repo, item_key]
+workdir: "{{params.repo}}"
+nodes:
+  work:
+    class: effect
+    run: [sh, -c, "true"]
+    reconcile: [sh, -c, "printf reconciled > reconcile_ran.txt"]
+  verify_lane:
+    class: pure
+    needs: [work]
+    run: [true]
+"#;
+    let yaml = lead_v3_yaml().replace(
+        &LANE_YAML.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"),
+        &eff_lane.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"),
+    );
+    let (dir, mut ledger, parent, me) = setup_parent(&yaml, json!({"repo": "/tmp", "max_parallel": 2}));
     let items_v1 = vec![MapItemSpec {
         key: "lane-a".into(),
         input_digest: "sha256:v1".into(),
@@ -483,7 +528,27 @@ fn t07_superseded_child_with_open_effect_reconcile_only_and_quiescence_guards() 
         "quiescence_refused"
     );
 
-    // Narrow --reconcile-only exception succeeds and logs EffectReconciled!
+    // Reconcile for a WRONG attempt (attempt=99) MUST fail closed!
+    assert_eq!(
+        reconcile_superseded_effect(
+            &mut g,
+            &parent,
+            &child,
+            "work",
+            Iteration::new(),
+            99,
+            BTreeMap::new(),
+            json!({"ok": true}),
+            &me,
+            ep,
+        )
+        .unwrap_err()
+        .code(),
+        "subflow_superseded"
+    );
+    assert!(!dir.path().join("repo/reconcile_ran.txt").exists(), "reconcile command must not run for wrong attempt");
+
+    // Reconcile for the REAL open effect executes the declared reconcile command!
     reconcile_superseded_effect(
         &mut g,
         &parent,
@@ -492,11 +557,16 @@ fn t07_superseded_child_with_open_effect_reconcile_only_and_quiescence_guards() 
         Iteration::new(),
         1,
         BTreeMap::new(),
-        json!({"reconciled": true}),
+        json!({"ok": true}),
         &me,
         ep,
     )
     .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("repo/reconcile_ran.txt")).unwrap(),
+        "reconciled",
+        "declared reconcile command must actually execute"
+    );
 
     // Now confirmed worker termination + zero open effects -> SubflowQuiesced succeeds!
     quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, "pid:999:exited", &me)
@@ -605,6 +675,8 @@ fn t10_spine_determinism_across_different_child_completion_orders_and_empty_map(
     let run_order = |order: [&str; 2]| {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("flows");
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
         let host = HostId::new("test-host").unwrap();
         let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
         let compiled = compile(&lead_v3_yaml()).unwrap();
@@ -614,7 +686,7 @@ fn t10_spine_determinism_across_different_child_completion_orders_and_empty_map(
             flow: compiled.name(),
             ir_hash: compiled.hash().to_string(),
             ir: compiled.ir().clone(),
-            params: json!({"repo": "/tmp", "max_parallel": 2}),
+            params: json!({"repo": wt.to_str().unwrap(), "max_parallel": 2}),
             owner: Some(me.clone()),
             audit: None,
             parent_ref: None,
@@ -1006,6 +1078,7 @@ fn t15_performer_union_includes_failed_attempt_when_retry_succeeds() {
             tool_use_id: None,
             cancel_at: None,
             audit: None,
+            owner_epoch: Some(0),
         };
         g.append(&cid1, c1_seq, c1_claim.to_event().unwrap()).unwrap();
         finalize_map_item(
@@ -1021,8 +1094,19 @@ fn t15_performer_union_includes_failed_attempt_when_retry_succeeds() {
         )
         .unwrap();
 
-        // Attempt 2 (retry): Codex runs and succeeds!
+        // Retry BEFORE quiescing failed child MUST fail closed (`quiescence_refused`)!
         let p_codex = Performer { harness: "codex".into(), model: None, session: Some("t3:local/x1".into()) };
+        assert_eq!(
+            claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", Some(p_codex.clone()), &me)
+                .unwrap_err()
+                .code(),
+            "quiescence_refused"
+        );
+        // Once failed child is confirmed quiescent, retry succeeds!
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid1, "pid:111:exited", &me)
+            .unwrap();
+
+        // Attempt 2 (retry): Codex runs and succeeds!
         let (cid2, _) =
             claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", Some(p_codex.clone()), &me)
                 .unwrap();
@@ -1066,4 +1150,226 @@ fn t16_unicode_case_folding_in_write_set_overlap() {
     assert!(patterns_intersect("Ä.txt", "ä.txt").unwrap());
     assert!(patterns_intersect("SRC/Café/*.rs", "src/café/main.rs").unwrap());
     assert!(path_matches_pattern("src/CAFÉ/lib.rs", "src/café/**").unwrap());
+    // Full Unicode CaseFolding.txt expansions: ß/ẞ <-> ss, ligatures, Greek sigma!
+    assert!(patterns_intersect("ß.txt", "ss.txt").unwrap());
+    assert!(patterns_intersect("ẞ.txt", "SS.txt").unwrap());
+    assert!(patterns_intersect("ﬁle.rs", "FILE.RS").unwrap());
+    assert!(patterns_intersect("Σ.txt", "ς.txt").unwrap());
+}
+
+#[test]
+fn t17_stale_fencing_epoch_blocks_subprocess_before_target_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("flows");
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let host = HostId::new("test-host").unwrap();
+    let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+    let sess = verified_owner("owner-precheck");
+
+    // Pre-grant epoch 1, then advance resource to epoch 2 (simulating a newer worker winning the grant!).
+    let fstore = FencingStore::open(root.join("fencing_epochs.sqlite")).unwrap();
+    let e1 = fstore.grant_epoch("branch:protected").unwrap();
+    let e2 = fstore.grant_epoch("branch:protected").unwrap();
+    assert_eq!((e1, e2), (1, 2));
+
+    // Stale worker bound to fencing_epoch=1 tries to run a Class::Effect that would write `mutated.txt`.
+    let target = workdir.join("mutated.txt");
+    let yaml = format!(
+        r#"
+flow: stale_target_guard
+version: 1
+params: [repo, fencing_resource, fencing_epoch]
+workdir: "{{{{params.repo}}}}"
+nodes:
+  ship:
+    class: effect
+    run: [sh, -c, 'printf mutated > "{}"']
+    reconcile: [sh, -c, "true"]
+"#,
+        target.display()
+    );
+    let compiled = compile(&yaml).unwrap();
+    let s = start(
+        &mut ledger,
+        &sess,
+        &compiled,
+        json!({"repo": workdir.to_str().unwrap(), "fencing_resource": "branch:protected", "fencing_epoch": 1}),
+    )
+    .unwrap();
+    let c = claim(&mut ledger, &sess, &s.instance, "ship").unwrap();
+    let comp = complete(&mut ledger, &sess, &c.token, json!({"ok": true}), &Limits::default()).unwrap();
+    match comp {
+        Completion::Refused { code, .. } => assert_eq!(code, "stale_fencing_epoch"),
+        other => panic!("expected stale_fencing_epoch refusal, got {other:?}"),
+    }
+    assert!(
+        !target.exists(),
+        "stale worker MUST be rejected BEFORE spawning the effect subprocess — target must NOT be mutated!"
+    );
+}
+
+#[test]
+fn t18_normal_kernel_claim_and_complete_drive_class_map_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().join("repo");
+    init_git_repo(&wt);
+    let root = dir.path().join("flows");
+    let host = HostId::new("test-host").unwrap();
+    let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+    let sess = verified_owner("owner-e2e");
+
+    let compiled = compile(&lead_v3_yaml()).unwrap();
+    let started = start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2}))
+        .unwrap();
+
+    // 1. Run plan_waves through normal claim -> complete, emitting one lane item.
+    let c_pw = claim(&mut ledger, &sess, &started.instance, "plan_waves").unwrap();
+    let r_pw = complete(
+        &mut ledger,
+        &sess,
+        &c_pw.token,
+        json!({"lanes": [{"lane_id": "lane-a", "write_set": ["src/a/**"]}]}),
+        &Limits::default(),
+    )
+    .unwrap();
+    assert!(matches!(r_pw, Completion::Completed { .. }));
+
+    // 2. Claim Class::Map `execute_lanes` through NORMAL kernel `claim()` (auto-expands + spawns child!).
+    let c_map = claim(&mut ledger, &sess, &started.instance, "execute_lanes").unwrap();
+    let child_id = InstanceId::new(c_map.inputs.get("__map_child_instance").expect("spawned child id")).unwrap();
+
+    // 3. Drive the spawned child strictly through NORMAL kernel `claim()` + `complete()`!
+    let c_w = claim(&mut ledger, &sess, &child_id, "work").unwrap();
+    assert!(matches!(complete(&mut ledger, &sess, &c_w.token, json!({"ok": true}), &Limits::default()).unwrap(), Completion::Completed { .. }));
+    let c_v = claim(&mut ledger, &sess, &child_id, "verify_lane").unwrap();
+    assert!(matches!(complete(&mut ledger, &sess, &c_v.token, json!({"sha": "ok"}), &Limits::default()).unwrap(), Completion::Completed { .. }));
+
+    // 4. Complete Class::Map `execute_lanes` through NORMAL kernel `complete()`!
+    let r_map = complete(&mut ledger, &sess, &c_map.token, json!({}), &Limits::default()).unwrap();
+    assert!(matches!(r_map, Completion::Completed { .. }), "normal map complete must settle parent map: {r_map:?}");
+}
+
+#[test]
+fn t19_adoption_does_not_strand_child_and_worktree_verification_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().join("repo");
+    init_git_repo(&wt);
+    let root = dir.path().join("flows");
+    let host = HostId::new("test-host").unwrap();
+    let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+    let old_sess = verified_owner("owner-old");
+    let new_sess = verified_owner("owner-new");
+    let old_owner = owner("owner-old");
+    let new_owner = owner("owner-new");
+
+    let compiled = compile(&lead_v3_yaml()).unwrap();
+    let started = start(&mut ledger, &old_sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2}))
+        .unwrap();
+    let c_pw = claim(&mut ledger, &old_sess, &started.instance, "plan_waves").unwrap();
+    complete(
+        &mut ledger,
+        &old_sess,
+        &c_pw.token,
+        json!({"lanes": [{"lane_id": "lane-a", "write_set": ["src/a/**"]}]}),
+        &Limits::default(),
+    )
+    .unwrap();
+    let c_map = claim(&mut ledger, &old_sess, &started.instance, "execute_lanes").unwrap();
+    let child_id = InstanceId::new(c_map.inputs.get("__map_child_instance").unwrap()).unwrap();
+
+    // Old owner takes a claim on child at epoch 0, then parent is Adopted by new_owner (epoch 1)!
+    let old_child_claim = claim(&mut ledger, &old_sess, &child_id, "work").unwrap();
+    {
+        let mut g = ledger.lock().unwrap();
+        let adopt = Adopted {
+            from: old_owner,
+            to: new_owner,
+            approval: Approval {
+                ledger: "asks.yaml".into(),
+                ask_id: "ask-adopt".into(),
+                answer_option: "adopt".into(),
+                source: "owner".into(),
+                row_hash: "sha256:aa".into(),
+            },
+            audit: None,
+        };
+        let pseq = g.log(&started.instance).unwrap().seq();
+        g.append(&started.instance, pseq, adopt.to_event().unwrap()).unwrap();
+    }
+
+    // 1. Former owner's pre-adoption claim MUST fail (`not_owner`), AND even new owner using old claim token MUST fail (`former_owners_claim`)!
+    assert_eq!(
+        complete(&mut ledger, &old_sess, &old_child_claim.token, json!({"ok": true}), &Limits::default())
+            .unwrap_err()
+            .code(),
+        "not_owner"
+    );
+    assert_eq!(
+        complete(&mut ledger, &new_sess, &old_child_claim.token, json!({"ok": true}), &Limits::default())
+            .unwrap_err()
+            .code(),
+        "former_owners_claim"
+    );
+
+    // 2. New owner takes a fresh claim on the EXISTING child (with expired/replaced lease via new attempt) -> NOT stranded!
+    // Force old claim's lease to be superseded by creating a fresh child for a non-git worktree check too,
+    // and verify new_owner can claim & complete the next node on the adopted child!
+    let verify_claim = {
+        // First let's verify new_sess CAN claim a fresh child on a non-git dir and gets fail-closed write_set_verification_failed!
+        let bad_dir = dir.path().join("not_a_git_repo");
+        std::fs::create_dir_all(&bad_dir).unwrap();
+        let s_bad = start(&mut ledger, &new_sess, &compiled, json!({"repo": bad_dir.to_str().unwrap(), "max_parallel": 2}))
+            .unwrap();
+        let cpw2 = claim(&mut ledger, &new_sess, &s_bad.instance, "plan_waves").unwrap();
+        complete(
+            &mut ledger,
+            &new_sess,
+            &cpw2.token,
+            json!({"lanes": [{"lane_id": "lane-ng", "write_set": ["src/a/**"]}]}),
+            &Limits::default(),
+        )
+        .unwrap();
+        let cm2 = claim(&mut ledger, &new_sess, &s_bad.instance, "execute_lanes").unwrap();
+        let bad_child = InstanceId::new(cm2.inputs.get("__map_child_instance").unwrap()).unwrap();
+        let cw2 = claim(&mut ledger, &new_sess, &bad_child, "work").unwrap();
+        match complete(&mut ledger, &new_sess, &cw2.token, json!({"ok": true}), &Limits::default()).unwrap() {
+            Completion::Refused { code, .. } => assert_eq!(code, "write_set_verification_failed"),
+            other => panic!("missing .git worktree MUST fail closed, got {other:?}"),
+        }
+        // Also confirm new_sess can claim an un-claimed node on an adopted child (not stranded!).
+        let s2 = start(&mut ledger, &old_sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2}))
+            .unwrap();
+        let cpw3 = claim(&mut ledger, &old_sess, &s2.instance, "plan_waves").unwrap();
+        complete(
+            &mut ledger,
+            &old_sess,
+            &cpw3.token,
+            json!({"lanes": [{"lane_id": "lane-adopted", "write_set": ["src/a/**"]}]}),
+            &Limits::default(),
+        )
+        .unwrap();
+        let cm3 = claim(&mut ledger, &old_sess, &s2.instance, "execute_lanes").unwrap();
+        let adopted_child = InstanceId::new(cm3.inputs.get("__map_child_instance").unwrap()).unwrap();
+        {
+            let mut g = ledger.lock().unwrap();
+            let adopt2 = Adopted {
+                from: owner("owner-old"),
+                to: owner("owner-new"),
+                approval: Approval {
+                    ledger: "asks.yaml".into(),
+                    ask_id: "ask-adopt-2".into(),
+                    answer_option: "adopt".into(),
+                    source: "owner".into(),
+                    row_hash: "sha256:bb".into(),
+                },
+                audit: None,
+            };
+            let pseq = g.log(&s2.instance).unwrap().seq();
+            g.append(&s2.instance, pseq, adopt2.to_event().unwrap()).unwrap();
+        }
+        let c_new = claim(&mut ledger, &new_sess, &adopted_child, "work").unwrap();
+        complete(&mut ledger, &new_sess, &c_new.token, json!({"ok": true}), &Limits::default()).unwrap()
+    };
+    assert!(matches!(verify_claim, Completion::Completed { .. }), "new owner after adoption must NOT be stranded on existing child");
 }

@@ -19,6 +19,7 @@ use super::events::{
     Owner, ParentRef, Performer, Retired, Started, SubflowCompleted, SubflowFailed, SubflowQuiesced, SubflowStarted,
     Superseded, digest, performers_receipt_digest,
 };
+use super::exec::{self, Feed, Limits, Ran, Search};
 use super::ir::{Class, Iteration, OnItemFailure, ReadyWhen};
 use super::replay::{Reason, State, next_of, pinned};
 use super::write::{PROVIDERS, provider_of};
@@ -30,6 +31,7 @@ use crate::log::Log;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::process::Command;
 
 /// Stable refusal codes for IR v10 map & subflow operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -80,6 +82,19 @@ impl SubflowError {
             SubflowError::Storage(_) => "storage_error",
         }
     }
+}
+
+/// Returns `(required, write_set)` for a child instance spawned by a `map` node.
+/// `required` is true whenever the parent `map` declares `ready_when: disjoint_writes` OR the
+/// item itself declares a non-empty `write_set`.
+pub fn child_requires_write_set(parent_log: &Log, parent_ref: &ParentRef) -> (bool, Vec<String>) {
+    let disjoint = pinned(parent_log)
+        .ok()
+        .and_then(|s| s.ir.nodes.get(&parent_ref.node).cloned())
+        .is_some_and(|n| matches!(n.class, Class::Map { ready_when: Some(ReadyWhen::DisjointWrites), .. }));
+    let st = fold_map_state(parent_log, &parent_ref.node, &parent_ref.iteration);
+    let ws = st.items.get(&parent_ref.item_key).map(|i| i.write_set.clone()).unwrap_or_default();
+    (disjoint || !ws.is_empty(), ws)
 }
 
 /// Returns the parent-declared `write_set` for a child instance spawned by a `map` node, if any.
@@ -163,6 +178,8 @@ pub struct MapRuntimeState {
     pub completed: BTreeMap<String, SubflowCompleted>,
     /// Failure attempts per `item_key`.
     pub failed_attempts: BTreeMap<String, Vec<SubflowFailed>>,
+    /// Failed children awaiting `SubflowQuiesced` (still holding write_set & retry reservations!).
+    pub failed_unquiesced: BTreeMap<String, SubflowFailed>,
     /// Superseded children awaiting `SubflowQuiesced` (still holding write_set reservations!).
     pub superseded_unquiesced: BTreeMap<String, Superseded>,
     /// All quiesced child instance IDs.
@@ -231,6 +248,9 @@ pub fn fold_map_state(log: &Log, node: &str, iteration: &Iteration) -> MapRuntim
                     if st.in_flight.get(&f.item_key).is_some_and(|s| s.child_instance == f.child_instance) {
                         st.in_flight.remove(&f.item_key);
                     }
+                    if !st.quiesced_children.contains(&f.child_instance) {
+                        st.failed_unquiesced.insert(f.child_instance.clone(), f.clone());
+                    }
                     st.failed_attempts.entry(f.item_key.clone()).or_default().push(f);
                 }
             }
@@ -253,6 +273,7 @@ pub fn fold_map_state(log: &Log, node: &str, iteration: &Iteration) -> MapRuntim
                     && &q.iteration == iteration
                 {
                     st.superseded_unquiesced.remove(&q.child_instance);
+                    st.failed_unquiesced.remove(&q.child_instance);
                     st.quiesced_children.insert(q.child_instance);
                 }
             }
@@ -262,22 +283,27 @@ pub fn fold_map_state(log: &Log, node: &str, iteration: &Iteration) -> MapRuntim
     st
 }
 
-/// Returns true if the parent log has ANY `Superseded` child that has not yet logged
-/// `SubflowQuiesced` or ANY expanded `map` node with unfinished items (used by `stop::assess`).
+/// Returns true if the parent log has ANY `Superseded` or `SubflowFailed` child that has not yet
+/// logged `SubflowQuiesced` or ANY expanded `map` node with unfinished items (used by `stop::assess`).
 pub fn has_unsettled_subflows(log: &Log) -> bool {
-    let mut superseded: BTreeSet<String> = BTreeSet::new();
+    let mut unquiesced: BTreeSet<String> = BTreeSet::new();
     let mut expanded_nodes: BTreeMap<(String, Iteration), usize> = BTreeMap::new();
     let mut completed_nodes: BTreeSet<(String, Iteration)> = BTreeSet::new();
     for ev in &log.events {
         match ev.kind.as_str() {
             Superseded::KIND => {
                 if let Ok(s) = serde_json::from_value::<Superseded>(ev.body.clone()) {
-                    superseded.insert(s.child_instance);
+                    unquiesced.insert(s.child_instance);
+                }
+            }
+            SubflowFailed::KIND => {
+                if let Ok(f) = serde_json::from_value::<SubflowFailed>(ev.body.clone()) {
+                    unquiesced.insert(f.child_instance);
                 }
             }
             SubflowQuiesced::KIND => {
                 if let Ok(q) = serde_json::from_value::<SubflowQuiesced>(ev.body.clone()) {
-                    superseded.remove(&q.child_instance);
+                    unquiesced.remove(&q.child_instance);
                 }
             }
             MapExpanded::KIND => {
@@ -293,7 +319,7 @@ pub fn has_unsettled_subflows(log: &Log) -> bool {
             _ => {}
         }
     }
-    if !superseded.is_empty() {
+    if !unquiesced.is_empty() {
         return true;
     }
     expanded_nodes.keys().any(|k| !completed_nodes.contains(k))
@@ -398,7 +424,7 @@ pub fn expand_map(
     let Some(n) = started.ir.nodes.get(node) else {
         return Err(SubflowError::WrongClass(node.to_string()));
     };
-    let Class::Map { max_items, .. } = &n.class else {
+    let Class::Map { max_items, ready_when, .. } = &n.class else {
         return Err(SubflowError::WrongClass(node.to_string()));
     };
     if items.len() > *max_items as usize {
@@ -415,6 +441,11 @@ pub fn expand_map(
         if !keys.insert(item.key.clone()) {
             return Err(SubflowError::InvalidExpansion {
                 detail: format!("duplicate item_key {:?}", item.key),
+            });
+        }
+        if matches!(ready_when, Some(ReadyWhen::DisjointWrites)) && item.write_set.is_empty() {
+            return Err(SubflowError::InvalidExpansion {
+                detail: format!("item {:?} has empty write_set under ready_when: disjoint_writes", item.key),
             });
         }
         item.write_set =
@@ -533,8 +564,17 @@ pub fn claim_map_item(
         return Err(SubflowError::ConcurrencyLimit { in_flight: state.in_flight.len(), limit });
     }
 
-    // 2. Atomic claim-time `disjoint_writes` check retaining reservations on BOTH `SubflowStarted`
-    //    AND unquiesced `Superseded` siblings until `SubflowQuiesced`!
+    // 2. Atomic claim-time `disjoint_writes` check retaining reservations on `SubflowStarted`,
+    //    unquiesced `Superseded`, AND unquiesced `SubflowFailed` siblings until `SubflowQuiesced`!
+    for (child_id, fail) in &state.failed_unquiesced {
+        if fail.item_key == item_key {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!(
+                    "failed child {child_id} for item {item_key:?} must be quiesced (SubflowQuiesced) before retry"
+                ),
+            });
+        }
+    }
     if matches!(ready_when, Some(ReadyWhen::DisjointWrites)) && !item.write_set.is_empty() {
         for (sib_key, active_sib) in &state.in_flight {
             if write_sets_intersect(&item.write_set, &active_sib.write_set)
@@ -554,6 +594,17 @@ pub fn claim_map_item(
                 return Err(SubflowError::WriteSetConflict {
                     item_key: item_key.to_string(),
                     sibling: format!("superseded:{}:{child_id}", sup.item_key),
+                });
+            }
+        }
+        for (child_id, fail) in &state.failed_unquiesced {
+            if let Some(orig) = state.started_by_child.get(child_id)
+                && write_sets_intersect(&item.write_set, &orig.write_set)
+                    .map_err(|detail| SubflowError::InvalidExpansion { detail })?
+            {
+                return Err(SubflowError::WriteSetConflict {
+                    item_key: item_key.to_string(),
+                    sibling: format!("failed_unquiesced:{}:{child_id}", fail.item_key),
                 });
             }
         }
@@ -605,6 +656,23 @@ pub fn claim_map_item(
         if let Some(obj) = started.params.as_object() {
             for (k, v) in obj {
                 child_params.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        // Pin initial git HEAD into `base_sha` when spawning a child in a git worktree so
+        // 6-surface post-write verification can never lose committed changes.
+        if !child_params.contains_key("base_sha")
+            && let Some(raw_wd) = child_ir.workdir.as_deref()
+        {
+            let wd_val = Value::Object(child_params.clone());
+            let wd = PathBuf::from(resolve_simple_workdir(raw_wd, &wd_val));
+            if wd.is_dir() && wd.join(".git").exists()
+                && let Ok(out) = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&wd).output()
+                && out.status.success()
+            {
+                let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !sha.is_empty() {
+                    child_params.insert("base_sha".to_string(), Value::String(sha));
+                }
             }
         }
         let child_started = Started {
@@ -694,8 +762,50 @@ pub fn supersede_stale_items(
     Ok((next_epoch, superseded_children))
 }
 
+/// Returns true if `child_log` has an open `EffectStarted` matching `(node, iteration, attempt)`
+/// that has neither `Completed` nor `EffectReconciled`.
+fn has_specific_open_effect(child_log: &Log, node: &str, iteration: &Iteration, attempt: u32) -> bool {
+    let mut open = false;
+    for ev in &child_log.events {
+        match ev.kind.as_str() {
+            EffectStarted::KIND => {
+                if let Ok(s) = serde_json::from_value::<EffectStarted>(ev.body.clone())
+                    && s.node == node
+                    && &s.iteration == iteration
+                    && s.attempt == attempt
+                {
+                    open = true;
+                }
+            }
+            Completed::KIND => {
+                if let Ok(c) = serde_json::from_value::<Completed>(ev.body.clone())
+                    && c.node == node
+                    && &c.iteration == iteration
+                    && c.attempt == attempt
+                {
+                    open = false;
+                }
+            }
+            EffectReconciled::KIND => {
+                if let Ok(r) = serde_json::from_value::<EffectReconciled>(ev.body.clone())
+                    && r.node == node
+                    && &r.iteration == iteration
+                    && r.attempt == attempt
+                {
+                    open = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    open
+}
+
 /// Narrowly scoped `--reconcile-only` completion permitted on a `Superseded` child that has an
-/// open `EffectStarted` (fenced by `parent.owner` + `owner_epoch`). Never executes `run:`.
+/// open `EffectStarted` (fenced by `parent.owner` + `owner_epoch`).
+/// Verifies `(child_node, child_iteration, attempt)` matches an actual open `EffectStarted` on
+/// `child_log`, executes the node's declared `Class::Effect { reconcile, .. }` command via
+/// `exec::run` (never `run:`), and appends `EffectReconciled` only when `reconcile` exits 0.
 #[allow(clippy::too_many_arguments)]
 pub fn reconcile_superseded_effect(
     guard: &mut WriteGuard,
@@ -712,8 +822,50 @@ pub fn reconcile_superseded_effect(
     let parent_log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
     let child_log = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?;
     check_child_write_fence(&parent_log, &child_log, caller_owner, claim_owner_epoch, true)?;
-    if !child_has_open_effect(&child_log) {
+    if !has_specific_open_effect(&child_log, child_node, &child_iteration, attempt) {
         return Err(SubflowError::SubflowSuperseded { child: child.to_string() });
+    }
+    let child_started = pinned(&child_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let Some(node_def) = child_started.ir.nodes.get(child_node) else {
+        return Err(SubflowError::WrongClass(child_node.to_string()));
+    };
+    let Class::Effect { reconcile, .. } = &node_def.class else {
+        return Err(SubflowError::WrongClass(child_node.to_string()));
+    };
+    if reconcile.is_empty() {
+        return Err(SubflowError::QuiescenceRefused {
+            detail: format!("effect node {child_node} declares no reconcile command"),
+        });
+    }
+    let raw_wd = child_started.ir.workdir.as_deref().ok_or_else(|| SubflowError::QuiescenceRefused {
+        detail: format!("child {child} declares no workdir for reconcile"),
+    })?;
+    let cwd = PathBuf::from(resolve_simple_workdir(raw_wd, &child_started.params));
+    if !cwd.is_absolute() || !cwd.is_dir() {
+        return Err(SubflowError::QuiescenceRefused {
+            detail: format!("child reconcile workdir invalid: {}", cwd.display()),
+        });
+    }
+    let argv: Vec<String> = reconcile
+        .iter()
+        .map(|w| resolve_simple_workdir(w, &child_started.params))
+        .collect();
+    match exec::run(&argv, &cwd, &Limits::default(), Feed { search: Search::Trusted, stdin: None, extra_env: &[] }) {
+        Ran::Exited { code: Some(0), .. } => {}
+        Ran::Exited { code, stderr, .. } => {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!(
+                    "reconcile command for {child_node} exited {:?}: {}",
+                    code,
+                    String::from_utf8_lossy(&stderr).trim()
+                ),
+            });
+        }
+        Ran::Failed { code, detail, .. } => {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("reconcile command failed ({code}): {detail}"),
+            });
+        }
     }
     let rec = EffectReconciled {
         node: child_node.to_string(),
@@ -728,7 +880,8 @@ pub fn reconcile_superseded_effect(
     Ok(())
 }
 
-/// Records `SubflowQuiesced` on a `Superseded` child, releasing its `write_set` reservation.
+/// Records `SubflowQuiesced` on a `Superseded` or `SubflowFailed` child, releasing its `write_set`
+/// and retry reservations.
 /// NEVER infers quiescence from wall-clock lease expiry alone: requires BOTH a non-empty confirmed
 /// worker `termination_receipt` AND zero open `EffectStarted` entries in the child log!
 #[allow(clippy::too_many_arguments)]
@@ -758,18 +911,21 @@ pub fn quiesce_subflow(
         });
     }
     let state = fold_map_state(&parent_log, node, &iteration);
-    let Some(sup) = state.superseded_unquiesced.get(child.as_str()) else {
-        if state.quiesced_children.contains(child.as_str()) {
-            return Ok(());
-        }
+    let map_epoch = if let Some(sup) = state.superseded_unquiesced.get(child.as_str()) {
+        sup.map_epoch
+    } else if let Some(fail) = state.failed_unquiesced.get(child.as_str()) {
+        fail.map_epoch
+    } else if state.quiesced_children.contains(child.as_str()) {
+        return Ok(());
+    } else {
         return Err(SubflowError::QuiescenceRefused {
-            detail: format!("child {child} is not in superseded_unquiesced state"),
+            detail: format!("child {child} is not in superseded_unquiesced or failed_unquiesced state"),
         });
     };
     let ev = SubflowQuiesced {
         node: node.to_string(),
         iteration,
-        map_epoch: sup.map_epoch,
+        map_epoch,
         item_key: item_key.to_string(),
         child_instance: child.to_string(),
         termination_receipt: termination_receipt.to_string(),
@@ -854,7 +1010,7 @@ pub fn finalize_map_item(
     let Some(n) = started.ir.nodes.get(node) else {
         return Err(SubflowError::WrongClass(node.to_string()));
     };
-    let Class::Map { on_item_failure, item_retry_max, subflow_ir_hash, .. } = &n.class else {
+    let Class::Map { on_item_failure, item_retry_max, ready_when, subflow_ir_hash, .. } = &n.class else {
         return Err(SubflowError::WrongClass(node.to_string()));
     };
     let child_log = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?;
@@ -894,6 +1050,11 @@ pub fn finalize_map_item(
     }
 
     if let Some(err) = failed_error {
+        if child_has_open_effect(&child_log) {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("cannot fail child {child} while an EffectStarted remains unreconciled"),
+            });
+        }
         let retry_attempt = state.failed_attempts.get(item_key).map_or(0, Vec::len) as u32;
         let fail_ev = SubflowFailed {
             node: node.to_string(),
@@ -947,24 +1108,45 @@ pub fn finalize_map_item(
             });
         }
 
-        // 3. Enforce 6-surface post-write isolation if the item declared a write_set and the
-        //    child's workdir is a git worktree!
-        if let Some(item_spec) = state.items.get(item_key)
-            && !item_spec.write_set.is_empty()
-            && let Some(raw_wd) = child_started.ir.workdir.as_deref()
-        {
+        // 3. Fail-closed 6-surface post-write isolation check whenever `ready_when: disjoint_writes`
+        //    or a non-empty `write_set` is declared! Never silently skip on missing workdir,
+        //    missing `.git`, or missing `base_sha`.
+        let require_ws = matches!(ready_when, Some(ReadyWhen::DisjointWrites))
+            || state.items.get(item_key).is_some_and(|i| !i.write_set.is_empty());
+        if require_ws {
+            let item_spec = state.items.get(item_key).ok_or_else(|| SubflowError::WriteSetViolation {
+                item_key: item_key.to_string(),
+                violations: vec!["missing item spec for write_set verification".into()],
+            })?;
+            if item_spec.write_set.is_empty() {
+                return Err(SubflowError::WriteSetViolation {
+                    item_key: item_key.to_string(),
+                    violations: vec!["empty write_set under disjoint_writes".into()],
+                });
+            }
+            let raw_wd = child_started.ir.workdir.as_deref().ok_or_else(|| SubflowError::WriteSetViolation {
+                item_key: item_key.to_string(),
+                violations: vec!["child declares no workdir for write_set verification".into()],
+            })?;
             let wd_str = resolve_simple_workdir(raw_wd, &child_started.params);
             let wd = PathBuf::from(&wd_str);
-            if wd.is_dir() && wd.join(".git").exists() {
-                let base_sha = child_started.params.get("base_sha").and_then(Value::as_str);
-                let ver = verify_worktree_writes_auto(&wd, base_sha, &item_spec.write_set)
-                    .map_err(|e| SubflowError::Storage(format!("write_set verification failed: {e}")))?;
-                if !ver.is_ok() {
-                    return Err(SubflowError::WriteSetViolation {
-                        item_key: item_key.to_string(),
-                        violations: ver.violations,
-                    });
-                }
+            if !wd.is_dir() || !wd.join(".git").exists() {
+                return Err(SubflowError::WriteSetViolation {
+                    item_key: item_key.to_string(),
+                    violations: vec![format!("child workdir is not a git worktree: {}", wd.display())],
+                });
+            }
+            let base_sha = child_started.params.get("base_sha").and_then(Value::as_str);
+            let ver = verify_worktree_writes_auto(&wd, base_sha, &item_spec.write_set)
+                .map_err(|e| SubflowError::WriteSetViolation {
+                    item_key: item_key.to_string(),
+                    violations: vec![e],
+                })?;
+            if !ver.is_ok() {
+                return Err(SubflowError::WriteSetViolation {
+                    item_key: item_key.to_string(),
+                    violations: ver.violations,
+                });
             }
         }
 
@@ -998,7 +1180,7 @@ pub fn finalize_map_item(
     // Re-read parent log to see if the entire map node is now settled.
     let updated_log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
     let updated = fold_map_state(&updated_log, node, &iteration);
-    if !updated.superseded_unquiesced.is_empty() {
+    if !updated.superseded_unquiesced.is_empty() || !updated.failed_unquiesced.is_empty() {
         return Ok(false);
     }
 

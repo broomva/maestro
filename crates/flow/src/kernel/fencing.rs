@@ -10,8 +10,17 @@
 //!    duplicate/replayed writes at the same epoch (optionally returning the cached idempotent
 //!    result only when exact `op_id` + `payload_digest` match).
 
+use crate::log::line_hash;
 use rusqlite::{Connection, OptionalExtension, params};
+use rustix::fs::{FlockOperation, flock};
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+
+/// Exclusive OS lock guard for a single fenced resource (`<fencing_dir>/fencing_locks/<sha>.lock`),
+/// serializing `(verify_epoch_current -> external mutation -> commit_fenced_write)` on the host.
+pub struct ResourceLockGuard {
+    _file: File,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FencingError {
@@ -232,6 +241,66 @@ impl FencingStore {
                 Err(e)
             }
         }
+    }
+
+    /// Acquires an exclusive host-level `flock(LOCK_EX)` lock for `resource_id`, serializing
+    /// `(verify_epoch_current -> external effect command -> commit_fenced_write)` so no stale
+    /// worker can spawn an external mutation after a newer epoch has been granted.
+    pub fn acquire_resource_lock(&self, resource_id: &str) -> Result<ResourceLockGuard, FencingError> {
+        let locks_dir = self
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("fencing_locks");
+        std::fs::create_dir_all(&locks_dir).map_err(|e| FencingError::Storage(e.to_string()))?;
+        let digest = line_hash(resource_id.as_bytes()).replace(':', "_");
+        let lock_path = locks_dir.join(format!("{digest}.lock"));
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| FencingError::Storage(e.to_string()))?;
+        flock(&file, FlockOperation::LockExclusive)
+            .map_err(|e| FencingError::Storage(format!("resource flock failed: {e}")))?;
+        Ok(ResourceLockGuard { _file: file })
+    }
+
+    /// Pre-mutation fencing check: verifies `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`
+    /// BEFORE spawning an external effect command so stale workers never mutate the target.
+    pub fn verify_epoch_current(&self, resource_id: &str, incoming_epoch: u64) -> Result<(), FencingError> {
+        let conn = self.connect()?;
+        let row: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT granted_epoch, written_epoch FROM resource_epochs WHERE resource_id = ?1",
+                params![resource_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| FencingError::Storage(e.to_string()))?;
+        let (granted_i, written_i) = row.ok_or_else(|| FencingError::StaleEpoch {
+            resource_id: resource_id.to_string(),
+            incoming: incoming_epoch,
+            granted: 0,
+        })?;
+        let granted = granted_i as u64;
+        let written = written_i as u64;
+        if incoming_epoch != granted {
+            return Err(FencingError::StaleEpoch {
+                resource_id: resource_id.to_string(),
+                incoming: incoming_epoch,
+                granted,
+            });
+        }
+        if incoming_epoch <= written {
+            return Err(FencingError::EpochAlreadyConsumed {
+                resource_id: resource_id.to_string(),
+                incoming: incoming_epoch,
+                written,
+            });
+        }
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {

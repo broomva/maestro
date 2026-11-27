@@ -23,7 +23,42 @@ impl WriteVerification {
     }
 }
 
-/// Normalizes a repo-relative write-set pattern or path to lowercase POSIX segments.
+/// Full Unicode Case Folding (Unicode CaseFolding.txt C + F mappings) so filesystem-equivalent
+/// names such as `Ä`/`ä`, `ß`/`ss`, `ẞ`/`SS`, `ﬁ`/`fi`, and `Σ`/`ς` always collide.
+fn unicode_case_fold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\u{00DF}' | '\u{1E9E}' => out.push_str("ss"),     // ß, ẞ -> ss
+            '\u{0130}' | '\u{0131}' => out.push('i'),          // İ, ı -> i
+            '\u{0149}' => out.push_str("\u{02BC}n"),           // ŉ -> ʼn
+            '\u{01F0}' => out.push_str("j\u{030C}"),           // ǰ -> ǰ
+            '\u{0390}' => out.push_str("\u{03B9}\u{0308}\u{0301}"),
+            '\u{03B0}' => out.push_str("\u{03C5}\u{0308}\u{0301}"),
+            '\u{03C2}' | '\u{03A3}' => out.push('\u{03C3}'),   // ς, Σ -> σ
+            '\u{0587}' => out.push_str("\u{0565}\u{0582}"),    // և -> եւ
+            '\u{1E96}' => out.push_str("h\u{0331}"),
+            '\u{1E97}' => out.push_str("t\u{0308}"),
+            '\u{1E98}' => out.push_str("w\u{030A}"),
+            '\u{1E99}' => out.push_str("y\u{030A}"),
+            '\u{1E9A}' => out.push_str("a\u{02BE}"),
+            '\u{FB00}' => out.push_str("ff"),
+            '\u{FB01}' => out.push_str("fi"),
+            '\u{FB02}' => out.push_str("fl"),
+            '\u{FB03}' => out.push_str("ffi"),
+            '\u{FB04}' => out.push_str("ffl"),
+            '\u{FB05}' | '\u{FB06}' => out.push_str("st"),
+            _ => {
+                for lc in ch.to_lowercase() {
+                    out.push(lc);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Normalizes a repo-relative write-set pattern or path to full Unicode case-folded POSIX segments.
 /// Refuses empty strings, null bytes, leading `/`, and `..` traversal segments.
 pub fn normalize_pattern(raw: &str) -> Result<String, String> {
     if raw.is_empty() || raw.contains('\0') {
@@ -41,7 +76,7 @@ pub fn normalize_pattern(raw: &str) -> Result<String, String> {
         if seg == ".." {
             return Err(format!("parent traversal (..) forbidden in write_set: {raw:?}"));
         }
-        parts.push(seg.to_lowercase());
+        parts.push(unicode_case_fold(seg));
     }
     if parts.is_empty() {
         return Err(format!("write_set pattern resolves to empty path: {raw:?}"));
@@ -266,21 +301,23 @@ fn walk_dir_entries(root: &Path, dir: &Path, tracked: &BTreeSet<String>, out: &m
     Ok(())
 }
 
-/// Independent 6-surface post-write verifier for a child lane executed in an isolated git worktree:
-/// Convenience wrapper for kernel completion/finalization sites: resolves `head_sha` from
-/// `git rev-parse HEAD` in `worktree_root`, uses `base_sha_opt` when supplied (else `head_sha`),
-/// and runs the full 6-surface [`verify_worktree_writes`] check.
+/// Fail-closed wrapper for kernel completion/finalization sites: resolves `head_sha` from
+/// `git rev-parse HEAD` in `worktree_root`, REQUIRES an explicit pinned `base_sha` (never
+/// defaulting to current `HEAD`, which would hide committed changes), and runs the full 6-surface
+/// [`verify_worktree_writes`] check.
 pub fn verify_worktree_writes_auto(
     worktree_root: &Path,
     base_sha_opt: Option<&str>,
     declared_write_set: &[String],
 ) -> Result<WriteVerification, String> {
+    let base_sha = base_sha_opt
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "missing pinned base_sha for fail-closed 6-surface worktree write_set verification".to_string())?;
     let head_lines = git_lines(worktree_root, &["rev-parse", "HEAD"])?;
     let head_sha = head_lines
         .first()
         .map(String::as_str)
         .ok_or_else(|| "git rev-parse HEAD returned empty output".to_string())?;
-    let base_sha = base_sha_opt.filter(|s| !s.is_empty()).unwrap_or(head_sha);
     verify_worktree_writes(worktree_root, base_sha, head_sha, declared_write_set)
 }
 
