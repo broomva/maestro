@@ -110,6 +110,11 @@ async fn each_page_renders_its_block_from_the_ledgers() {
     for (path, what) in [("/today", "today"), ("/health", "health")] {
         assert_page(&send(addr, "GET", path, &host, &[]).await, what, path);
     }
+    // The fixture holds no flow ledger: the Flows page says it was not read, never that none ran.
+    let r = send(addr, "GET", "/flows", &host, &[]).await;
+    assert_page(&r, "flows", "/flows");
+    assert!(r.body.contains("The flow ledger was not read"), "{}", r.body);
+    assert!(!r.body.contains("No run is listed"));
     cancel.cancel();
 }
 
@@ -169,7 +174,7 @@ async fn no_page_takes_a_write_and_unknown_paths_are_not_found() {
     let (addr, cancel) = start(fixture()).await;
     let host = addr.to_string();
     for method in ["POST", "PUT", "DELETE", "PATCH"] {
-        for path in ["/", "/decisions", "/decisions/demo-arc.yaml/merge-now", "/today", "/health"] {
+        for path in ["/", "/decisions", "/decisions/demo-arc.yaml/merge-now", "/today", "/health", "/flows"] {
             assert_eq!(send(addr, method, path, &host, &[]).await.status, 405, "{method} {path}");
         }
     }

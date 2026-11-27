@@ -34,6 +34,7 @@ use std::sync::Arc;
 pub mod answers;
 mod file_pilot;
 pub mod flow;
+pub mod flows_web;
 pub mod http;
 pub mod owner_web;
 pub mod passkey;
