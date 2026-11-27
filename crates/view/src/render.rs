@@ -191,6 +191,14 @@ pub fn render_web_with_pending(
     (rendered, crate::screens::web::shell(&cx))
 }
 
+/// The web header's [`Shell`](crate::page::Shell) alone, for a page rendered from another source
+/// than the store (the Flows pages read the flow ledger): the same read the other pages' header is.
+pub fn web_shell(store: &Store, at: jiff::Timestamp, owner: Owner) -> crate::page::Shell {
+    let store = store.read_scope();
+    let cx = Ctx::new(&store, at, None, Some(owner), None);
+    crate::screens::web::shell(&cx)
+}
+
 impl<'a> Ctx<'a> {
     fn new(
         store: &'a Store,

@@ -98,7 +98,13 @@ pub const ICON_192_PNG: &[u8] = include_bytes!("../assets/icon-192.png");
 pub const ICON_512_PNG: &[u8] = include_bytes!("../assets/icon-512.png");
 
 /// The owner script (BRO-4042): the one script the web pages run, named in their policy by hash.
-pub const OWNER_JS: &str = concat!(include_str!("../assets/owner.js"), "\n", include_str!("../assets/navigation.js"));
+pub const OWNER_JS: &str = concat!(
+    include_str!("../assets/owner.js"),
+    "\n",
+    include_str!("../assets/navigation.js"),
+    "\n",
+    include_str!("../assets/live.js")
+);
 
 /// The web pages' policy (BRO-3588, BRO-4042): no form may post, no page may frame them, only
 /// the same origin's manifest may load, and the one script that runs is the owner script,
@@ -124,9 +130,11 @@ pub fn web_csp() -> &'static str {
 /// Only on the web pages, so the App's stylesheet holds only what the App places.
 const WEB_CSS: &str = concat!(include_str!("../assets/web.css"), include_str!("../assets/today.css"));
 const HEALTH_CSS: &str = include_str!("../assets/health.css");
+const FLOWS_CSS: &str = include_str!("../assets/flows.css");
 
 /// One place in the web pages' navigation: its path and its label.
-pub const WEB_NAV: [(&str, &str); 3] = [("/decisions", "Decisions"), ("/today", "Today"), ("/health", "Health")];
+pub const WEB_NAV: [(&str, &str); 4] =
+    [("/decisions", "Decisions"), ("/today", "Today"), ("/flows", "Flows"), ("/health", "Health")];
 
 /// What the web pages' header says (BRO-3783), from the same read as the page under it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -228,6 +236,7 @@ pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String 
                 link rel="manifest" href="/manifest.webmanifest";
                 style { (PreEscaped(WEB_CSS)) }
                 style { (PreEscaped(HEALTH_CSS)) }
+                style { (PreEscaped(FLOWS_CSS)) }
             }
             body class="mv-web" {
                 header class="mv-web-head" {

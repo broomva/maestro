@@ -1,4 +1,4 @@
-// Fast SPA navigation across Maestro's web pages (/decisions, /decisions/<l>/<id>, /today, /health).
+// Fast SPA navigation across Maestro's web pages (/decisions, /decisions/<l>/<id>, /today, /flows, /health).
 // Keeps the persistent toast stack alive across swaps, prefetches hovered/next decisions with
 // generation-guarded invalidation, verifies inline script/style identity across server upgrades,
 // preserves focus and screen-reader announcements, and falls back to full navigation on any error.
@@ -7,7 +7,8 @@
   const rootEl = document.querySelector("#maestro-root[data-web]");
   if (!rootEl || document.querySelector("[data-enroll]")) return;
 
-  const isAppPath = (p) => p === "/decisions" || p.startsWith("/decisions/") || p === "/today" || p === "/health";
+  const isAppPath = (p) =>
+    p === "/decisions" || p.startsWith("/decisions/") || p === "/today" || p === "/flows" || p.startsWith("/flows/") || p === "/health";
   const CACHE_TTL_MS = 4000;
   const FETCH_TIMEOUT_MS = 10000;
   const cache = new Map(); // pathname -> { html, at }

@@ -26,6 +26,7 @@ if [ "${MUTANTS_SHARDED:-}" = 1 ]; then echo "== mutation: ran in the workflow's
 step scripts/parity-check.sh
 step scripts/lock-parity.sh
 step scripts/tail-bench.sh
+step bun crates/view/assets/live.test.js
 step scripts/bridge-check.sh
 step scripts/acceptance/host-identity.sh --goldens --mutants --selftest
 echo "== ci green"
