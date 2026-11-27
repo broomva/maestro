@@ -79,7 +79,12 @@ fn run_by(
         Ok(snapshot) => snapshot,
         Err((detail, stderr)) => return Ran::Failed { code: "snapshot_failed", detail, stderr },
     };
-    let ran = exec::run(argv, &snapshot.root, &left(limits, deadline), Feed { search: Search::Caller, stdin, extra_env: &[] });
+    let ran = exec::run(
+        argv,
+        &snapshot.root,
+        &left(limits, deadline),
+        Feed { search: Search::Caller, stdin, extra_env: &[] },
+    );
     match snapshot.moved(commit) {
         None => ran,
         Some(detail) => {

@@ -149,6 +149,7 @@ fn direct_owner_marker_is_bound_to_the_token_not_the_working_directory() {
             harness: Some(Harness::Codex),
             pending_permissions: vec![],
             parent_id: None,
+            pid: None,
         });
     }
 

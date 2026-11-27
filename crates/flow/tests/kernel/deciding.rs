@@ -156,7 +156,8 @@ fn a_verdict_a_crash_left_unwritten_is_written_by_the_next_claim() {
         outputs: json!({ "ok": true }),
         verify: None,
         performer: None,
-        performers: Vec::new(), tool_use_id: None,
+        performers: Vec::new(),
+        tool_use_id: None,
         audit: None,
     };
     f.append(&fi, receipt.to_event().unwrap());
@@ -263,7 +264,8 @@ fn pin(f: &mut Fx, name: &str, ir: maestro_flow::kernel::Ir) -> InstanceId {
         ir,
         params: f.params(),
         owner: Some(Owner { session: "t3:-/owner".parse().unwrap(), marker_sha256: marker_digest("marker-1") }),
-        parent_ref: None, audit: None,
+        parent_ref: None,
+        audit: None,
     };
     let fi = id(name);
     f.ledger.lock().unwrap().append(&fi, 0, started.to_event().unwrap()).unwrap();
@@ -469,7 +471,8 @@ fn a_repeat_awaiting_its_verdict_is_not_terminal_and_a_claim_retries_it() {
         outputs: json!({ "xs": [] }),
         verify: None,
         performer: None,
-        performers: Vec::new(), tool_use_id: None,
+        performers: Vec::new(),
+        tool_use_id: None,
         audit: None,
     };
     f.append(&fi, receipt.to_event().unwrap());

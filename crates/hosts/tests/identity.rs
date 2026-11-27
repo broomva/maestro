@@ -1552,6 +1552,7 @@ fn direct_sessions_and_peer_credentials_are_verified() {
         harness: Some(Harness::ClaudeCode),
         pending_permissions: vec![],
         parent_id: None,
+        pid: None,
     });
     direct.register(DirectSession {
         id: "direct-closed".to_string(),
@@ -1561,6 +1562,7 @@ fn direct_sessions_and_peer_credentials_are_verified() {
         harness: Some(Harness::Codex),
         pending_permissions: vec![],
         parent_id: None,
+        pid: None,
     });
 
     let registry = SurfaceRegistry::new(None, None, Some(direct));
@@ -1634,6 +1636,7 @@ fn direct_sessions_and_peer_credentials_are_verified() {
         harness: Some(Harness::ClaudeCode),
         pending_permissions: vec![],
         parent_id: None,
+        pid: None,
     };
     let dbg_str = format!("{sample:?}");
     assert!(dbg_str.contains("<redacted>"));
@@ -1643,4 +1646,136 @@ fn direct_sessions_and_peer_credentials_are_verified() {
 
     assert!(within(&cwd, &cwd));
     assert!(!within(&outside, &cwd));
+}
+
+#[test]
+fn host_adapters_attest_real_worker_pgid_across_paseo_direct_and_t3() {
+    use maestro_core::session::SessionRef;
+    use maestro_hosts::attribution::{ProcStat, ProcessReader, SystemProcesses, attest_caller_worker_pgid};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    #[derive(Debug)]
+    struct MockProcs {
+        stats: BTreeMap<u32, (u32, u32)>, // pid -> (ppid, pgid)
+    }
+
+    impl ProcessReader for MockProcs {
+        fn read(&self, pid: u32) -> Result<ProcStat, String> {
+            let &(ppid, _) = self.stats.get(&pid).ok_or_else(|| format!("no proc {pid}"))?;
+            Ok(ProcStat {
+                ppid,
+                command: format!("p-{pid}"),
+                start_time: Ok("2026-11-27T00:00:00Z".into()),
+                uid: Ok(501),
+            })
+        }
+        fn pgid(&self, pid: u32) -> Result<u32, String> {
+            self.stats.get(&pid).map(|&(_, pg)| pg).ok_or_else(|| format!("no pgid {pid}"))
+        }
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let cwd = root.join("work");
+    fs::create_dir_all(&cwd).unwrap();
+
+    // 1. Paseo registry attests worker_pgid from PaseoAgent.pid via ProcessReader!
+    let paseo_dir = root.join("paseo");
+    let folder = paseo_dir.join("repo-1");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("agent-p1.json"),
+        serde_json::json!({
+            "id": "agent-p1",
+            "cwd": cwd.to_string_lossy(),
+            "lastStatus": "running",
+            "provider": "codex",
+            "startedAt": "2026-11-27T00:00:00Z",
+            "pid": 4100
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    // 2. Direct registry attests worker_pgid from DirectSession.pid via ProcessReader!
+    let direct = DirectRegistry::new();
+    direct.register(DirectSession {
+        id: "direct-w1".into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        token: "tok-w1".into(),
+        liveness: SessionLiveness::Live,
+        harness: Some(Harness::Codex),
+        parent_id: None,
+        pid: Some(4200),
+        pending_permissions: vec![],
+    });
+    direct.register(DirectSession {
+        id: "direct-child".into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        token: "tok-child".into(),
+        liveness: SessionLiveness::Live,
+        harness: Some(Harness::ClaudeCode),
+        parent_id: Some("direct-w1".into()),
+        pid: Some(4201),
+        pending_permissions: vec![],
+    });
+    // Also a Direct session with NO pid, authenticated via PeerCredentials { pid: 4300 }
+    direct.register(DirectSession {
+        id: "direct-peer".into(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        token: "tok-peer".into(),
+        liveness: SessionLiveness::Live,
+        harness: Some(Harness::Codex),
+        parent_id: None,
+        pid: None,
+        pending_permissions: vec![],
+    });
+
+    let mut stats = BTreeMap::new();
+    stats.insert(4100, (1, 9100)); // Paseo worker in pgid 9100
+    stats.insert(4200, (1, 9200)); // Direct worker in pgid 9200
+    stats.insert(4201, (4200, 9201)); // Direct child performer in pgid 9201
+    stats.insert(4300, (1, 9300)); // PeerCredentials caller in pgid 9300
+    // Short-lived CLI (pid 5000, own pgrp 5000) spawned by worker agent (pid 4900, pgid 9400)
+    stats.insert(4900, (1, 9400));
+    stats.insert(5000, (4900, 5000));
+    let procs = Arc::new(MockProcs { stats });
+
+    let registry = SurfaceRegistry::new(Some(PaseoRegistry::new(&paseo_dir)), None, Some(direct))
+        .with_process_reader(procs.clone());
+
+    let p_sess = registry
+        .verify_caller(&CallerClaim::paseo(Some("agent-p1"), Some(cwd.to_string_lossy().into_owned())))
+        .unwrap();
+    assert_eq!(p_sess.worker_pgid(), Some(9100), "Paseo adapter must attest agent.pid -> OS pgid");
+
+    let d_sess = registry
+        .verify_caller(&CallerClaim::direct(
+            Some("direct-w1"),
+            Some(cwd.to_string_lossy().into_owned()),
+            Some("tok-w1"),
+        ))
+        .unwrap();
+    assert_eq!(d_sess.worker_pgid(), Some(9200), "Direct adapter must attest session.pid -> OS pgid");
+
+    let child_ref: SessionRef = "direct:-/direct-child".parse().unwrap();
+    let perf = registry.performer(&d_sess, &child_ref).unwrap();
+    assert_eq!(perf.worker_pgid(), Some(9201), "Direct performer must attest child pid -> OS pgid");
+
+    let peer_sess = registry
+        .verify_caller(
+            &CallerClaim::direct(Some("direct-peer"), Some(cwd.to_string_lossy().into_owned()), Some("tok-peer"))
+                .with_peer(PeerCredentials { pid: 4300, uid: 501 }),
+        )
+        .unwrap();
+    assert_eq!(peer_sess.worker_pgid(), Some(9300), "PeerCredentials must attest peer.pid -> OS pgid");
+
+    // Attributed CLI whose own pgid == pid walks to enclosing worker pgid 9400!
+    assert_eq!(attest_caller_worker_pgid(procs.as_ref(), 5000), Some(9400));
+
+    // Real SystemProcesses reads this test process's actual live OS pgid (> 1)!
+    let real_pgid = SystemProcesses.pgid(std::process::id()).expect("SystemProcesses must read real OS pgid");
+    assert!(real_pgid > 1, "real OS pgid must be > 1, got {real_pgid}");
 }

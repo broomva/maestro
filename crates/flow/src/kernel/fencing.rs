@@ -15,6 +15,81 @@ use rusqlite::{Connection, OptionalExtension, params};
 use rustix::fs::{FlockOperation, flock};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Reserved argv[0] prefix for built-in kernel-executed atomic SQLite KV puts.
+pub const FENCED_SQLITE_KV_CMD: &str = "maestro:fenced-sqlite-kv";
+/// Reserved argv[0] prefix for built-in kernel-executed atomic git-ref CAS updates.
+pub const FENCED_GIT_REF_CAS_CMD: &str = "maestro:fenced-git-ref-cas";
+
+/// Built-in kernel-executed atomic fenced actuators for IR v10 `Class::Effect` nodes (D6 option a).
+/// Executed directly in Rust under `FencingStore`'s exclusive resource lock with zero external
+/// shell, zero mutable wrapper scripts, and zero hash-to-exec TOCTOU window.
+/// External non-fencing shell commands cannot run on the fenced path and must instead use D6
+/// option (b) post-termination reconciliation (`reconcile_superseded_effect`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FencedActuator {
+    /// Atomically writes `(resource_id, key) -> value` in `fenced_kv` inside the SAME SQLite
+    /// `BEGIN IMMEDIATE` transaction that checks `granted_epoch == epoch && written_epoch < epoch`
+    /// and sets `written_epoch = epoch`.
+    SqliteKvPut { key: String, value: String },
+    /// Executes `git update-ref <ref_name> <new_oid> <expected_old_oid>` directly (no shell) under
+    /// the exclusive per-resource lock, verifying the epoch barrier beforehand, committing
+    /// `written_epoch = epoch` + receipt in `fenced_git_refs`, and compensating on commit failure.
+    GitRefCas { ref_name: String, expected_old_oid: String, new_oid: String },
+}
+
+fn is_hex_oid(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+impl FencedActuator {
+    /// Parses a `Class::Effect.run` argv into a built-in kernel actuator if `argv[0]` uses a
+    /// `maestro:fenced-*` command; returns `Ok(None)` for external commands and `Err(...)` for
+    /// malformed built-in actuator invocations.
+    pub fn parse(argv: &[String]) -> Result<Option<Self>, String> {
+        let Some((cmd, args)) = argv.split_first() else {
+            return Ok(None);
+        };
+        if cmd == FENCED_SQLITE_KV_CMD {
+            if args.len() != 2 || args[0].is_empty() {
+                return Err(format!("{FENCED_SQLITE_KV_CMD} requires exactly 2 arguments: <non-empty key> <value>"));
+            }
+            return Ok(Some(Self::SqliteKvPut { key: args[0].clone(), value: args[1].clone() }));
+        }
+        if cmd == FENCED_GIT_REF_CAS_CMD {
+            if args.len() != 3 {
+                return Err(format!(
+                    "{FENCED_GIT_REF_CAS_CMD} requires exactly 3 arguments: <refs/...> <expected_old_oid> <new_oid>"
+                ));
+            }
+            let (ref_name, expected_old_oid, new_oid) = (&args[0], &args[1], &args[2]);
+            if !ref_name.starts_with("refs/")
+                || ref_name.contains("..")
+                || ref_name.bytes().any(|b| b <= 0x20 || b == 0x7f)
+            {
+                return Err(format!("invalid git ref name for {FENCED_GIT_REF_CAS_CMD}: {ref_name:?}"));
+            }
+            if !is_hex_oid(expected_old_oid) {
+                return Err(format!(
+                    "expected_old_oid must be a 40- or 64-char lowercase hex OID, got {expected_old_oid:?}"
+                ));
+            }
+            if !is_hex_oid(new_oid) || new_oid.bytes().all(|b| b == b'0') {
+                return Err(format!("new_oid must be a non-zero 40- or 64-char lowercase hex OID, got {new_oid:?}"));
+            }
+            return Ok(Some(Self::GitRefCas {
+                ref_name: ref_name.clone(),
+                expected_old_oid: expected_old_oid.clone(),
+                new_oid: new_oid.clone(),
+            }));
+        }
+        if cmd.starts_with("maestro:fenced-") {
+            return Err(format!("unknown built-in fenced actuator {cmd:?}"));
+        }
+        Ok(None)
+    }
+}
 
 /// Exclusive OS lock guard for a single fenced resource (`<fencing_dir>/fencing_locks/<sha>.lock`),
 /// serializing `(verify_epoch_current -> external mutation -> commit_fenced_write)` on the host.
@@ -48,8 +123,7 @@ impl FencingStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, FencingError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| FencingError::Storage(format!("create fencing dir: {e}")))?;
+            std::fs::create_dir_all(parent).map_err(|e| FencingError::Storage(format!("create fencing dir: {e}")))?;
         }
         let store = Self { path };
         let conn = store.connect()?;
@@ -65,12 +139,22 @@ impl FencingStore {
                  last_payload_digest TEXT,
                  last_result_json TEXT
              );
-             CREATE TABLE IF NOT EXISTS registered_targets (
+             CREATE TABLE IF NOT EXISTS fenced_kv (
                  resource_id TEXT NOT NULL,
-                 exe_path TEXT NOT NULL,
-                 exe_sha256 TEXT NOT NULL,
-                 args_digest TEXT NOT NULL,
-                 PRIMARY KEY (resource_id, exe_path, exe_sha256, args_digest)
+                 key TEXT NOT NULL,
+                 value TEXT NOT NULL,
+                 epoch INTEGER NOT NULL,
+                 op_id TEXT NOT NULL,
+                 PRIMARY KEY (resource_id, key)
+             );
+             CREATE TABLE IF NOT EXISTS fenced_git_refs (
+                 resource_id TEXT NOT NULL,
+                 ref_name TEXT NOT NULL,
+                 old_oid TEXT NOT NULL,
+                 new_oid TEXT NOT NULL,
+                 epoch INTEGER NOT NULL,
+                 op_id TEXT NOT NULL,
+                 PRIMARY KEY (resource_id, ref_name)
              );
              COMMIT;",
         )
@@ -105,8 +189,7 @@ impl FencingStore {
             return Err(FencingError::Storage("resource_id must be non-empty".into()));
         }
         let conn = self.connect()?;
-        conn.execute_batch("BEGIN IMMEDIATE;")
-            .map_err(|e| FencingError::Storage(e.to_string()))?;
+        conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| FencingError::Storage(e.to_string()))?;
         let res = (|| -> Result<u64, FencingError> {
             let current: Option<i64> = conn
                 .query_row(
@@ -181,8 +264,7 @@ impl FencingStore {
         F: FnOnce(&Connection) -> Result<(), FencingError>,
     {
         let conn = self.connect()?;
-        conn.execute_batch("BEGIN IMMEDIATE;")
-            .map_err(|e| FencingError::Storage(e.to_string()))?;
+        conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| FencingError::Storage(e.to_string()))?;
         let res = (|| -> Result<FencedWriteOutcome, FencingError> {
             struct EpochRow {
                 granted: i64,
@@ -266,11 +348,7 @@ impl FencingStore {
     /// `(verify_epoch_current -> external effect command -> commit_fenced_write)` so no stale
     /// worker can spawn an external mutation after a newer epoch has been granted.
     pub fn acquire_resource_lock(&self, resource_id: &str) -> Result<ResourceLockGuard, FencingError> {
-        let locks_dir = self
-            .path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("fencing_locks");
+        let locks_dir = self.path.parent().unwrap_or_else(|| Path::new(".")).join("fencing_locks");
         std::fs::create_dir_all(&locks_dir).map_err(|e| FencingError::Storage(e.to_string()))?;
         let digest = line_hash(resource_id.as_bytes()).replace(':', "_");
         let lock_path = locks_dir.join(format!("{digest}.lock"));
@@ -286,170 +364,213 @@ impl FencingStore {
         Ok(ResourceLockGuard { _file: file })
     }
 
-    /// Generic shells and script-eval interpreters that can run arbitrary untrusted code from
-    /// arguments or cwd; forbidden as registered fenced target executables.
-    fn is_forbidden_interpreter(path: &Path) -> bool {
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            return true;
-        };
-        let lower = name.to_ascii_lowercase();
-        matches!(
-            lower.as_str(),
-            "sh" | "bash"
-                | "zsh"
-                | "dash"
-                | "fish"
-                | "ksh"
-                | "csh"
-                | "tcsh"
-                | "ash"
-                | "python"
-                | "python2"
-                | "python3"
-                | "node"
-                | "nodejs"
-                | "deno"
-                | "bun"
-                | "perl"
-                | "ruby"
-                | "php"
-                | "lua"
-                | "awk"
-                | "gawk"
-                | "mawk"
-                | "nawk"
-                | "env"
-                | "xargs"
-        ) || lower.starts_with("python3.")
-            || lower.starts_with("python2.")
-    }
-
-    /// Validates that `exe_path` is an absolute, non-symlink, read-only, executable regular file
-    /// (not a shell/interpreter) and returns `(canonical_path_string, sha256_of_exact_bytes)`.
-    fn inspect_fenced_executable(exe_path: &Path, forbid_under_cwd: Option<&Path>) -> Result<(String, String), FencingError> {
-        if !exe_path.is_absolute() {
-            return Err(FencingError::Storage(format!(
-                "fenced target executable must be an absolute path (no relative/PATH commands): {}",
-                exe_path.display()
-            )));
-        }
-        let meta = std::fs::symlink_metadata(exe_path)
-            .map_err(|e| FencingError::Storage(format!("fenced target executable metadata failed: {e}")))?;
-        if meta.file_type().is_symlink() || !meta.is_file() {
-            return Err(FencingError::Storage(format!(
-                "fenced target executable must be a regular non-symlink file: {}",
-                exe_path.display()
-            )));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = meta.permissions().mode();
-            if (mode & 0o111) == 0 {
-                return Err(FencingError::Storage(format!(
-                    "fenced target executable is not executable (mode {:o}): {}",
-                    mode & 0o777,
-                    exe_path.display()
-                )));
-            }
-            if (mode & 0o222) != 0 {
-                return Err(FencingError::Storage(format!(
-                    "fenced target executable must be read-only (mode {:o} has write bits): {}",
-                    mode & 0o777,
-                    exe_path.display()
-                )));
-            }
-        }
-        if Self::is_forbidden_interpreter(exe_path) {
-            return Err(FencingError::Storage(format!(
-                "generic shell/interpreter forbidden as registered fenced target: {}",
-                exe_path.display()
-            )));
-        }
-        let canon_exe = std::fs::canonicalize(exe_path)
-            .map_err(|e| FencingError::Storage(format!("canonicalize fenced target failed: {e}")))?;
-        if Self::is_forbidden_interpreter(&canon_exe) {
-            return Err(FencingError::Storage(format!(
-                "fenced target resolves to forbidden shell/interpreter: {}",
-                canon_exe.display()
-            )));
-        }
-        if let Some(cwd) = forbid_under_cwd {
-            let canon_cwd = std::fs::canonicalize(cwd)
-                .map_err(|e| FencingError::Storage(format!("canonicalize effect cwd failed: {e}")))?;
-            if canon_exe.starts_with(&canon_cwd) {
-                return Err(FencingError::Storage(format!(
-                    "fenced target executable {} must reside outside effect workdir {}",
-                    canon_exe.display(),
-                    canon_cwd.display()
-                )));
-            }
-        }
-        let bytes = std::fs::read(&canon_exe)
-            .map_err(|e| FencingError::Storage(format!("read fenced target bytes failed: {e}")))?;
-        Ok((canon_exe.to_string_lossy().to_string(), line_hash(&bytes)))
-    }
-
-    /// Deterministic digest of an effect target's argument tail (`argv[1..]`).
-    pub fn args_digest(args: &[String]) -> String {
-        let json = serde_json::to_string(args).unwrap_or_default();
-        line_hash(json.as_bytes())
-    }
-
-    /// Registers a content-addressed, read-only, non-interpreter fenced target executable and its
-    /// exact argument list for `resource_id`, binding the SHA-256 of the executable's bytes on disk.
-    pub fn register_fenced_target(
+    /// Built-in kernel actuator 1: executes a resource-fenced key/value write inside the EXACT
+    /// SAME SQLite `BEGIN IMMEDIATE` transaction that validates `granted_epoch == incoming_epoch
+    /// && written_epoch < incoming_epoch` and commits `written_epoch = incoming_epoch`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_atomic_sqlite_kv(
         &self,
         resource_id: &str,
-        exe_path: &Path,
-        args: &[String],
-    ) -> Result<String, FencingError> {
-        if resource_id.is_empty() {
-            return Err(FencingError::Storage("resource_id must be non-empty".into()));
-        }
-        let (canon_exe, exe_sha256) = Self::inspect_fenced_executable(exe_path, None)?;
-        let args_digest = Self::args_digest(args);
-        let conn = self.connect()?;
-        conn.execute(
-            "INSERT OR IGNORE INTO registered_targets (resource_id, exe_path, exe_sha256, args_digest)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![resource_id, canon_exe, exe_sha256, args_digest],
-        )
-        .map_err(|e| FencingError::Storage(format!("register fenced target: {e}")))?;
-        Ok(exe_sha256)
+        incoming_epoch: u64,
+        op_id: &str,
+        payload_digest: &str,
+        result_json: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<FencedWriteOutcome, FencingError> {
+        let res_owned = resource_id.to_string();
+        let key_owned = key.to_string();
+        let val_owned = value.to_string();
+        let op_owned = op_id.to_string();
+        self.commit_fenced_write_with_tx(resource_id, incoming_epoch, op_id, payload_digest, result_json, move |conn| {
+            conn.execute(
+                "INSERT INTO fenced_kv (resource_id, key, value, epoch, op_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(resource_id, key) DO UPDATE SET
+                       value = excluded.value,
+                       epoch = excluded.epoch,
+                       op_id = excluded.op_id",
+                params![res_owned, key_owned, val_owned, incoming_epoch as i64, op_owned],
+            )
+            .map_err(|e| FencingError::Storage(format!("fenced_kv write failed: {e}")))?;
+            Ok(())
+        })
     }
 
-    /// Pre-execution content-addressed target check: verifies `argv[0]` is an absolute, non-symlink,
-    /// read-only, non-interpreter executable residing OUTSIDE `cwd`, re-hashes its exact bytes on
-    /// disk right before execution, and confirms `(resource_id, canon_exe, exe_sha256, args_digest)`
-    /// is registered in `FencingStore`.
-    pub fn verify_registered_target(
-        &self,
-        resource_id: &str,
-        argv: &[String],
-        cwd: &Path,
-    ) -> Result<(), FencingError> {
-        let Some((exe, rest)) = argv.split_first() else {
-            return Err(FencingError::Storage("empty effect argv".into()));
-        };
-        let (canon_exe, current_sha256) = Self::inspect_fenced_executable(Path::new(exe), Some(cwd))?;
-        let args_digest = Self::args_digest(rest);
+    /// Reads the current committed `(value, epoch, op_id)` from `fenced_kv`.
+    pub fn read_fenced_kv(&self, resource_id: &str, key: &str) -> Result<Option<(String, u64, String)>, FencingError> {
         let conn = self.connect()?;
-        let found: Option<i64> = conn
+        let row: Option<(String, i64, String)> = conn
             .query_row(
-                "SELECT 1 FROM registered_targets
-                 WHERE resource_id = ?1 AND exe_path = ?2 AND exe_sha256 = ?3 AND args_digest = ?4",
-                params![resource_id, canon_exe, current_sha256, args_digest],
-                |r| r.get(0),
+                "SELECT value, epoch, op_id FROM fenced_kv WHERE resource_id = ?1 AND key = ?2",
+                params![resource_id, key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
-            .map_err(|e| FencingError::Storage(format!("verify registered target: {e}")))?;
-        if found.is_none() {
+            .map_err(|e| FencingError::Storage(format!("read fenced_kv: {e}")))?;
+        Ok(row.map(|(v, ep, op)| (v, ep as u64, op)))
+    }
+
+    /// Built-in kernel actuator 2: executes a direct `git update-ref` compare-and-swap under the
+    /// exclusive per-resource lock (`_rlock`), verifying `incoming_epoch` BEFORE touching git,
+    /// committing `written_epoch = incoming_epoch` + `fenced_git_refs` receipt in SQLite, and
+    /// rolling back the git ref if the SQLite commit fails (zero shell, zero external scripts).
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_atomic_git_ref_cas(
+        &self,
+        _rlock: &ResourceLockGuard,
+        repo: &Path,
+        resource_id: &str,
+        incoming_epoch: u64,
+        op_id: &str,
+        payload_digest: &str,
+        result_json: &str,
+        ref_name: &str,
+        expected_old_oid: &str,
+        new_oid: &str,
+    ) -> Result<FencedWriteOutcome, FencingError> {
+        // 1. Check idempotent replay first so a retried op_id+digest never re-runs update-ref.
+        struct EpochRow {
+            granted: i64,
+            written: i64,
+            last_op: Option<String>,
+            last_dig: Option<String>,
+            last_res: Option<String>,
+        }
+        {
+            let conn = self.connect()?;
+            let row = conn
+                .query_row(
+                    "SELECT granted_epoch, written_epoch, last_op_id, last_payload_digest, last_result_json
+                     FROM resource_epochs WHERE resource_id = ?1",
+                    params![resource_id],
+                    |r| {
+                        Ok(EpochRow {
+                            granted: r.get(0)?,
+                            written: r.get(1)?,
+                            last_op: r.get(2)?,
+                            last_dig: r.get(3)?,
+                            last_res: r.get(4)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|e| FencingError::Storage(format!("read epoch row: {e}")))?;
+            if let Some(EpochRow { granted, written, last_op, last_dig, last_res }) = row {
+                let granted = granted as u64;
+                let written = written as u64;
+                if incoming_epoch == written
+                    && last_op.as_deref() == Some(op_id)
+                    && last_dig.as_deref() == Some(payload_digest)
+                {
+                    return Ok(FencedWriteOutcome::IdempotentReplay {
+                        epoch: incoming_epoch,
+                        cached_result_json: last_res.unwrap_or_else(|| "null".to_string()),
+                    });
+                }
+                if incoming_epoch != granted {
+                    return Err(FencingError::StaleEpoch {
+                        resource_id: resource_id.to_string(),
+                        incoming: incoming_epoch,
+                        granted,
+                    });
+                }
+                if incoming_epoch <= written {
+                    return Err(FencingError::EpochAlreadyConsumed {
+                        resource_id: resource_id.to_string(),
+                        incoming: incoming_epoch,
+                        written,
+                    });
+                }
+            } else {
+                return Err(FencingError::StaleEpoch {
+                    resource_id: resource_id.to_string(),
+                    incoming: incoming_epoch,
+                    granted: 0,
+                });
+            }
+        }
+
+        // 2. Validate ref format and commit existence directly via git (fixed trusted PATH, no shell).
+        let git_path = maestro_store::tree::git_path();
+        let chk = Command::new("git")
+            .env("PATH", git_path)
+            .args(["check-ref-format", ref_name])
+            .current_dir(repo)
+            .output()
+            .map_err(|e| FencingError::Storage(format!("git check-ref-format spawn: {e}")))?;
+        if !chk.status.success() {
+            return Err(FencingError::Storage(format!("invalid git ref format: {ref_name:?}")));
+        }
+        let rev = Command::new("git")
+            .env("PATH", git_path)
+            .args(["rev-parse", "--verify", "--quiet", &format!("{new_oid}^{{commit}}")])
+            .current_dir(repo)
+            .output()
+            .map_err(|e| FencingError::Storage(format!("git rev-parse spawn: {e}")))?;
+        if !rev.status.success() {
+            return Err(FencingError::Storage(format!("target commit {new_oid} does not exist in {}", repo.display())));
+        }
+
+        // 3. Atomic compare-and-swap ref update in git (fails closed if current OID != expected_old_oid).
+        let upd = Command::new("git")
+            .env("PATH", git_path)
+            .args(["update-ref", "--", ref_name, new_oid, expected_old_oid])
+            .current_dir(repo)
+            .output()
+            .map_err(|e| FencingError::Storage(format!("git update-ref spawn: {e}")))?;
+        if !upd.status.success() {
             return Err(FencingError::Storage(format!(
-                "effect executable {canon_exe:?} (sha256={current_sha256}, args={args_digest}) is not registered for resource {resource_id:?}; refusing to execute"
+                "git_ref_cas_failed: git update-ref {ref_name} {new_oid} {expected_old_oid} failed: {}",
+                String::from_utf8_lossy(&upd.stderr).trim()
             )));
         }
-        Ok(())
+
+        // 4. Commit written_epoch + durable receipt in SQLite; compensate git ref on failure.
+        let res_owned = resource_id.to_string();
+        let ref_owned = ref_name.to_string();
+        let old_owned = expected_old_oid.to_string();
+        let new_owned = new_oid.to_string();
+        let op_owned = op_id.to_string();
+        let commit_res = self.commit_fenced_write_with_tx(
+            resource_id,
+            incoming_epoch,
+            op_id,
+            payload_digest,
+            result_json,
+            move |conn| {
+                conn.execute(
+                    "INSERT INTO fenced_git_refs (resource_id, ref_name, old_oid, new_oid, epoch, op_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(resource_id, ref_name) DO UPDATE SET
+                       old_oid = excluded.old_oid,
+                       new_oid = excluded.new_oid,
+                       epoch = excluded.epoch,
+                       op_id = excluded.op_id",
+                    params![res_owned, ref_owned, old_owned, new_owned, incoming_epoch as i64, op_owned],
+                )
+                .map_err(|e| FencingError::Storage(format!("fenced_git_refs write failed: {e}")))?;
+                Ok(())
+            },
+        );
+        if let Err(err) = commit_res {
+            let is_zero = expected_old_oid.bytes().all(|b| b == b'0');
+            let _ = if is_zero {
+                Command::new("git")
+                    .env("PATH", git_path)
+                    .args(["update-ref", "-d", ref_name, new_oid])
+                    .current_dir(repo)
+                    .output()
+            } else {
+                Command::new("git")
+                    .env("PATH", git_path)
+                    .args(["update-ref", "--", ref_name, expected_old_oid, new_oid])
+                    .current_dir(repo)
+                    .output()
+            };
+            return Err(err);
+        }
+        commit_res
     }
 
     /// Pre-mutation fencing check: verifies `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`
@@ -556,16 +677,11 @@ mod tests {
         assert_eq!(e_b, 2);
 
         // Parent A wakes and tries to write with epoch 1 while B has NOT written yet -> MUST be rejected!
-        let err_a = store
-            .commit_fenced_write("pr:broomva/workspace#1476", e_a, "op-a", "sha256:aaa", "{}")
-            .unwrap_err();
+        let err_a =
+            store.commit_fenced_write("pr:broomva/workspace#1476", e_a, "op-a", "sha256:aaa", "{}").unwrap_err();
         assert_eq!(
             err_a,
-            FencingError::StaleEpoch {
-                resource_id: "pr:broomva/workspace#1476".into(),
-                incoming: 1,
-                granted: 2,
-            }
+            FencingError::StaleEpoch { resource_id: "pr:broomva/workspace#1476".into(), incoming: 1, granted: 2 }
         );
 
         // (ii) Parent B commits at epoch 2.
@@ -575,9 +691,8 @@ mod tests {
         assert_eq!(ok_b, FencedWriteOutcome::Committed { epoch: 2 });
 
         // Duplicate write at epoch 2 with different op/payload MUST be rejected!
-        let err_dup = store
-            .commit_fenced_write("pr:broomva/workspace#1476", e_b, "op-b2", "sha256:ccc", "{}")
-            .unwrap_err();
+        let err_dup =
+            store.commit_fenced_write("pr:broomva/workspace#1476", e_b, "op-b2", "sha256:ccc", "{}").unwrap_err();
         assert_eq!(
             err_dup,
             FencingError::EpochAlreadyConsumed {
@@ -593,10 +708,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             replay,
-            FencedWriteOutcome::IdempotentReplay {
-                epoch: 2,
-                cached_result_json: r#"{"ok":true}"#.into(),
-            }
+            FencedWriteOutcome::IdempotentReplay { epoch: 2, cached_result_json: r#"{"ok":true}"#.into() }
         );
 
         // (iii) Reopen after restart; Parent C gets epoch 3 and succeeds without starvation!
@@ -604,9 +716,8 @@ mod tests {
         let reopened = FencingStore::open(&db).unwrap();
         let e_c = reopened.grant_epoch("pr:broomva/workspace#1476").unwrap();
         assert_eq!(e_c, 3);
-        let ok_c = reopened
-            .commit_fenced_write("pr:broomva/workspace#1476", e_c, "op-c", "sha256:ddd", r#"{"c":1}"#)
-            .unwrap();
+        let ok_c =
+            reopened.commit_fenced_write("pr:broomva/workspace#1476", e_c, "op-c", "sha256:ddd", r#"{"c":1}"#).unwrap();
         assert_eq!(ok_c, FencedWriteOutcome::Committed { epoch: 3 });
     }
 }

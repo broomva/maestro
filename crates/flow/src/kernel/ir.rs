@@ -356,8 +356,7 @@ fn check_route(ir: &Ir, id: &str, n: &Node, refs: &[RouteRef]) -> Result<(), Com
                     Class::Work { .. } | Class::Subflow { .. } => {}
                     Class::Map { reserve_providers, provider_pool, .. } => {
                         let providers = super::write::PROVIDERS;
-                        let has_reserve = reserve_providers
-                            .is_some_and(|r| r >= 1 && (r as usize) < providers.len());
+                        let has_reserve = reserve_providers.is_some_and(|r| r >= 1 && (r as usize) < providers.len());
                         let has_strict_pool = !provider_pool.is_empty()
                             && provider_pool.len() < providers.len()
                             && provider_pool.iter().all(|p| providers.contains(&p.as_str()));
@@ -640,8 +639,7 @@ pub fn over_referenced_nodes(expr: &str) -> Vec<String> {
         if &bytes[i..i + needle.len()] == needle {
             let start = i + needle.len();
             let mut end = start;
-            while end < bytes.len()
-                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-')
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-')
             {
                 end += 1;
             }
@@ -679,10 +677,7 @@ fn check_pinned_subflow(ir: &Ir, node_id: &str, uses: &str, expected_hash: &str)
         )));
     };
     let Some(child) = ir.subflows.get(uses) else {
-        return Err(CompileError::UnknownReference {
-            from: format!("node {node_id} uses"),
-            name: uses.to_string(),
-        });
+        return Err(CompileError::UnknownReference { from: format!("node {node_id} uses"), name: uses.to_string() });
     };
     if child.flow != name || child.version != ver {
         return Err(CompileError::invalid(format!(
@@ -724,8 +719,7 @@ fn check_subflow_bounds(ir: &Ir, depth: u32, visiting: &mut BTreeSet<String>) ->
         validate(child)?;
         let child_nodes = check_subflow_bounds(child, depth + 1, visiting)?;
         visiting.remove(uses);
-        total = total
-            .saturating_add(child_nodes.saturating_mul(mult));
+        total = total.saturating_add(child_nodes.saturating_mul(mult));
         if total > MAX_EXPANDED_NODES {
             return Err(CompileError::invalid(format!(
                 "statically bounded expanded node count {total} exceeds {MAX_EXPANDED_NODES}"

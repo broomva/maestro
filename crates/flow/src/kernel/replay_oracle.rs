@@ -401,7 +401,8 @@ fn cross3_outside_reader_of_body_node_sees_verdict_revoked_by_upstream_of_other_
         ir: flow.ir().clone(),
         params: json!({}),
         owner: None,
-        parent_ref: None, audit: None,
+        parent_ref: None,
+        audit: None,
     };
     let mut events = vec![mk(1, t0(), "Started", serde_json::to_value(&started).unwrap())];
     let push = |events: &mut Vec<Event>, kind: &str, body: Value| {

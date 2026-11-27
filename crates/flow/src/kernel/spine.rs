@@ -153,11 +153,9 @@ impl std::fmt::Display for Difference {
                 exit(e),
                 exit(against)
             ),
-            Difference::MapItems { node, iteration, index, .. } => write!(
-                f,
-                "at step {index}, map node {node}{} recorded different child outcomes",
-                iter(iteration),
-            ),
+            Difference::MapItems { node, iteration, index, .. } => {
+                write!(f, "at step {index}, map node {node}{} recorded different child outcomes", iter(iteration),)
+            }
         }
     }
 }
@@ -207,13 +205,7 @@ pub fn spine(guard: &ReadGuard, instance: &InstanceId) -> Result<Spine, KernelEr
             }
             Answered::KIND => {
                 let a: Answered = body(&log, e)?;
-                SpineRecord {
-                    node: a.node,
-                    iteration: a.iteration,
-                    edge: None,
-                    exit: None,
-                    map_items: Vec::new(),
-                }
+                SpineRecord { node: a.node, iteration: a.iteration, edge: None, exit: None, map_items: Vec::new() }
             }
             _ => continue,
         };

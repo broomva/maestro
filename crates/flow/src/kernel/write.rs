@@ -138,7 +138,7 @@ use super::events::{
     Started, VerifyRecord, digest, marker_digest,
 };
 use super::exec::{self, Feed, Limits, Ran, Search};
-use super::fencing::FencingStore;
+use super::fencing::{FencedActuator, FencedWriteOutcome, FencingError, FencingStore};
 use super::guard::{self, GUARD_TIMEOUT, Judged};
 use super::ir::{Class, Ir, Iteration, Node, RouteRef};
 use super::replay::{Awaiting, Next, Reason, State, awaiting, guard_input, next_of, pinned, secs};
@@ -773,16 +773,40 @@ pub fn claim_as(
         claim_inputs.insert("__map_item_key".to_string(), ik);
         claim_inputs.insert("__map_child_instance".to_string(), cid);
     }
-    let worker_pgid = session
-        .worker_pgid()
-        .or_else(|| started.params.get("worker_pgid").and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()));
-    if started.parent_ref.is_some() && !worker_pgid.is_some_and(|pgid| pgid > 1) {
-        return Err(Refusal::ChildFenced {
-            child: instance.to_string(),
-            code: "missing_worker_pgid",
-            detail: "child subflow claim requires a dedicated worker process group ID (worker_pgid > 1), distinct from CLI/MCP audit".into(),
+    let worker_pgid = session.worker_pgid();
+    if started.parent_ref.is_some() {
+        let Some(pgid) = worker_pgid.filter(|&p| p > 1) else {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "missing_worker_pgid",
+                detail: "child subflow claim requires a host-attested worker process group ID (worker_pgid > 1)".into(),
+            }
+            .into());
+        };
+        let Ok(pgid_i32) = i32::try_from(pgid) else {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "missing_worker_pgid",
+                detail: format!("invalid worker_pgid {pgid}"),
+            }
+            .into());
+        };
+        let Some(pid_handle) = rustix::process::Pid::from_raw(pgid_i32) else {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "missing_worker_pgid",
+                detail: format!("invalid zero worker_pgid {pgid}"),
+            }
+            .into());
+        };
+        if let Err(err) = rustix::process::test_kill_process_group(pid_handle) {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "dead_worker_pgid",
+                detail: format!("host-attested worker process group pgid={pgid} is not live at claim time ({err})"),
+            }
+            .into());
         }
-        .into());
     }
     let claimed = Claimed {
         node: node.to_string(),
@@ -862,11 +886,7 @@ fn hold(
     }
     let key = (rec.node.clone(), rec.iteration.clone());
     let latest = claims.latest.get(&key).map(String::as_str);
-    let is_map_node = started
-        .ir
-        .nodes
-        .get(&rec.node)
-        .is_some_and(|n| matches!(n.class, Class::Map { .. }));
+    let is_map_node = started.ir.nodes.get(&rec.node).is_some_and(|n| matches!(n.class, Class::Map { .. }));
     if let Some(cancel_at) = rec.cancel_at.filter(|at| (is_map_node || latest == Some(sha)) && now >= *at) {
         return Err(Refusal::Cancelled { node: rec.node, cancel_at: cancel_at.to_string() }.into());
     }
@@ -880,12 +900,8 @@ fn hold(
     if *iteration != rec.iteration || state == Some(State::Exhausted) {
         return Err(Refusal::NotCurrentIteration { node: rec.node }.into());
     }
-    let rec_inputs_clean: BTreeMap<String, String> = rec
-        .inputs
-        .iter()
-        .filter(|(k, _)| !k.starts_with("__map_"))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    let rec_inputs_clean: BTreeMap<String, String> =
+        rec.inputs.iter().filter(|(k, _)| !k.starts_with("__map_")).map(|(k, v)| (k.clone(), v.clone())).collect();
     if *inputs != rec_inputs_clean {
         return Err(Refusal::InputsChanged { node: rec.node }.into());
     }
@@ -1096,7 +1112,8 @@ fn receipt(held: &Held, session: &VerifiedSession, outputs: Value, verify: Verif
         outputs,
         verify: Some(verify),
         performer: Some(held.who.clone()),
-        performers: Vec::new(), tool_use_id: None,
+        performers: Vec::new(),
+        tool_use_id: None,
         audit: session.audit().cloned(),
     }
 }
@@ -1239,7 +1256,11 @@ pub fn complete_as(
             return refuse(&mut guard, &held, (err.code(), err.to_string()), &[]);
         }
         let log_after = guard.log(&instance)?;
-        let last_ev = log_after.events.last().cloned().ok_or_else(|| KernelError::Encode("empty log after map finalize".into()))?;
+        let last_ev = log_after
+            .events
+            .last()
+            .cloned()
+            .ok_or_else(|| KernelError::Encode("empty log after map finalize".into()))?;
         let appended = Appended { event: last_ev, cache: crate::ledger::CacheWrite::Updated };
         let verify = VerifyRecord {
             argv: vec!["maestro-map-finalize".to_string(), item_key, child_str],
@@ -1261,7 +1282,7 @@ pub fn complete_as(
     if let Err(unfit) = check_receipt(&held, session, &outputs, &plan.argv) {
         return refuse(&mut guard, &held, unfit, &[]);
     }
-    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String)> = None;
+    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String, FencedActuator)> = None;
     if let Step::Effect { preconditions } = &plan.step {
         // The preconditions run with the lock released; then everything again under it.
         let input = guard_input(&held.log, &held.started, &held.rec.node)?;
@@ -1287,36 +1308,47 @@ pub fn complete_as(
         };
         let fence_db = fence_db_path.clone();
         let is_child_subflow = held.started.parent_ref.is_some();
-        let explicit_fencing = held
-            .started
-            .params
-            .get("fencing_resource")
-            .and_then(Value::as_str)
-            .is_some_and(|s| !s.is_empty());
-        // ALL IR v10 child subflow effects MUST declare an explicit `fencing_resource` AND execute
-        // a registered target-atomic fenced command (verified BEFORE exec::run); otherwise refuse
-        // before recording EffectStarted or spawning any subprocess!
-        if is_child_subflow && !explicit_fencing {
-            return refuse(
-                &mut guard,
-                &held,
-                (
-                    "unfenced_child_effect",
-                    "child subflow Class::Effect requires explicit fencing_resource and a registered target-atomic fenced command".to_string(),
-                ),
-                &[],
-            );
-        }
-        if is_child_subflow || explicit_fencing {
-            let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
-            let fence_store = FencingStore::open(&fence_db)
-                .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
-            if let Err(e) = fence_store.verify_registered_target(&fence_resource, &plan.argv, &plan.cwd) {
-                return refuse(&mut guard, &held, ("unregistered_fenced_target", e.to_string()), &[]);
+        let explicit_fencing =
+            held.started.params.get("fencing_resource").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+        let builtin_actuator = match FencedActuator::parse(&plan.argv) {
+            Ok(act) => act,
+            Err(detail) => return refuse(&mut guard, &held, ("invalid_fenced_actuator", detail), &[]),
+        };
+        // ALL IR v10 child subflow effects and any explicitly fenced effect MUST execute a
+        // built-in kernel atomic actuator (`maestro:fenced-sqlite-kv` or `maestro:fenced-git-ref-cas`)
+        // directly in Rust (zero external shell, zero mutable wrapper delegation, zero TOCTOU).
+        // Arbitrary external shell commands cannot claim target-side atomic fencing and must use
+        // D6 option (b) post-termination reconciliation (`reconcile_superseded_effect`).
+        if is_child_subflow || explicit_fencing || builtin_actuator.is_some() {
+            if !explicit_fencing {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    (
+                        "unfenced_child_effect",
+                        "fenced/child Class::Effect requires explicit fencing_resource with a built-in kernel atomic actuator".to_string(),
+                    ),
+                    &[],
+                );
             }
+            let Some(actuator) = builtin_actuator else {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    (
+                        "unfenced_external_effect_requires_reconcile",
+                        format!(
+                            "external command {:?} cannot run on the fenced atomic path; use a built-in kernel actuator (maestro:fenced-sqlite-kv / maestro:fenced-git-ref-cas) or post-termination reconciliation",
+                            plan.argv.first().map(String::as_str).unwrap_or("")
+                        ),
+                    ),
+                    &[],
+                );
+            };
+            let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
             let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
             let op_id = format!("{}:{}:{}", instance.as_str(), held.rec.node, held.rec.attempt);
-            effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id));
+            effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id, actuator));
         }
         let intent = EffectStarted {
             node: held.rec.node.clone(),
@@ -1428,7 +1460,9 @@ pub fn complete_as(
                     &held,
                     (
                         "write_set_violation",
-                        format!("child workdir {cwd_str:?} does not match unique allocated child_worktree {alloc_wt:?}"),
+                        format!(
+                            "child workdir {cwd_str:?} does not match unique allocated child_worktree {alloc_wt:?}"
+                        ),
                     ),
                     &stderr,
                 );
@@ -1539,9 +1573,7 @@ fn resolve_dot_path<'a>(doc: &'a Value, expr: &str) -> Result<&'a Value, String>
     if trimmed == "." {
         return Ok(doc);
     }
-    let rest = trimmed
-        .strip_prefix('.')
-        .ok_or_else(|| format!("map expression must start with '.': {expr:?}"))?;
+    let rest = trimmed.strip_prefix('.').ok_or_else(|| format!("map expression must start with '.': {expr:?}"))?;
     let mut cur = doc;
     for seg in rest.split('.') {
         if seg.is_empty() {
@@ -1570,37 +1602,27 @@ fn extract_map_items(doc: &Value, over_expr: &str, item_key_expr: &str) -> Resul
             .and_then(Value::as_array)
             .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
             .unwrap_or_default();
-        specs.push(MapItemSpec {
-            key,
-            input_digest: digest(item),
-            input: item.clone(),
-            write_set,
-        });
+        specs.push(MapItemSpec { key, input_digest: digest(item), input: item.clone(), write_set });
     }
     Ok(specs)
 }
 
-/// Executes a fenced `Class::Effect` command under the per-resource lock, verifying/granting the
-/// epoch before execution and unconditionally verifying target-side atomic epoch consumption
-/// (`written_epoch == epoch` in the target's own transaction) before releasing the resource lock.
+type FencedRunOutcome = (Ran, Option<(&'static str, String)>);
+
+/// Executes a built-in kernel-owned atomic fenced actuator (`FencedActuator::SqliteKvPut` or
+/// `FencedActuator::GitRefCas`) directly in Rust under the per-resource lock (zero external shell,
+/// zero wrapper scripts, zero hash-to-exec TOCTOU window).
 fn run_fenced_effect(
     plan: &Plan,
-    limits: &Limits,
-    (fence_resource, pinned_epoch, fence_db, op_id): (String, Option<u64>, PathBuf, String),
+    _limits: &Limits,
+    (fence_resource, pinned_epoch, fence_db, op_id, actuator): (String, Option<u64>, PathBuf, String, FencedActuator),
     outputs: &Value,
-) -> Result<(Ran, Option<(&'static str, String)>), KernelError> {
-    let fence_store = FencingStore::open(&fence_db)
-        .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
+) -> Result<FencedRunOutcome, KernelError> {
+    let fence_store =
+        FencingStore::open(&fence_db).map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
     let rlock = fence_store
         .acquire_resource_lock(&fence_resource)
         .map_err(|e| KernelError::Encode(format!("fencing lock failed: {e}")))?;
-    if let Err(e) = fence_store.verify_registered_target(&fence_resource, &plan.argv, &plan.cwd) {
-        drop(rlock);
-        return Ok((
-            Ran::Failed { code: "unregistered_fenced_target", detail: e.to_string(), stderr: Vec::new() },
-            None,
-        ));
-    }
     let epoch = match pinned_epoch {
         Some(ep) => {
             if let Err(e) = fence_store.verify_epoch_current(&fence_resource, ep) {
@@ -1616,31 +1638,51 @@ fn run_fenced_effect(
             .grant_epoch_locked(&rlock, &fence_resource)
             .map_err(|e| KernelError::Encode(format!("fencing grant failed: {e}")))?,
     };
-    let epoch_s = epoch.to_string();
-    let db_s = fence_db.display().to_string();
     let payload_digest = digest(outputs);
-    let fence_env_refs: [(&str, &str); 5] = [
-        ("MAESTRO_FENCING_EPOCH", epoch_s.as_str()),
-        ("MAESTRO_FENCING_RESOURCE", fence_resource.as_str()),
-        ("MAESTRO_FENCING_DB", db_s.as_str()),
-        ("MAESTRO_FENCING_OP_ID", op_id.as_str()),
-        ("MAESTRO_FENCING_DIGEST", payload_digest.as_str()),
-    ];
-    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &fence_env_refs };
-    let ran = exec::run(&plan.argv, &plan.cwd, limits, feed);
-    let mut fence_commit_err: Option<(&'static str, String)> = None;
-    if matches!(ran, Ran::Exited { code: Some(0), .. })
-        && let Err(e) = fence_store.verify_target_consumed(&fence_resource, epoch, &op_id, &payload_digest)
-    {
-        let code = match e {
-            super::fencing::FencingError::StaleEpoch { .. }
-            | super::fencing::FencingError::EpochAlreadyConsumed { .. } => "stale_fencing_epoch",
-            super::fencing::FencingError::Storage(_) => "target_did_not_consume_epoch",
-        };
-        fence_commit_err = Some((code, e.to_string()));
-    }
+    let result_json = serde_json::to_string(outputs).unwrap_or_else(|_| "null".to_string());
+    let outcome = match actuator {
+        FencedActuator::SqliteKvPut { key, value } => fence_store.execute_atomic_sqlite_kv(
+            &fence_resource,
+            epoch,
+            &op_id,
+            &payload_digest,
+            &result_json,
+            &key,
+            &value,
+        ),
+        FencedActuator::GitRefCas { ref_name, expected_old_oid, new_oid } => fence_store.execute_atomic_git_ref_cas(
+            &rlock,
+            &plan.cwd,
+            &fence_resource,
+            epoch,
+            &op_id,
+            &payload_digest,
+            &result_json,
+            &ref_name,
+            &expected_old_oid,
+            &new_oid,
+        ),
+    };
     drop(rlock);
-    Ok((ran, fence_commit_err))
+    match outcome {
+        Ok(FencedWriteOutcome::Committed { epoch: ep })
+        | Ok(FencedWriteOutcome::IdempotentReplay { epoch: ep, .. }) => {
+            let receipt = serde_json::json!({
+                "resource": fence_resource,
+                "epoch": ep,
+                "op_id": op_id,
+            })
+            .to_string();
+            Ok((Ran::Exited { code: Some(0), stdout: receipt.into_bytes(), stderr: Vec::new() }, None))
+        }
+        Err(e) => {
+            let code = match e {
+                FencingError::StaleEpoch { .. } | FencingError::EpochAlreadyConsumed { .. } => "stale_fencing_epoch",
+                FencingError::Storage(_) => "fenced_actuator_failed",
+            };
+            Ok((Ran::Failed { code, detail: e.to_string(), stderr: Vec::new() }, None))
+        }
+    }
 }
 
 /// Computes the resource key fenced by `FencingStore` for a `Class::Effect` node.

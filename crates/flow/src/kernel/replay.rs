@@ -90,10 +90,10 @@ use super::adoption::{self, Owners, ProposalStatus};
 use super::compile::CompiledFlow;
 use super::error::KernelError;
 use super::events::{
-    Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectReconciled, EffectStarted,
-    Guarded, Heartbeat, KernelEvent, MapExpanded, Refused, Started, StopUnblockable, StopUnverified,
-    SubflowCompleted, SubflowFailed, SubflowQuiesced, SubflowStarted, Superseded, Unblockable, digest,
-    performer_receipt_digest, performers_receipt_digest, receipt_digest,
+    Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectReconciled, EffectStarted, Guarded,
+    Heartbeat, KernelEvent, MapExpanded, Refused, Started, StopUnblockable, StopUnverified, SubflowCompleted,
+    SubflowFailed, SubflowQuiesced, SubflowStarted, Superseded, Unblockable, digest, performer_receipt_digest,
+    performers_receipt_digest, receipt_digest,
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, RouteRef, Wait};
 use super::write;
@@ -352,7 +352,8 @@ pub fn start(
         ir: flow.ir().clone(),
         params,
         owner,
-        parent_ref: None, audit: session.audit().cloned(),
+        parent_ref: None,
+        audit: session.audit().cloned(),
     };
     let event = started.to_event()?;
     let appended = ledger.lock()?.append(&instance, 0, event)?;
@@ -1772,7 +1773,8 @@ mod tests {
             ir: flow.ir().clone(),
             params: Value::Null,
             owner: None,
-            parent_ref: None, audit: None,
+            parent_ref: None,
+            audit: None,
         };
         let mut events = vec![event(1, "Started", serde_json::to_value(&started).unwrap())];
         let at = |node: &str| serde_json::json!({ "node": node, "iteration": {}, "attempt": 1, "lease_until": "2026-11-08T00:00:00Z", "token_sha256": "x", "code": "x", "reason": "x" });
@@ -1811,7 +1813,8 @@ mod tests {
             ir: flow.ir().clone(),
             params: Value::Null,
             owner: None,
-            parent_ref: None, audit: None,
+            parent_ref: None,
+            audit: None,
         };
         let mut events = vec![event(1, "Started", serde_json::to_value(&started).unwrap())];
         let head = |exit: i32| serde_json::json!({ "node": "head", "iteration": {}, "attempt": 1, "verify": { "argv": ["x"], "exit": exit, "stdout_sha256": "s", "ran_at": "x" } });

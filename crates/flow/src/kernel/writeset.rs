@@ -377,7 +377,12 @@ fn git_lines(root: &Path, args: &[&str]) -> Result<Vec<String>, String> {
         .collect())
 }
 
-fn walk_dir_entries(root: &Path, dir: &Path, tracked: &BTreeSet<String>, out: &mut BTreeSet<String>) -> Result<(), String> {
+fn walk_dir_entries(
+    root: &Path,
+    dir: &Path,
+    tracked: &BTreeSet<String>,
+    out: &mut BTreeSet<String>,
+) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
@@ -412,14 +417,12 @@ pub fn verify_worktree_writes_auto(
     base_sha_opt: Option<&str>,
     declared_write_set: &[String],
 ) -> Result<WriteVerification, String> {
-    let base_sha = base_sha_opt
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| "missing pinned base_sha for fail-closed 6-surface worktree write_set verification".to_string())?;
+    let base_sha = base_sha_opt.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+        "missing pinned base_sha for fail-closed 6-surface worktree write_set verification".to_string()
+    })?;
     let head_lines = git_lines(worktree_root, &["rev-parse", "HEAD"])?;
-    let head_sha = head_lines
-        .first()
-        .map(String::as_str)
-        .ok_or_else(|| "git rev-parse HEAD returned empty output".to_string())?;
+    let head_sha =
+        head_lines.first().map(String::as_str).ok_or_else(|| "git rev-parse HEAD returned empty output".to_string())?;
     verify_worktree_writes(worktree_root, base_sha, head_sha, declared_write_set)
 }
 
@@ -455,8 +458,7 @@ pub fn verify_worktree_writes(
     }
     walk_dir_entries(worktree_root, worktree_root, &tracked_at_base, &mut all_paths)?;
 
-    let root_canon = std::fs::canonicalize(worktree_root)
-        .map_err(|e| format!("canonicalize worktree root: {e}"))?;
+    let root_canon = std::fs::canonicalize(worktree_root).map_err(|e| format!("canonicalize worktree root: {e}"))?;
     let mut violations = Vec::new();
     let checked_paths: Vec<String> = all_paths.iter().cloned().collect();
 
@@ -474,9 +476,8 @@ pub fn verify_worktree_writes(
                     Ok(target) => {
                         if let Ok(target_rel) = target.strip_prefix(&root_canon) {
                             let target_str = target_rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
-                            let target_allowed = normalized_ws
-                                .iter()
-                                .any(|pat| path_matches_pattern(&target_str, pat).unwrap_or(false));
+                            let target_allowed =
+                                normalized_ws.iter().any(|pat| path_matches_pattern(&target_str, pat).unwrap_or(false));
                             if !target_allowed {
                                 violations.push(format!("symlink_target_outside_write_set:{rel}->{target_str}"));
                             }
@@ -489,9 +490,7 @@ pub fn verify_worktree_writes(
                 break;
             }
         }
-        let allowed = normalized_ws
-            .iter()
-            .any(|pat| path_matches_pattern(rel, pat).unwrap_or(false));
+        let allowed = normalized_ws.iter().any(|pat| path_matches_pattern(rel, pat).unwrap_or(false));
         if !allowed {
             let tag = if is_sym { "symlink_outside_write_set" } else { "path_outside_write_set" };
             violations.push(format!("{tag}:{rel}"));
@@ -522,10 +521,18 @@ mod tests {
         let outside = dir.path().join("outside.txt");
         std::fs::create_dir_all(root.join("src/allowed")).unwrap();
         std::fs::write(&outside, "secret").unwrap();
-        std::fs::write(root.join(".gitignore"), "*.ignored
-").unwrap();
-        std::fs::write(root.join("src/allowed/a.rs"), "fn a() {}
-").unwrap();
+        std::fs::write(
+            root.join(".gitignore"),
+            "*.ignored
+",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/allowed/a.rs"),
+            "fn a() {}
+",
+        )
+        .unwrap();
 
         let git = |args: &[&str]| {
             let st = Command::new("git").arg("-C").arg(&root).args(args).status().unwrap();
@@ -539,8 +546,12 @@ mod tests {
         let base = git_lines(&root, &["rev-parse", "HEAD"]).unwrap().pop().unwrap();
 
         // In-scope edit passes.
-        std::fs::write(root.join("src/allowed/a.rs"), "fn a() { let _ = 1; }
-").unwrap();
+        std::fs::write(
+            root.join("src/allowed/a.rs"),
+            "fn a() { let _ = 1; }
+",
+        )
+        .unwrap();
         git(&["add", "src/allowed/a.rs"]);
         git(&["commit", "-q", "-m", "in-scope"]);
         let head = git_lines(&root, &["rev-parse", "HEAD"]).unwrap().pop().unwrap();

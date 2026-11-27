@@ -151,9 +151,7 @@ fn compile_inner(
     let def: Definition = serde_yaml::from_str(yaml).map_err(|e| CompileError::invalid(e.to_string()))?;
     let flow_key = format!("{}@{}", def.flow, def.version);
     if !visiting.insert(flow_key.clone()) {
-        return Err(CompileError::UnboundedLoop {
-            detail: format!("cyclic subflow reference through {flow_key}"),
-        });
+        return Err(CompileError::UnboundedLoop { detail: format!("cyclic subflow reference through {flow_key}") });
     }
     let result = compile_def(def, path, depth, visiting);
     visiting.remove(&flow_key);
@@ -176,10 +174,8 @@ fn resolve_subflow_source(
     let Some(parent_dir) = parent_path.and_then(|p| p.parent()) else {
         return Err(CompileError::UnknownReference { from: "subflow uses".into(), name: uses.to_string() });
     };
-    let candidates = [
-        parent_dir.join(format!("{name}.yaml")),
-        parent_dir.join("subflows").join(format!("{name}.yaml")),
-    ];
+    let candidates =
+        [parent_dir.join(format!("{name}.yaml")), parent_dir.join("subflows").join(format!("{name}.yaml"))];
     for cand in candidates {
         if cand.is_file() {
             let text = std::fs::read_to_string(&cand)
@@ -256,11 +252,10 @@ fn compile_def(
         }
         let mut subflow_ir_hash = String::new();
         if matches!(n.class, ClassDef::Subflow | ClassDef::Map) {
-            let uses_str = n
-                .uses
-                .as_ref()
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| CompileError::invalid(format!("node {id} requires a string uses: <flow>@<version>")))?;
+            let uses_str =
+                n.uses.as_ref().and_then(|v| v.as_str()).ok_or_else(|| {
+                    CompileError::invalid(format!("node {id} requires a string uses: <flow>@<version>"))
+                })?;
             let (name, ver) = ir::parse_pinned_uses(uses_str).ok_or_else(|| {
                 CompileError::invalid(format!(
                     "node {id} uses {uses_str:?}, which must be version-pinned as <flow>@<version>"
@@ -430,10 +425,7 @@ fn build_node(
             Class::Human { ask, fill_ask, required_body_fields: n.required_body_fields.unwrap_or_default() }
         }
         ClassDef::Subflow => Class::Subflow {
-            uses: n
-                .uses
-                .and_then(|v| v.as_str().map(ToOwned::to_owned))
-                .unwrap_or_default(),
+            uses: n.uses.and_then(|v| v.as_str().map(ToOwned::to_owned)).unwrap_or_default(),
             subflow_ir_hash,
             with: n.with.unwrap_or_default(),
         },
@@ -447,10 +439,7 @@ fn build_node(
             provider_pool: n.provider_pool.unwrap_or_default(),
             on_item_failure: n.on_item_failure.unwrap_or_default(),
             item_retry_max: n.item_retry.map(|r| r.max).unwrap_or(0),
-            uses: n
-                .uses
-                .and_then(|v| v.as_str().map(ToOwned::to_owned))
-                .unwrap_or_default(),
+            uses: n.uses.and_then(|v| v.as_str().map(ToOwned::to_owned)).unwrap_or_default(),
             subflow_ir_hash,
             with: n.with.unwrap_or_default(),
         },

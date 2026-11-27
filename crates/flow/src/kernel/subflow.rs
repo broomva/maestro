@@ -148,11 +148,8 @@ pub fn parent_owner_epoch(log: &Log) -> u64 {
 
 /// Current effective owner of a parent instance (latest `Adopted.to`, else `Started.owner`).
 pub fn parent_current_owner(log: &Log) -> Option<Owner> {
-    let mut owner = log
-        .events
-        .first()
-        .and_then(|e| serde_json::from_value::<Started>(e.body.clone()).ok())
-        .and_then(|s| s.owner);
+    let mut owner =
+        log.events.first().and_then(|e| serde_json::from_value::<Started>(e.body.clone()).ok()).and_then(|s| s.owner);
     for e in &log.events {
         if e.kind == Adopted::KIND
             && let Ok(a) = serde_json::from_value::<Adopted>(e.body.clone())
@@ -372,10 +369,7 @@ pub fn check_child_write_fence(
     }
     let current_epoch = parent_owner_epoch(parent_log);
     if claim_owner_epoch != current_epoch {
-        return Err(SubflowError::FormerOwnersClaim {
-            claim_epoch: claim_owner_epoch,
-            current_epoch,
-        });
+        return Err(SubflowError::FormerOwnersClaim { claim_epoch: claim_owner_epoch, current_epoch });
     }
     if parent_is_retired(parent_log) {
         return Err(SubflowError::SubflowSuperseded { child: child_log.instance.to_string() });
@@ -383,13 +377,11 @@ pub fn check_child_write_fence(
     let child_id = child_log.instance.as_str();
     let is_superseded = parent_log.events.iter().any(|ev| {
         ev.kind == Superseded::KIND
-            && serde_json::from_value::<Superseded>(ev.body.clone())
-                .is_ok_and(|s| s.child_instance == child_id)
+            && serde_json::from_value::<Superseded>(ev.body.clone()).is_ok_and(|s| s.child_instance == child_id)
     });
     let is_quiesced = parent_log.events.iter().any(|ev| {
         ev.kind == SubflowQuiesced::KIND
-            && serde_json::from_value::<SubflowQuiesced>(ev.body.clone())
-                .is_ok_and(|q| q.child_instance == child_id)
+            && serde_json::from_value::<SubflowQuiesced>(ev.body.clone()).is_ok_and(|q| q.child_instance == child_id)
     });
     if is_quiesced {
         return Err(SubflowError::SubflowSuperseded { child: child_id.to_string() });
@@ -439,9 +431,7 @@ pub fn expand_map(
             return Err(SubflowError::InvalidExpansion { detail: "empty item_key".into() });
         }
         if !keys.insert(item.key.clone()) {
-            return Err(SubflowError::InvalidExpansion {
-                detail: format!("duplicate item_key {:?}", item.key),
-            });
+            return Err(SubflowError::InvalidExpansion { detail: format!("duplicate item_key {:?}", item.key) });
         }
         if matches!(ready_when, Some(ReadyWhen::DisjointWrites)) && item.write_set.is_empty() {
             return Err(SubflowError::InvalidExpansion {
@@ -463,8 +453,11 @@ pub fn expand_map(
         items: normalized_items.clone(),
     };
     let new_ev = ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-    { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, new_ev) }
-        .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(parent, _seq, new_ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
 
     // Empty map (0 items) completes immediately with an empty items map and empty performers union.
     if normalized_items.is_empty() {
@@ -481,8 +474,11 @@ pub fn expand_map(
             audit: None,
         };
         let done_ev = done.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-        { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, done_ev) }
-            .map_err(|e| SubflowError::Storage(e.to_string()))?;
+        {
+            let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+            guard.append(parent, _seq, done_ev)
+        }
+        .map_err(|e| SubflowError::Storage(e.to_string()))?;
     }
     Ok(map_epoch)
 }
@@ -655,16 +651,13 @@ pub fn claim_map_item(
         let existing_log = guard.log(&child_id).map_err(|e| SubflowError::Storage(e.to_string()))?;
         let existing_started = pinned(&existing_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
         if let Some(wt_s) = existing_started.params.get("child_worktree").and_then(Value::as_str) {
-            let parent_s = existing_started
-                .params
-                .get("parent_repo")
-                .and_then(Value::as_str)
-                .ok_or_else(|| SubflowError::Storage("child Started missing parent_repo for child_worktree".into()))?;
-            let base_sha = existing_started
-                .params
-                .get("base_sha")
-                .and_then(Value::as_str)
-                .ok_or_else(|| SubflowError::Storage("child Started missing pinned base_sha for child_worktree".into()))?;
+            let parent_s =
+                existing_started.params.get("parent_repo").and_then(Value::as_str).ok_or_else(|| {
+                    SubflowError::Storage("child Started missing parent_repo for child_worktree".into())
+                })?;
+            let base_sha = existing_started.params.get("base_sha").and_then(Value::as_str).ok_or_else(|| {
+                SubflowError::Storage("child Started missing pinned base_sha for child_worktree".into())
+            })?;
             let child_wt = Path::new(wt_s);
             let parent_repo = Path::new(parent_s);
             match std::fs::symlink_metadata(child_wt) {
@@ -754,8 +747,7 @@ pub fn claim_map_item(
             }),
         };
         let ev = child_started.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-        guard.append(&child_id, 0, ev)
-            .map_err(|e| SubflowError::Storage(e.to_string()))?;
+        guard.append(&child_id, 0, ev).map_err(|e| SubflowError::Storage(e.to_string()))?;
         if let Some((base_wd, _child_wt, sha)) = pending_wt {
             let wt_root = guard.root_path().join("worktrees");
             allocate_child_worktree_atomic(&base_wd, &wt_root, child_id.as_str(), &sha)?;
@@ -775,8 +767,11 @@ pub fn claim_map_item(
         performer,
     };
     let ev = parent_ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-    { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, ev) }
-        .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(parent, _seq, ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
 
     Ok((child_id, owner_epoch))
 }
@@ -818,8 +813,11 @@ pub fn supersede_stale_items(
                 superseded_by_epoch: next_epoch,
             };
             let ev = sup.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-            { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, ev) }
-                .map_err(|e| SubflowError::Storage(e.to_string()))?;
+            {
+                let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+                guard.append(parent, _seq, ev)
+            }
+            .map_err(|e| SubflowError::Storage(e.to_string()))?;
             superseded_children.push(active.child_instance.clone());
         }
     }
@@ -880,10 +878,7 @@ fn allocate_child_worktree_atomic(
     if let Ok(meta) = std::fs::symlink_metadata(wt_root)
         && meta.file_type().is_symlink()
     {
-        return Err(SubflowError::Storage(format!(
-            "refusing symlinked worktrees root: {}",
-            wt_root.display()
-        )));
+        return Err(SubflowError::Storage(format!("refusing symlinked worktrees root: {}", wt_root.display())));
     }
     std::fs::create_dir_all(wt_root).map_err(|e| SubflowError::Storage(e.to_string()))?;
     let staging_prefix = format!(".staging-{child_id}-");
@@ -934,11 +929,8 @@ fn allocate_child_worktree_atomic(
         .output()
         .map_err(|e| SubflowError::Storage(format!("git worktree move failed: {e}")))?;
     if !mv.status.success() {
-        let _ = Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(&staging)
-            .current_dir(parent_repo)
-            .output();
+        let _ =
+            Command::new("git").args(["worktree", "remove", "--force"]).arg(&staging).current_dir(parent_repo).output();
         let _ = std::fs::remove_dir_all(&staging);
         return Err(SubflowError::Storage(format!(
             "git worktree move failed for {}: {}",
@@ -991,10 +983,7 @@ fn verify_allocated_child_worktree(
             .output()
             .map_err(|e| SubflowError::Storage(format!("git rev-parse --git-common-dir failed: {e}")))?;
         if !out.status.success() {
-            return Err(SubflowError::Storage(format!(
-                "git rev-parse --git-common-dir failed in {}",
-                dir.display()
-            )));
+            return Err(SubflowError::Storage(format!("git rev-parse --git-common-dir failed in {}", dir.display())));
         }
         let raw = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
         let abs = if raw.is_absolute() { raw } else { dir.join(raw) };
@@ -1090,10 +1079,7 @@ pub fn reconcile_superseded_effect(
             detail: format!("child reconcile workdir invalid: {}", cwd.display()),
         });
     }
-    let argv: Vec<String> = reconcile
-        .iter()
-        .map(|w| resolve_simple_workdir(w, &child_started.params))
-        .collect();
+    let argv: Vec<String> = reconcile.iter().map(|w| resolve_simple_workdir(w, &child_started.params)).collect();
     match exec::run(&argv, &cwd, &Limits::default(), Feed { search: Search::Trusted, stdin: None, extra_env: &[] }) {
         Ran::Exited { code: Some(0), .. } => {}
         Ran::Exited { code, stderr, .. } => {
@@ -1119,39 +1105,27 @@ pub fn reconcile_superseded_effect(
         outputs: reconcile_outputs,
     };
     let ev = rec.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-    { let _seq = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(child, _seq, ev) }
-        .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(child, _seq, ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
     Ok(())
 }
 
-/// Verifies that EVERY dedicated worker process group (`Claimed.worker_pgid` and
-/// `child_started.params["worker_pgid"]`) ever recorded for this child has completely terminated
-/// (`kill(-pgid, 0) == ESRCH`). Never reads `Claimed.audit.process.pid` (which identifies a
-/// short-lived CLI/MCP transport process, not the worker agent or its subprocesses).
+/// Verifies that EVERY host-attested worker process group (`Claimed.worker_pgid`) ever recorded
+/// for this child has completely terminated (`kill(-pgid, 0) == ESRCH`). Never reads
+/// `Claimed.audit.process.pid` or caller-supplied `Started.params.worker_pgid`.
 /// Fails closed if ANY `Claimed` event lacks `worker_pgid > 1` or if ANY member of ANY recorded
 /// worker process group is still alive.
-fn verify_all_child_workers_dead(child_log: &Log, child_started: &Started) -> Result<BTreeSet<u32>, SubflowError> {
+fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, SubflowError> {
     let mut recorded_pgids = BTreeSet::new();
-    if let Some(pgid) = child_started
-        .params
-        .get("worker_pgid")
-        .and_then(Value::as_u64)
-        .and_then(|v| u32::try_from(v).ok())
-    {
-        if pgid <= 1 {
-            return Err(SubflowError::QuiescenceRefused {
-                detail: format!("child {} Started.params has invalid worker_pgid {pgid}", child_log.instance),
-            });
-        }
-        recorded_pgids.insert(pgid);
-    }
     for ev in &child_log.events {
         if ev.kind == Claimed::KIND {
-            let c = serde_json::from_value::<Claimed>(ev.body.clone()).map_err(|e| {
-                SubflowError::QuiescenceRefused {
+            let c =
+                serde_json::from_value::<Claimed>(ev.body.clone()).map_err(|e| SubflowError::QuiescenceRefused {
                     detail: format!("malformed Claimed event in child {}: {e}", child_log.instance),
-                }
-            })?;
+                })?;
             let Some(pgid) = c.worker_pgid else {
                 return Err(SubflowError::QuiescenceRefused {
                     detail: format!(
@@ -1173,9 +1147,7 @@ fn verify_all_child_workers_dead(child_log: &Log, child_started: &Started) -> Re
     }
     for &raw_pgid in &recorded_pgids {
         let Ok(pgid_i32) = i32::try_from(raw_pgid) else {
-            return Err(SubflowError::QuiescenceRefused {
-                detail: format!("invalid recorded worker_pgid {raw_pgid}"),
-            });
+            return Err(SubflowError::QuiescenceRefused { detail: format!("invalid recorded worker_pgid {raw_pgid}") });
         };
         let Some(pgid) = rustix::process::Pid::from_raw(pgid_i32) else {
             return Err(SubflowError::QuiescenceRefused {
@@ -1212,8 +1184,8 @@ fn verify_tree_readonly_recursive(root: &Path) -> Result<(), SubflowError> {
     use std::os::unix::fs::PermissionsExt;
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+        let meta =
+            std::fs::symlink_metadata(&path).map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
         if meta.file_type().is_symlink() {
             return Err(SubflowError::QuiescenceRefused {
                 detail: format!("symlink forbidden inside frozen child worktree: {}", path.display()),
@@ -1230,8 +1202,8 @@ fn verify_tree_readonly_recursive(root: &Path) -> Result<(), SubflowError> {
             });
         }
         if meta.is_dir() {
-            let entries = std::fs::read_dir(&path)
-                .map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+            let entries =
+                std::fs::read_dir(&path).map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
             for entry in entries {
                 let entry = entry.map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
                 stack.push(entry.path());
@@ -1260,8 +1232,8 @@ fn verify_termination_receipt(
     let r = receipt.trim();
     let expected_wt = child_started.params.get("child_worktree").and_then(Value::as_str);
 
-    // ALWAYS confirm EVERY recorded worker process group for this child is dead before accepting ANY receipt!
-    let recorded_pgids = verify_all_child_workers_dead(child_log, child_started)?;
+    // ALWAYS confirm EVERY host-attested worker process group for this child is dead before accepting ANY receipt!
+    let recorded_pgids = verify_all_child_workers_dead(child_log)?;
 
     let check_wt_frozen_or_removed = |wt_str: &str| -> Result<(), SubflowError> {
         let p = Path::new(wt_str);
@@ -1282,9 +1254,7 @@ fn verify_termination_receipt(
         }
         #[cfg(not(unix))]
         {
-            Err(SubflowError::QuiescenceRefused {
-                detail: format!("child worktree {wt_str:?} still exists on disk"),
-            })
+            Err(SubflowError::QuiescenceRefused { detail: format!("child worktree {wt_str:?} still exists on disk") })
         }
     };
 
@@ -1304,9 +1274,7 @@ fn verify_termination_receipt(
                 });
             }
             // All recorded_pgids (including raw_pgid and any later claimants) were already verified dead above.
-            if !for_reconcile
-                && let Some(wt_str) = expected_wt
-            {
+            if !for_reconcile && let Some(wt_str) = expected_wt {
                 check_wt_frozen_or_removed(wt_str)?;
             }
             return Ok(());
@@ -1360,8 +1328,8 @@ fn verify_termination_receipt(
         }
         #[cfg(unix)]
         {
-            let meta = std::fs::symlink_metadata(p)
-                .map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+            let meta =
+                std::fs::symlink_metadata(p).map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
             if meta.file_type().is_symlink() || !meta.is_dir() {
                 return Err(SubflowError::QuiescenceRefused {
                     detail: format!("worktree_readonly path must be an existing non-symlink directory: {path_str:?}"),
@@ -1432,8 +1400,11 @@ pub fn quiesce_subflow(
         termination_receipt: termination_receipt.to_string(),
     };
     let new_ev = ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-    { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, new_ev) }
-        .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(parent, _seq, new_ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
     Ok(())
 }
 
@@ -1568,8 +1539,11 @@ pub fn finalize_map_item(
             performers,
         };
         let ev = fail_ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-        { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, ev) }
-            .map_err(|e| SubflowError::Storage(e.to_string()))?;
+        {
+            let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+            guard.append(parent, _seq, ev)
+        }
+        .map_err(|e| SubflowError::Storage(e.to_string()))?;
     } else {
         // 2. Verify the child instance is genuinely terminal (never convert an empty or unfinished
         //    child log into SubflowCompleted with null outputs!).
@@ -1598,10 +1572,8 @@ pub fn finalize_map_item(
                 detail: format!("pending non-terminal nodes remain: {non_done:?}"),
             });
         }
-        let has_terminal_receipt = child_log
-            .events
-            .iter()
-            .any(|e| e.kind == Completed::KIND || e.kind == Answered::KIND);
+        let has_terminal_receipt =
+            child_log.events.iter().any(|e| e.kind == Completed::KIND || e.kind == Answered::KIND);
         if !has_terminal_receipt {
             return Err(SubflowError::ChildNotTerminal {
                 child: child.to_string(),
@@ -1655,10 +1627,7 @@ pub fn finalize_map_item(
             }
             let base_sha = child_started.params.get("base_sha").and_then(Value::as_str);
             let ver = verify_worktree_writes_auto(&wd, base_sha, &item_spec.write_set)
-                .map_err(|e| SubflowError::WriteSetViolation {
-                    item_key: item_key.to_string(),
-                    violations: vec![e],
-                })?;
+                .map_err(|e| SubflowError::WriteSetViolation { item_key: item_key.to_string(), violations: vec![e] })?;
             if !ver.is_ok() {
                 return Err(SubflowError::WriteSetViolation {
                     item_key: item_key.to_string(),
@@ -1690,8 +1659,11 @@ pub fn finalize_map_item(
             performers,
         };
         let ev = done_ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-        { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, ev) }
-            .map_err(|e| SubflowError::Storage(e.to_string()))?;
+        {
+            let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+            guard.append(parent, _seq, ev)
+        }
+        .map_err(|e| SubflowError::Storage(e.to_string()))?;
     }
 
     // Re-read parent log to see if the entire map node is now settled.
@@ -1754,10 +1726,7 @@ pub fn finalize_map_item(
             }
         } else if let Some(fails) = updated.failed_attempts.get(k) {
             let last_err = fails.last().map(|f| f.error.as_str()).unwrap_or("failed");
-            items_out.insert(
-                k.clone(),
-                serde_json::json!({ "status": "failed", "error": last_err }),
-            );
+            items_out.insert(k.clone(), serde_json::json!({ "status": "failed", "error": last_err }));
             spine_entries.push(serde_json::json!({
                 "item_key": k,
                 "child_ir_hash": subflow_ir_hash,
@@ -1784,8 +1753,11 @@ pub fn finalize_map_item(
         audit: None,
     };
     let ev = completed.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
-    { let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq(); guard.append(parent, _seq, ev) }
-        .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(parent, _seq, ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
     Ok(true)
 }
 
