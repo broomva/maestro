@@ -34,6 +34,7 @@ use maestro_flow::kernel::{Completion, Limits, claim, compile, compile_with_path
 use maestro_flow::{HostId, InstanceId, Ledger, Options, Reader};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::process::Command;
 
 const LANE_YAML: &str = r#"
@@ -140,11 +141,47 @@ fn complete_lane_child(
     g.append(cid, cseq2, verify_done.to_event().unwrap()).unwrap();
 }
 
-fn dead_pid_receipt() -> String {
-    let mut child = Command::new("true").spawn().unwrap();
-    let pid = child.id();
-    let _ = child.wait();
-    format!("pid:{pid}:exited")
+fn remove_child_worktree_receipt(g: &mut maestro_flow::WriteGuard<'_>, child: &InstanceId) -> String {
+    let clog = g.log(child).unwrap();
+    let cstart: Started = serde_json::from_value(clog.events[0].body.clone()).unwrap();
+    let wt = cstart
+        .params
+        .get("child_worktree")
+        .and_then(|v| v.as_str())
+        .expect("child must have unique allocated child_worktree")
+        .to_string();
+    let p = std::path::Path::new(&wt);
+    if p.exists() {
+        std::fs::remove_dir_all(p).unwrap();
+    }
+    format!("worktree_removed:{wt}")
+}
+
+/// Returns a shell snippet that atomically executes BOTH a target state mutation AND consumes
+/// `MAESTRO_FENCING_EPOCH` inside ONE SQLite `BEGIN IMMEDIATE` transaction in `MAESTRO_FENCING_DB`.
+fn atomic_target_commit_py(extra_py: &str) -> String {
+    format!(
+        r#"python3 -c '
+import os, sqlite3, sys
+{extra_py}
+db = os.environ["MAESTRO_FENCING_DB"]
+res = os.environ["MAESTRO_FENCING_RESOURCE"]
+ep = int(os.environ["MAESTRO_FENCING_EPOCH"])
+op = os.environ["MAESTRO_FENCING_OP_ID"]
+dig = os.environ["MAESTRO_FENCING_DIGEST"]
+conn = sqlite3.connect(db, timeout=15.0)
+conn.isolation_level = None
+conn.execute("BEGIN IMMEDIATE")
+conn.execute("CREATE TABLE IF NOT EXISTS target_writes (id INTEGER PRIMARY KEY AUTOINCREMENT, resource TEXT, epoch INTEGER, op_id TEXT)")
+row = conn.execute("SELECT granted_epoch, written_epoch FROM resource_epochs WHERE resource_id = ?", (res,)).fetchone()
+if not row or row[0] != ep or row[1] >= ep:
+    conn.execute("ROLLBACK")
+    sys.exit(2)
+conn.execute("UPDATE resource_epochs SET written_epoch = ?, last_op_id = ?, last_payload_digest = ?, last_result_json = \"{{}}\" WHERE resource_id = ?", (ep, op, dig, res))
+conn.execute("INSERT INTO target_writes (resource, epoch, op_id) VALUES (?, ?, ?)", (res, ep, op))
+conn.execute("COMMIT")
+'"#
+    )
 }
 
 fn init_git_repo(wt: &std::path::Path) {
@@ -334,11 +371,28 @@ fn t05_crash_points_a_b_c_idempotency_zero_duplicates_zero_orphans() {
     .unwrap()
     .trim()
     .to_string();
+    let child_wt = g.root_path().join("worktrees").join(det_id.as_str());
+    std::fs::create_dir_all(child_wt.parent().unwrap()).unwrap();
+    let add_st = Command::new("git")
+        .args(["worktree", "add", "--detach", "-q"])
+        .arg(&child_wt)
+        .arg(&base_sha)
+        .current_dir(&child_repo)
+        .status()
+        .unwrap();
+    assert!(add_st.success());
+    let child_wt_str = child_wt.to_string_lossy().to_string();
     let child_started = Started {
         flow: "lane@1".into(),
         ir_hash: maestro_flow::kernel::ir::content_hash(&child_ir).unwrap(),
         ir: child_ir,
-        params: json!({"repo": child_repo, "base_sha": base_sha, "item_key": "lane-a"}),
+        params: json!({
+            "parent_repo": child_repo,
+            "repo": child_wt_str,
+            "child_worktree": child_wt_str,
+            "base_sha": base_sha,
+            "item_key": "lane-a",
+        }),
         owner: Some(me.clone()),
         audit: None,
         parent_ref: None,
@@ -569,15 +623,20 @@ nodes:
         ep,
     )
     .unwrap();
+    let child_wt = {
+        let clog = g.log(&child).unwrap();
+        let cstart: Started = serde_json::from_value(clog.events[0].body.clone()).unwrap();
+        PathBuf::from(cstart.params.get("child_worktree").and_then(|v| v.as_str()).unwrap())
+    };
     assert_eq!(
-        std::fs::read_to_string(dir.path().join("repo/reconcile_ran.txt")).unwrap(),
+        std::fs::read_to_string(child_wt.join("reconcile_ran.txt")).unwrap(),
         "reconciled",
-        "declared reconcile command must actually execute"
+        "declared reconcile command must actually execute inside child's isolated worktree"
     );
 
-    // Now confirmed worker termination + zero open effects -> SubflowQuiesced succeeds!
-    let dead_rcpt = dead_pid_receipt();
-    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, &dead_rcpt, &me)
+    // Now confirmed child-bound worktree removal + zero open effects -> SubflowQuiesced succeeds!
+    let wt_rcpt = remove_child_worktree_receipt(&mut g, &child);
+    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, &wt_rcpt, &me)
         .unwrap();
     let st = fold_map_state(&g.log(&parent).unwrap(), "execute_lanes", &Iteration::new());
     assert!(st.superseded_unquiesced.is_empty());
@@ -640,9 +699,9 @@ fn t08_disjoint_writes_case_folded_conflict_and_unquiesced_superseded_hold() {
         claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-lower", None, &me).unwrap_err();
     assert_eq!(still_blocked.code(), "write_set_conflict");
 
-    // Once lane-upper is quiesced, lane-lower unlocks immediately!
-    let dead_rcpt = dead_pid_receipt();
-    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-upper", &child_upper, &dead_rcpt, &me)
+    // Once lane-upper is quiesced via its own removed worktree, lane-lower unlocks immediately!
+    let wt_rcpt = remove_child_worktree_receipt(&mut g, &child_upper);
+    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-upper", &child_upper, &wt_rcpt, &me)
         .unwrap();
     assert!(claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-lower", None, &me).is_ok());
 }
@@ -846,8 +905,13 @@ fn t12_effect_fencing_wired_in_write_rs_and_atomic_tx() {
     let sess = verified_owner("owner-fencer");
 
     // Effect flow that verifies MAESTRO_FENCING_EPOCH, MAESTRO_FENCING_RESOURCE, and MAESTRO_FENCING_DB
-    // are exported by write.rs!
+    // 1. Real target-side atomic epoch consumption: the effect command atomically mutates
+    //    `target_writes` AND consumes `written_epoch = MAESTRO_FENCING_EPOCH` in ONE SQLite tx!
     let marker = workdir.join("seen_epoch.txt");
+    let target_cmd = atomic_target_commit_py(&format!(
+        r#"open({:?}, "w").write(os.environ["MAESTRO_FENCING_EPOCH"])"#,
+        marker.display().to_string()
+    ));
     let flow_yaml = format!(
         r#"
 flow: fenced_eff
@@ -857,10 +921,10 @@ workdir: "{{{{params.repo}}}}"
 nodes:
   ship:
     class: effect
-    run: [sh, -c, 'test -n "$MAESTRO_FENCING_EPOCH" && test -n "$MAESTRO_FENCING_RESOURCE" && test -n "$MAESTRO_FENCING_DB" && printf "%s" "$MAESTRO_FENCING_EPOCH" > {}']
+    run: [sh, -c, {}]
     reconcile: [sh, -c, "true"]
 "#,
-        marker.display()
+        serde_json::to_string(&target_cmd).unwrap()
     );
     let compiled = compile(&flow_yaml).unwrap();
     let s1 = start(
@@ -872,8 +936,35 @@ nodes:
     .unwrap();
     let c1 = claim(&mut ledger, &sess, &s1.instance, "ship").unwrap();
     let comp = complete(&mut ledger, &sess, &c1.token, json!({"ok": true}), &Limits::default()).unwrap();
-    assert!(matches!(comp, Completion::Completed { .. }), "freshly granted effect must complete: {comp:?}");
+    assert!(matches!(comp, Completion::Completed { .. }), "target-atomic fenced effect must complete: {comp:?}");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "1", "first effect received monotonic epoch 1");
+
+    // 2. A fenced effect whose target does NOT atomically consume MAESTRO_FENCING_EPOCH MUST be
+    //    refused fail-closed with `target_did_not_consume_epoch`!
+    let flow_unconsumed_yaml = r#"
+flow: fenced_unconsumed
+version: 1
+params: [repo, fencing_resource]
+workdir: "{{params.repo}}"
+nodes:
+  ship:
+    class: effect
+    run: [sh, -c, "true"]
+    reconcile: [sh, -c, "true"]
+"#;
+    let compiled_u = compile(flow_unconsumed_yaml).unwrap();
+    let su = start(
+        &mut ledger,
+        &sess,
+        &compiled_u,
+        json!({"repo": workdir.to_str().unwrap(), "fencing_resource": "branch:unconsumed"}),
+    )
+    .unwrap();
+    let cu = claim(&mut ledger, &sess, &su.instance, "ship").unwrap();
+    match complete(&mut ledger, &sess, &cu.token, json!({"ok": true}), &Limits::default()).unwrap() {
+        Completion::Refused { code, .. } => assert_eq!(code, "target_did_not_consume_epoch"),
+        other => panic!("expected target_did_not_consume_epoch refusal, got {other:?}"),
+    }
 
     // Mid-flight stale epoch rejection: another worker advances granted_epoch in fencing_epochs.sqlite
     // before the effect finishes -> complete() MUST refuse with `stale_fencing_epoch`!
@@ -957,10 +1048,18 @@ fn t13_normal_write_verbs_enforce_child_fence_and_6_surface_write_set() {
         cid
     };
 
-    // 1. Write an untracked file OUTSIDE declared write_set (`src/b/sneaky.rs`) -> normal complete()
-    //    MUST refuse with `write_set_violation`!
-    std::fs::create_dir_all(wt.join("src/b")).unwrap();
-    std::fs::write(wt.join("src/b/sneaky.rs"), "oops\n").unwrap();
+    // 1. Write an untracked file OUTSIDE declared write_set (`src/b/sneaky.rs`) inside the child's
+    //    OWN unique allocated worktree (never equal to parent `wt`!) -> normal complete() MUST refuse!
+    let child_wt = {
+        let g = ledger.lock().unwrap();
+        let clog = g.log(&child_id).unwrap();
+        let cstart: Started = serde_json::from_value(clog.events[0].body.clone()).unwrap();
+        let p = PathBuf::from(cstart.params.get("child_worktree").and_then(|v| v.as_str()).unwrap());
+        assert_ne!(p, wt, "child must receive its own unique git worktree, never share parent repo");
+        p
+    };
+    std::fs::create_dir_all(child_wt.join("src/b")).unwrap();
+    std::fs::write(child_wt.join("src/b/sneaky.rs"), "oops\n").unwrap();
     let c = claim(&mut ledger, &sess, &child_id, "work").unwrap();
     let comp = complete(&mut ledger, &sess, &c.token, json!({"ok": true}), &Limits::default()).unwrap();
     match comp {
@@ -970,7 +1069,7 @@ fn t13_normal_write_verbs_enforce_child_fence_and_6_surface_write_set() {
 
     // 2. Supersede the child on the parent -> normal claim() AND complete() on child MUST fail
     //    with `subflow_superseded`!
-    std::fs::remove_file(wt.join("src/b/sneaky.rs")).unwrap();
+    std::fs::remove_file(child_wt.join("src/b/sneaky.rs")).unwrap();
     {
         let mut g = ledger.lock().unwrap();
         let sup = Superseded {
@@ -1111,9 +1210,9 @@ fn t15_performer_union_includes_failed_attempt_when_retry_succeeds() {
                 .code(),
             "quiescence_refused"
         );
-        // Once failed child is confirmed quiescent, retry succeeds!
-        let dead_rcpt = dead_pid_receipt();
-        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid1, &dead_rcpt, &me)
+        // Once failed child's own worktree is removed & quiesced, retry succeeds in a NEW unique worktree!
+        let wt_rcpt = remove_child_worktree_receipt(&mut g, &cid1);
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid1, &wt_rcpt, &me)
             .unwrap();
 
         // Attempt 2 (retry): Codex runs and succeeds!
@@ -1399,7 +1498,14 @@ fn t20_grant_epoch_blocks_while_effect_holds_resource_lock() {
     let db_path = root.join("fencing_epochs.sqlite");
     let started_flag = workdir.join("effect_running.txt");
 
-    // Effect command signals it started, then sleeps 200ms before finishing.
+    // Effect command signals it started, sleeps 200ms, then performs a REAL target-side atomic
+    // SQLite mutation + epoch consumption in ONE BEGIN IMMEDIATE transaction!
+    let target_cmd = atomic_target_commit_py(&format!(
+        r#"import time
+open({:?}, "w").write("started")
+time.sleep(0.2)"#,
+        started_flag.display().to_string()
+    ));
     let yaml = format!(
         r#"
 flow: serialized_effect
@@ -1409,10 +1515,10 @@ workdir: "{{{{params.repo}}}}"
 nodes:
   ship:
     class: effect
-    run: [sh, -c, 'printf started > "{}" && sleep 0.2']
+    run: [sh, -c, {}]
     reconcile: [sh, -c, "true"]
 "#,
-        started_flag.display()
+        serde_json::to_string(&target_cmd).unwrap()
     );
     let compiled = compile(&yaml).unwrap();
     let s = start(
@@ -1493,8 +1599,9 @@ fn t21_quiescence_verifies_real_os_and_fs_and_base_sha_cannot_be_spoofed() {
         );
     }
 
-    // 2. Quiescence MUST reject arbitrary strings ("anything"), live PIDs, and existing worktrees;
-    //    and accept dead PIDs or actually removed / read-only worktrees!
+    // 2. Quiescence MUST reject arbitrary strings, unrelated dead PIDs, unrelated absent paths,
+    //    unrelated read-only dirs, and the child's own still-writable worktree — and accept ONLY
+    //    verified removal or read-only freeze of THIS child's own allocated child_worktree!
     let mut g = ledger.lock().unwrap();
     expand_map(
         &mut g,
@@ -1512,6 +1619,13 @@ fn t21_quiescence_verifies_real_os_and_fs_and_base_sha_cannot_be_spoofed() {
     )
     .unwrap();
     let (cid, _) = claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", None, &me).unwrap();
+    let child_wt_str = {
+        let clog = g.log(&cid).unwrap();
+        let cstart: Started = serde_json::from_value(clog.events[0].body.clone()).unwrap();
+        let s = cstart.params.get("child_worktree").and_then(|v| v.as_str()).unwrap().to_string();
+        assert_ne!(PathBuf::from(&s), wt, "child_worktree must be unique and distinct from parent repo");
+        s
+    };
     finalize_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, Some("boom"), BTreeMap::new(), &me)
         .unwrap();
 
@@ -1522,25 +1636,36 @@ fn t21_quiescence_verifies_real_os_and_fs_and_base_sha_cannot_be_spoofed() {
             .code(),
         "quiescence_refused"
     );
-    // Live PID (our own process!) -> REFUSED!
-    let live_rcpt = format!("pid:{}:exited", std::process::id());
+    // Unrelated dead PID (not recorded in child_log Claimed.audit.pid!) -> REFUSED!
+    let mut dummy = Command::new("true").spawn().unwrap();
+    let unrelated_dead = dummy.id();
+    let _ = dummy.wait();
+    let unrelated_pid_rcpt = format!("pid:{unrelated_dead}:exited");
     assert_eq!(
-        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &live_rcpt, &me)
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &unrelated_pid_rcpt, &me)
             .unwrap_err()
             .code(),
         "quiescence_refused"
     );
-    // worktree_removed on a dir that still exists -> REFUSED!
-    let existing_rcpt = format!("worktree_removed:{}", wt.display());
+    // Unrelated nonexistent path -> REFUSED!
+    let unrelated_path_rcpt = format!("worktree_removed:{}", dir.path().join("unrelated_absent").display());
     assert_eq!(
-        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &existing_rcpt, &me)
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &unrelated_path_rcpt, &me)
             .unwrap_err()
             .code(),
         "quiescence_refused"
     );
-    // worktree_removed on a genuinely absent path -> ACCEPTED!
-    let gone_rcpt = format!("worktree_removed:{}", dir.path().join("removed_wt").display());
-    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &gone_rcpt, &me).unwrap();
+    // Child's OWN worktree while it STILL exists on disk -> REFUSED!
+    let own_still_exists = format!("worktree_removed:{child_wt_str}");
+    assert_eq!(
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &own_still_exists, &me)
+            .unwrap_err()
+            .code(),
+        "quiescence_refused"
+    );
+    // Removing THIS child's OWN allocated child_worktree -> ACCEPTED!
+    let own_removed = remove_child_worktree_receipt(&mut g, &cid);
+    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &own_removed, &me).unwrap();
 }
 
 #[test]
@@ -1584,6 +1709,17 @@ fn t22_concurrent_normal_map_claims_dispatch_distinct_items_and_complete_unicode
     assert_eq!(ik1, "lane-a");
     assert_eq!(ik2, "lane-b");
     assert_ne!(cid1, cid2, "concurrent normal map claims must dispatch distinct children");
+    // Verify BOTH concurrent children have unique, distinct git worktrees (neither sharing parent repo!).
+    {
+        let g = ledger.lock().unwrap();
+        let s1: Started = serde_json::from_value(g.log(&cid1).unwrap().events[0].body.clone()).unwrap();
+        let s2: Started = serde_json::from_value(g.log(&cid2).unwrap().events[0].body.clone()).unwrap();
+        let w1 = s1.params.get("child_worktree").and_then(|v| v.as_str()).unwrap();
+        let w2 = s2.params.get("child_worktree").and_then(|v| v.as_str()).unwrap();
+        assert_ne!(w1, w2, "concurrent siblings must have distinct per-child worktrees");
+        assert_ne!(PathBuf::from(w1), wt, "child 1 must not share parent repo");
+        assert_ne!(PathBuf::from(w2), wt, "child 2 must not share parent repo");
+    }
 
     // Both children complete independently and both parent map tokens complete cleanly!
     for cid in [&cid1, &cid2] {

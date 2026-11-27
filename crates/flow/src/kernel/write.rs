@@ -1249,7 +1249,7 @@ pub fn complete_as(
     if let Err(unfit) = check_receipt(&held, session, &outputs, &plan.argv) {
         return refuse(&mut guard, &held, unfit, &[]);
     }
-    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String)> = None;
+    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String, bool)> = None;
     if let Step::Effect { preconditions } = &plan.step {
         // The preconditions run with the lock released; then everything again under it.
         let input = guard_input(&held.log, &held.started, &held.rec.node)?;
@@ -1274,10 +1274,23 @@ pub fn complete_as(
             Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
         };
         let fence_db = fence_db_path.clone();
+        let explicit_fencing = held
+            .started
+            .params
+            .get("fencing_resource")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        let require_target_atomic = explicit_fencing
+            && held
+                .started
+                .params
+                .get("require_target_fencing")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
         let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
         let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
         let op_id = format!("{}:{}:{}", instance.as_str(), held.rec.node, held.rec.attempt);
-        effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id));
+        effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id, require_target_atomic));
         let intent = EffectStarted {
             node: held.rec.node.clone(),
             iteration: held.rec.iteration.clone(),
@@ -1294,9 +1307,9 @@ pub fn complete_as(
     // newer epoch on `fence_resource` or execute a concurrent mutation on it!
     drop(guard);
 
-    let mut fence_commit_err: Option<String> = None;
+    let mut fence_commit_err: Option<(&'static str, String)> = None;
     let ran_at = clock::now();
-    let ran = if let Some((fence_resource, pinned_epoch, fence_db, op_id)) = effect_fence_cfg {
+    let ran = if let Some((fence_resource, pinned_epoch, fence_db, op_id, require_target_atomic)) = effect_fence_cfg {
         let fence_store = FencingStore::open(&fence_db)
             .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
         let rlock = fence_store
@@ -1320,10 +1333,13 @@ pub fn complete_as(
         };
         let epoch_s = epoch.to_string();
         let db_s = fence_db.display().to_string();
-        let fence_env_refs: [(&str, &str); 3] = [
+        let payload_digest = digest(&outputs);
+        let fence_env_refs: [(&str, &str); 5] = [
             ("MAESTRO_FENCING_EPOCH", epoch_s.as_str()),
             ("MAESTRO_FENCING_RESOURCE", fence_resource.as_str()),
             ("MAESTRO_FENCING_DB", db_s.as_str()),
+            ("MAESTRO_FENCING_OP_ID", op_id.as_str()),
+            ("MAESTRO_FENCING_DIGEST", payload_digest.as_str()),
         ];
         let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &fence_env_refs };
         let ran = match &plan.snapshot {
@@ -1331,10 +1347,25 @@ pub fn complete_as(
             None => exec::run(&plan.argv, &plan.cwd, limits, feed),
         };
         if matches!(ran, Ran::Exited { code: Some(0), .. }) {
-            let payload_digest = digest(&outputs);
-            let res_json = serde_json::to_string(&outputs).unwrap_or_else(|_| "null".to_string());
-            if let Err(e) = fence_store.commit_fenced_write(&fence_resource, epoch, &op_id, &payload_digest, &res_json) {
-                fence_commit_err = Some(e.to_string());
+            if require_target_atomic {
+                // Target-side atomic fencing: the target itself MUST have atomically verified
+                // `granted_epoch == epoch && written_epoch < epoch` and committed
+                // `written_epoch = epoch` in the SAME transaction as its mutation!
+                if let Err(e) = fence_store.verify_target_consumed(&fence_resource, epoch, &op_id, &payload_digest) {
+                    let code = match e {
+                        super::fencing::FencingError::StaleEpoch { .. }
+                        | super::fencing::FencingError::EpochAlreadyConsumed { .. } => "stale_fencing_epoch",
+                        super::fencing::FencingError::Storage(_) => "target_did_not_consume_epoch",
+                    };
+                    fence_commit_err = Some((code, e.to_string()));
+                }
+            } else {
+                let res_json = serde_json::to_string(&outputs).unwrap_or_else(|_| "null".to_string());
+                if let Err(e) =
+                    fence_store.commit_fenced_write(&fence_resource, epoch, &op_id, &payload_digest, &res_json)
+                {
+                    fence_commit_err = Some(("stale_fencing_epoch", e.to_string()));
+                }
             }
         }
         drop(rlock);
@@ -1387,8 +1418,8 @@ pub fn complete_as(
     if let Some(unfit) = unfit {
         return refuse(&mut guard, &held, unfit, &stderr);
     }
-    if let Some(err) = fence_commit_err {
-        return refuse(&mut guard, &held, ("stale_fencing_epoch", err), &stderr);
+    if let Some((code, err)) = fence_commit_err {
+        return refuse(&mut guard, &held, (code, err), &stderr);
     }
     // Fail-closed 6-surface post-write isolation check for child subflow Work/Effect nodes:
     // NEVER skips when disjoint_writes or non-empty write_set applies!
@@ -1419,6 +1450,27 @@ pub fn complete_as(
                         "write_set_verification_failed",
                         format!("child workdir is not a git worktree: {}", plan.cwd.display()),
                     ),
+                    &stderr,
+                );
+            }
+            let cwd_str = plan.cwd.to_string_lossy();
+            let alloc_wt = held.started.params.get("child_worktree").and_then(Value::as_str);
+            if alloc_wt != Some(cwd_str.as_ref()) {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    (
+                        "write_set_violation",
+                        format!("child workdir {cwd_str:?} does not match unique allocated child_worktree {alloc_wt:?}"),
+                    ),
+                    &stderr,
+                );
+            }
+            if held.started.params.get("parent_repo").and_then(Value::as_str) == Some(cwd_str.as_ref()) {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    ("write_set_violation", format!("child shares parent repository checkout: {cwd_str:?}")),
                     &stderr,
                 );
             }

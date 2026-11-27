@@ -315,6 +315,52 @@ impl FencingStore {
         Ok(())
     }
 
+    /// Verifies that the target itself atomically checked and consumed `incoming_epoch` inside
+    /// its own mutation transaction (`written_epoch == incoming_epoch` with matching `op_id` and
+    /// `payload_digest`), closing any controller-crash divergence window between external mutation
+    /// and epoch consumption.
+    pub fn verify_target_consumed(
+        &self,
+        resource_id: &str,
+        incoming_epoch: u64,
+        op_id: &str,
+        payload_digest: &str,
+    ) -> Result<(), FencingError> {
+        let conn = self.connect()?;
+        let row: Option<(i64, i64, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT granted_epoch, written_epoch, last_op_id, last_payload_digest
+                 FROM resource_epochs WHERE resource_id = ?1",
+                params![resource_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| FencingError::Storage(e.to_string()))?;
+        let (granted_i, written_i, last_op, last_digest) = row.ok_or_else(|| FencingError::StaleEpoch {
+            resource_id: resource_id.to_string(),
+            incoming: incoming_epoch,
+            granted: 0,
+        })?;
+        let granted = granted_i as u64;
+        let written = written_i as u64;
+        if incoming_epoch != granted {
+            return Err(FencingError::StaleEpoch {
+                resource_id: resource_id.to_string(),
+                incoming: incoming_epoch,
+                granted,
+            });
+        }
+        if written != incoming_epoch
+            || last_op.as_deref() != Some(op_id)
+            || last_digest.as_deref() != Some(payload_digest)
+        {
+            return Err(FencingError::Storage(format!(
+                "target did not atomically consume fencing epoch {incoming_epoch} for {resource_id} (written_epoch={written}, last_op={last_op:?})"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
