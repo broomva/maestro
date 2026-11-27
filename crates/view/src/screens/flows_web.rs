@@ -143,32 +143,43 @@ fn live_line(at: jiff::Timestamp, read: bool) -> Markup {
     }
 }
 
+/// A run's progress: a meter while it can move; for a run the kernel has latched finished, what
+/// ended it, since replay at a later clock may read its old observations as stale and count none.
 fn progress(i: &Instance) -> Markup {
+    let ended = match i.state() {
+        RunState::Done => Some("finished"),
+        RunState::Stuck => Some("stopped"),
+        RunState::Retired => Some("retired"),
+        _ => None,
+    };
     html! {
-        @match i.progress() {
+        @if let Some(ended) = ended { span class="mf-progress bv-meta" { (ended) } }
+        @else { @match i.progress() {
             Some((done, total)) => span class="mf-progress" title=(format!("{done} of {total} nodes done")) {
                 meter min="0" max=(total.max(1)) value=(done) {}
                 span class="bv-meta" { (done) "/" (total) }
             },
             None => span class="mf-progress bv-meta" { "progress unknown" },
-        }
+        } }
     }
 }
 
 /// Where a run is, in a phrase: its running, waiting and ready nodes.
 fn whereabouts(i: &Instance) -> String {
+    // A run the kernel latched finished is finished, whatever replay at this clock reads its nodes as.
+    match i.state() {
+        RunState::Done => return "Finished".into(),
+        RunState::Stuck => return "Stopped on a failure".into(),
+        RunState::Retired => return "Retired".into(),
+        _ => {}
+    }
     let Some(at) = i.frontier() else { return "Not replayed, so where it is is unknown".into() };
     let verdicts = i.live.as_ref().map(|l| l.verdicts.as_slice()).unwrap_or_default();
     if at.is_empty() && !verdicts.is_empty() {
         return format!("Waiting on the until verdict of repeat {}", verdicts.join(", "));
     }
     if at.is_empty() {
-        return match i.state() {
-            RunState::Done => "Finished".into(),
-            RunState::Stuck => "Stopped on a failure".into(),
-            RunState::Retired => "Retired".into(),
-            _ => "Nothing to do now".into(),
-        };
+        return "Nothing to do now".into();
     }
     at.iter().map(|(id, s)| format!("{id} ({})", s.label().to_lowercase())).collect::<Vec<_>>().join(", ")
 }
@@ -626,16 +637,28 @@ fn run(ledger: &Ledger, i: &Instance, latest: bool, at: jiff::Timestamp) -> Mark
 
 fn whereabouts_panel(i: &Instance, live: &Live) -> Markup {
     let (at, done, total) = (live.frontier(), live.done(), i.shape.nodes.len());
+    // Ended as its state says (finished, stopped or retired), not only as replay latches terminal: a
+    // run retired before it finished takes no more work either.
+    let ended = matches!(i.state(), RunState::Done | RunState::Stuck | RunState::Retired);
     html! {
         div class="mf-where-grid" {
             div class="mf-where-now" {
                 p class="mf-where-title" { (whereabouts(i)) }
-                @let skipped = live.nodes.values().filter(|n| n.state == NodeState::Blocked).count();
+                @if ended {
+                    @let skipped = live.nodes.values().filter(|n| n.state == NodeState::Blocked).count();
+                    @let stale = live.nodes.values().any(|n| n.state == NodeState::Stale);
+                    p class="bv-meta" {
+                        "It ended at event " (i.seq) " and takes no more work."
+                        @if skipped > 0 { " " (plural(skipped, "node was", "nodes were")) " not reached." }
+                        @if stale { " The states in its shape are replay's at the read's clock, so an observation it made that has since passed its freshness window reads as stale." }
+                    }
+                } @else {
                 p {
                     meter class="mf-meter" min="0" max=(total.max(1)) value=(done) {}
-                    span class="bv-meta" { " " (done) " of " (plural(total, "node", "nodes")) " done" @if live.terminal && skipped > 0 { ", " (skipped) " not reached" } }
+                    span class="bv-meta" { " " (done) " of " (plural(total, "node", "nodes")) " done" }
                 }
-                @if !at.is_empty() {
+                }
+                @if !at.is_empty() && !ended {
                     ul class="mf-frontier" {
                         @for (id, s) in &at {
                             @let n = &live.nodes[*id];
@@ -707,7 +730,7 @@ struct Geometry {
     top: f64,
 }
 
-const FULL: Geometry = Geometry { w: 172.0, h: 54.0, col_gap: 56.0, row_gap: 22.0, pad: 12.0, top: 22.0 };
+const FULL: Geometry = Geometry { w: 172.0, h: 54.0, col_gap: 72.0, row_gap: 22.0, pad: 12.0, top: 22.0 };
 const THUMB: Geometry = Geometry { w: 26.0, h: 12.0, col_gap: 12.0, row_gap: 6.0, pad: 2.0, top: 2.0 };
 
 fn clip(s: &str, max: usize) -> String {
@@ -769,7 +792,9 @@ fn graph(
                         circle class="mf-edge-end" data-kind=(e.kind.name()) cx=(tx) cy=(ty) r="3" {}
                         @if let Some(label) = &e.label {
                             @if e.kind != EdgeKind::Needs {
-                                text class="mf-edge-label" x=(tx - 6.0) y=(ty - 6.0) text-anchor="end" { (clip(label, 16)) }
+                                // In the gap just before the target: an edge that skips a column has its
+                                // midpoint under the box between, which is drawn over it.
+                                text class="mf-edge-label" x=(tx - g.col_gap / 2.0) y=(ty - 6.0) text-anchor="middle" { (clip(label, 12)) }
                             }
                         }
                     }
@@ -1197,6 +1222,72 @@ mod tests {
         assert!(run.contains(r#"class="mf-svg""#) && !run.contains("/flows/kernel/ship#node-"), "{run}");
         let (k, _) = flows_page(&l, &FlowsPage::Kernel("ship".into()), at()).unwrap();
         assert!(k.contains(UNVERIFIED), "the kernel page draws no rows to link to: {k}");
+    }
+
+    /// Found dogfooding the live ledger: a finished run whose observations had since gone stale
+    /// read "Done" beside "sense (stale)" and 0 of 4 done.
+    #[test]
+    fn a_finished_run_says_it_finished_even_when_its_observations_are_stale_now() {
+        let mut live = running();
+        for n in live.nodes.values_mut() {
+            n.state = NodeState::Stale;
+        }
+        live.terminal = true;
+        let l = ledger(Ok(vec![instance(Ok(live))]));
+        let (k, _) = flows_page(&l, &FlowsPage::Kernel("ship".into()), at()).unwrap();
+        assert!(k.contains(r#"<span class="mf-run-at">Finished</span>"#), "{k}");
+        assert!(
+            k.contains(">finished</span>") && !k.contains("0/2"),
+            "a finished run is not shown as nothing done: {k}"
+        );
+        let (run, _) = flows_page(&l, &FlowsPage::Run("fi_0123456789abcdef".into()), at()).unwrap();
+        assert!(run.contains(r#"<p class="mf-where-title">Finished</p>"#), "{run}");
+        assert!(run.contains("takes no more work") && !run.contains("0 of 2"), "{run}");
+    }
+
+    #[test]
+    fn an_edge_that_skips_a_column_labels_itself_in_the_gap_before_its_target() {
+        // choose -> assess -> deploy, and deploy switches on choose: the switch edge spans a column.
+        let node = |id: &str, class: &str, needs: &[&str]| crate::flows::Node {
+            id: id.into(),
+            class: class.into(),
+            needs: needs.iter().map(|n| Need { on: n.to_string(), kind: NeedKind::Node }).collect(),
+            ..crate::flows::Node::default()
+        };
+        let mut deploy = node("deploy", "pure", &["assess"]);
+        deploy.switch = Some(("choose".into(), "yes".into()));
+        let shape = Shape {
+            nodes: vec![node("choose", "choice", &[]), node("assess", "work", &["choose"]), deploy],
+            ..Shape::default()
+        };
+        let html = graph(&shape, None, &BTreeMap::new(), false, None).into_string();
+        // deploy sits in column 2, at x = pad + 2 * (w + gap); its label is half a gap before it.
+        let target = FULL.pad + 2.0 * (FULL.w + FULL.col_gap);
+        let label = format!(r#"class="mf-edge-label" x="{}""#, target - FULL.col_gap / 2.0);
+        assert!(html.contains(&label) && html.contains(">yes</text>"), "{label} in {html}");
+        let assess_right = FULL.pad + FULL.w + FULL.col_gap + FULL.w;
+        assert!(target - FULL.col_gap / 2.0 > assess_right, "the label is clear of the box between");
+    }
+
+    #[test]
+    fn a_finished_run_counts_what_it_did_not_reach_and_mentions_staleness_only_when_stale() {
+        let mut live = running();
+        live.nodes.get_mut("plan").unwrap().state = NodeState::Done;
+        live.nodes.get_mut("review").unwrap().state = NodeState::Blocked;
+        live.terminal = true;
+        let l = ledger(Ok(vec![instance(Ok(live))]));
+        let (run, _) = flows_page(&l, &FlowsPage::Run("fi_0123456789abcdef".into()), at()).unwrap();
+        assert!(run.contains("1 node was not reached.") && !run.contains("reads as stale"), "{run}");
+        // Retired before it finished: the panel says it ended, not where it was.
+        let mut retired = running();
+        retired.retired = Some("a9".into());
+        let l = ledger(Ok(vec![instance(Ok(retired))]));
+        let (run, _) = flows_page(&l, &FlowsPage::Run("fi_0123456789abcdef".into()), at()).unwrap();
+        assert!(
+            run.contains(r#"<p class="mf-where-title">Retired</p>"#) && run.contains("takes no more work"),
+            "{run}"
+        );
+        assert!(!run.contains("mf-frontier"), "{run}");
     }
 
     #[test]

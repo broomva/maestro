@@ -173,6 +173,9 @@ body.mv-web { padding: 0; min-height: 100vh; }
 /* The phone: one column. The capsule sits at the top and the queue becomes a pager. */
 @media (max-width: 760px) {
   .mv-web-nav .mv-tab, .mv-tabs .mv-tab { min-height: 44px; display: inline-flex; align-items: center; gap: 4px; }
+  /* Four tabs stay on one row at phone width (390 px). */
+  .mv-web-nav.mv-tabs { flex-wrap: nowrap; max-width: 100%; }
+  .mv-web-nav .mv-tab { padding: 8px 12px; white-space: nowrap; }
   .mv-note-input { font-size: 16px; }
   .mv-web-head { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: calc(var(--bv-space-4) + env(safe-area-inset-top)) var(--bv-space-4) var(--bv-space-3); gap: var(--bv-space-3); }
   .mv-web-tree, .mv-wordmark { display: none; }
