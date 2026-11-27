@@ -466,11 +466,13 @@ pub fn fallback_wake_message(r: &Receipt, commit: &str, origin_session: Option<&
 }
 
 fn t3_thread_of(session: &str) -> Option<&str> {
-    session
-        .strip_prefix("t3:")
-        .and_then(|s| s.split_once('/'))
-        .map(|(_, t)| t)
-        .filter(|t| !t.is_empty() && !t.starts_with('-'))
+    session.strip_prefix("t3:").and_then(|s| s.split_once('/')).map(|(_, t)| t).filter(|t| {
+        !t.is_empty()
+            && *t != "."
+            && *t != ".."
+            && !t.starts_with('-')
+            && t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
+    })
 }
 
 /// Wake the session an ask names (`t3:<environment>/<thread>`), as its next turn.

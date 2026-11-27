@@ -74,6 +74,8 @@ fn parse_thread_id(raw: &str) -> Option<String> {
         None => raw,
     };
     let ok = !thread.is_empty()
+        && thread != "."
+        && thread != ".."
         && !thread.starts_with('-')
         && thread.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'));
     ok.then(|| thread.to_string())
@@ -690,6 +692,8 @@ mod tests {
         assert_eq!(parse_thread_id("a6ede81a"), Some("a6ede81a".into()));
         assert_eq!(parse_thread_id("--help"), None);
         assert_eq!(parse_thread_id("env/-flag"), None);
+        assert_eq!(parse_thread_id("."), None);
+        assert_eq!(parse_thread_id(".."), None);
         assert_eq!(parse_thread_id(""), None);
     }
 }

@@ -251,7 +251,7 @@ pub fn web(fragment: &str, title: &str, current: &str, shell: &Shell) -> String 
                     }
                 }
                 main id="maestro-root" data-web="true" { (PreEscaped(fragment)) }
-                div class="mv-toasts" data-toasts="true" aria-live="polite" aria-atomic="false" {}
+                div class="mv-toasts" data-toasts="true" {}
                 script { (PreEscaped(OWNER_JS)) }
             }
         }

@@ -249,8 +249,18 @@ mod tests {
         let sec_cache: RingCache<usize, Section<usize>> = RingCache::new();
         let unavail = sec_cache.get_or_insert_if(1, || Section::unavailable("s", "boom"), section_clean);
         assert!(unavail.data.is_none());
+        let partial = sec_cache.get_or_insert_if(
+            1,
+            || Section {
+                source: "s".into(),
+                data: Some(5),
+                errors: vec![maestro_core::SourceError { at: "p".into(), reason: "partial".into() }],
+            },
+            section_clean,
+        );
+        assert_eq!(partial.data, Some(5));
         let recovered = sec_cache.get_or_insert_if(1, || Section::ok("s", 7), section_clean);
-        assert_eq!(recovered.data, Some(7), "unavailable Section must not pin in cache");
+        assert_eq!(recovered.data, Some(7), "unavailable or partial Section must not pin in cache");
     }
 
     #[test]

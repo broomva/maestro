@@ -16,7 +16,7 @@
   let pending = null;
 
   const statusNote = document.createElement("p");
-  statusNote.className = "mv-navigation-status";
+  statusNote.className = "mv-sr";
   statusNote.setAttribute("role", "status");
   statusNote.setAttribute("aria-live", "polite");
   statusNote.setAttribute("aria-atomic", "true");
@@ -24,7 +24,7 @@
 
   const announce = (text) => {
     statusNote.textContent = "";
-    statusNote.textContent = text;
+    setTimeout(() => { statusNote.textContent = text; }, 0);
   };
 
   const assetSignature = (doc) => {

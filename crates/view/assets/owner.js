@@ -32,9 +32,8 @@
 
   let toastAnnouncer = null;
   if (toastHost) {
-    toastHost.removeAttribute("aria-live");
     toastAnnouncer = document.createElement("p");
-    toastAnnouncer.className = "mv-navigation-status";
+    toastAnnouncer.className = "mv-sr";
     toastAnnouncer.setAttribute("role", "status");
     toastAnnouncer.setAttribute("aria-live", "polite");
     toastAnnouncer.setAttribute("aria-atomic", "true");
@@ -43,7 +42,44 @@
   const announceToast = (msg) => {
     if (!toastAnnouncer || !msg) return;
     toastAnnouncer.textContent = "";
-    toastAnnouncer.textContent = msg;
+    setTimeout(() => { toastAnnouncer.textContent = msg; }, 0);
+  };
+
+  const renderFailureToast = (titleText, url, message) => {
+    if (!toastHost) return;
+    const el = document.createElement("div");
+    el.className = "mv-toast";
+    el.dataset.tone = "fail";
+    const head = document.createElement("div");
+    head.className = "mv-toast-head";
+    const copy = document.createElement("div");
+    copy.className = "mv-toast-copy";
+    const title = document.createElement("p");
+    title.className = "mv-toast-title";
+    title.textContent = `Could not submit · ${titleText}`;
+    const sub = document.createElement("p");
+    sub.className = "mv-toast-sub";
+    sub.textContent = message || "Answer submission failed.";
+    copy.append(title, sub);
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "mv-toast-close";
+    close.setAttribute("aria-label", "Dismiss notification");
+    close.textContent = "×";
+    close.addEventListener("click", () => el.remove());
+    head.append(copy, close);
+    const actions = document.createElement("div");
+    actions.className = "mv-toast-actions";
+    if (url) {
+      const a = document.createElement("a");
+      a.className = "mv-toast-btn";
+      a.href = url;
+      a.textContent = "Review decision";
+      actions.append(a);
+    }
+    el.append(head, actions);
+    toastHost.append(el);
+    announceToast(`Could not submit answer: ${message || "Answer submission failed."}`);
   };
 
   const loadStored = () => {
@@ -487,15 +523,24 @@
 
     const completeWithAssertion = async (begin, cred, c) => {
       const r = cred.response;
-      const done = await post("/owner/answer/finish", {
-        nonce: begin.nonce,
-        assertion: {
-          credential: b64u(cred.rawId),
-          client_data: b64u(r.clientDataJSON),
-          authenticator_data: b64u(r.authenticatorData),
-          signature: b64u(r.signature),
-        },
-      });
+      let done;
+      try {
+        done = await post("/owner/answer/finish", {
+          nonce: begin.nonce,
+          assertion: {
+            credential: b64u(cred.rawId),
+            client_data: b64u(r.clientDataJSON),
+            authenticator_data: b64u(r.authenticatorData),
+            signature: b64u(r.signature),
+          },
+        });
+      } catch (e) {
+        if (signal.aborted) {
+          renderFailureToast(askTitle, askUrl, e?.message);
+          return;
+        }
+        throw e;
+      }
       if (!done || !done.id) throw new Error("server returned an incomplete answer receipt");
       const offset = (typeof done.now_ms === "number" ? done.now_ms : Date.now()) - Date.now();
       renderToast({
