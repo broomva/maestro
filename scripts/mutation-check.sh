@@ -258,7 +258,7 @@ mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_em
 mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| a.class != Some(AskClass::Idea))'
 mutate $decision '        @if landing == Landing::Unknown {' '        @if false {'
 mutate $decision '        } @else if state == AskState::Archived {' '        } @else if false {'
-mutate $web 'render_web(&store, &validated, at, owner)' 'render_web(&store, &validated, at, maestro_view::render::Owner::Off(String::new()))'
+mutate $web 'render_web_with_pending(&store, &validated, at, owner, in_flight)' 'render_web_with_pending(&store, &validated, at, maestro_view::render::Owner::Off(String::new()), in_flight)'
 # The owner's answer (BRO-4042): only the page itself, only a passkey over the very intent, only
 # the hash the owner saw, an undo that holds only inside its window, an edit that reads back.
 pk=crates/store/src/passkey.rs
@@ -312,7 +312,7 @@ mutate $ow '        let r = self.book.undo(id, now_ms, || answers::mark_undone(&
 mutate $ans '            Stage::Undone => return Ok(r.clone()),' '            Stage::Undone => return Err("again".into()),'
 mutate $ans '        if now_ms >= r.applies_at_ms {' '        if false {'
 mutate $ans '            _ => return Err("it was already written".into()),' '            _ => {}'
-mutate $ans "                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));" '                    true;'
+mutate $ans "        !version.is_empty() && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));" '        true;'
 mutate $ans '        let r = m.get_mut(id).filter(|r| r.stage == Stage::Signed)?;' '        let r = m.get_mut(id)?;'
 mutate $ledger '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
 mutate $ledger '    git(&w.checkout, &["clean", "-q", "-f", "-d", "-x"])?;' ''
@@ -338,7 +338,7 @@ mutate $wscr '        && asks.errors.is_empty()' '        && true'
 mutate $wscr '        partial: !cx.reads.asks.errors.is_empty(),' '        partial: false,'
 mutate $wscr "        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {" '        if true {'
 mutate $wscr 'aria-current=[current.is_some_and(|c| std::ptr::eq(c, *e)).then_some("true")]' 'aria-current=[Some("true")]'
-mutate $wscr '    let first = ledgers.iter().flat_map(|(_, v)| v).find(|e| e.keyed);' '    let first = ledgers.iter().flat_map(|(_, v)| v).next();'
+mutate $wscr '        .find(|e| e.keyed && !cx.is_in_flight(&e.lf.file, e.ask.handle()))' '        .find(|e| !cx.is_in_flight(&e.lf.file, e.ask.handle()))'
 mutate $wscr '    let link = |e: &&Entry| e.keyed.then(|| href(e));' '    let link = |e: &&Entry| Some(href(e));'
 mutate $wscr '    let next = rows[i + 1..].iter().find_map(link);' '    let next = rows.get(i + 1).and_then(link);'
 mutate $wscr '        .position(|e| here(&e) && e.ask.handle() == handle)' '        .position(|e| here(&e) && (e.ask.handle() == handle || e.ask.id == handle))'
@@ -369,7 +369,7 @@ paths=crates/store/src/paths.rs
 doctor=crates/store/src/doctor.rs
 mutate $store 'if std::fs::symlink_metadata(bucket.join("_work.md")).is_ok() {' 'if false {'
 mutate $store '        if layout.shadowed.iter().any(|n| n == name) {' '        if false {'
-mutate $store '                .unwrap_or_else(|| rels[0].clone())),' '                .unwrap_or_else(|| rels[rels.len() - 1].clone())),'
+mutate $store '            .unwrap_or_else(|| rels[0].clone())),' '            .unwrap_or_else(|| rels[rels.len() - 1].clone())),'
 mutate $paths '            Some(w) => w,' '            Some(_) => registry::workspace_root()?,'
 mutate $store '            paths.workspace = views::lexical(&abs);' '            paths.workspace = abs;'
 mutate $store 'let initiative = (name != UNFILED).then_some(name);' 'let initiative = Some(name);'
