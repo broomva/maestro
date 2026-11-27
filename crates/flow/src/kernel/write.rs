@@ -346,11 +346,32 @@ fn route(log: &Log, started: &Started, node: &str, who: Option<&Performer>) -> R
                 if doc.is_none() {
                     doc = Some(guard_input(log, started, node).map_err(|e| e.to_string())?);
                 }
-                let harness = doc.as_ref().and_then(|d| d["nodes"][m.as_str()]["performer"]["harness"].as_str());
-                let Some(p) = harness.and_then(provider_of) else {
-                    return Err(format!("the receipt of {m} records no attested provider (harness {harness:?})"));
-                };
-                excluded.push((m.clone(), p.to_string()));
+                let is_map_or_subflow = started
+                    .ir
+                    .nodes
+                    .get(m)
+                    .is_some_and(|n| matches!(n.class, Class::Map { .. } | Class::Subflow { .. }));
+                if is_map_or_subflow {
+                    let Some(arr) = doc.as_ref().and_then(|d| d["nodes"][m.as_str()]["performers"].as_array()) else {
+                        return Err(format!("the receipt of {m} records no performers list"));
+                    };
+                    // Empty map (0 items) excludes no providers; any completed child must be attested.
+                    for (idx, perf) in arr.iter().enumerate() {
+                        let harness = perf.get("harness").and_then(Value::as_str);
+                        let Some(p) = harness.and_then(provider_of) else {
+                            return Err(format!(
+                                "child performer #{idx} of {m} records no attested provider (harness {harness:?})"
+                            ));
+                        };
+                        excluded.push((format!("{m}[{idx}]"), p.to_string()));
+                    }
+                } else {
+                    let harness = doc.as_ref().and_then(|d| d["nodes"][m.as_str()]["performer"]["harness"].as_str());
+                    let Some(p) = harness.and_then(provider_of) else {
+                        return Err(format!("the receipt of {m} records no attested provider (harness {harness:?})"));
+                    };
+                    excluded.push((m.clone(), p.to_string()));
+                }
             }
         }
     }
@@ -946,7 +967,7 @@ fn receipt(held: &Held, session: &VerifiedSession, outputs: Value, verify: Verif
         outputs,
         verify: Some(verify),
         performer: Some(held.who.clone()),
-        tool_use_id: None,
+        performers: Vec::new(), tool_use_id: None,
         audit: session.audit().cloned(),
     }
 }

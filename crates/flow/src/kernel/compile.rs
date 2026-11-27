@@ -44,6 +44,23 @@ const CLASS_FIELDS: &[(ClassDef, &[&str])] = &[
     (ClassDef::Choice, &["edges", "performer", "skill", "routing"]),
     (ClassDef::Effect, &["run", "preconditions", "reconcile", "performer", "skill", "routing", "wait"]),
     (ClassDef::Human, &["ask", "required_body_fields"]),
+    (ClassDef::Subflow, &["uses", "with"]),
+    (
+        ClassDef::Map,
+        &[
+            "over",
+            "item_key",
+            "max_items",
+            "max_concurrency_param",
+            "ready_when",
+            "reserve_providers",
+            "provider_pool",
+            "on_item_failure",
+            "item_retry",
+            "uses",
+            "with",
+        ],
+    ),
 ];
 
 fn unique<'a>(kind: &'static str, ids: impl IntoIterator<Item = &'a str>) -> Result<(), CompileError> {
@@ -86,6 +103,10 @@ fn check_guards(ir: &Ir) -> Result<(), CompileError> {
                     check(format!("node {id} precondition {i}"), g)?;
                 }
             }
+            Class::Map { over, item_key, .. } => {
+                check(format!("node {id} over"), over)?;
+                check(format!("node {id} item_key"), item_key)?;
+            }
             _ => {}
         }
     }
@@ -108,10 +129,73 @@ pub fn compile(yaml: &str) -> Result<CompiledFlow, CompileError> {
 }
 
 pub fn compile_with_path(yaml: &str, path: Option<&std::path::Path>) -> Result<CompiledFlow, CompileError> {
+    let mut visiting = BTreeSet::new();
+    compile_inner(yaml, path, 0, &mut visiting)
+}
+
+fn compile_inner(
+    yaml: &str,
+    path: Option<&std::path::Path>,
+    depth: u32,
+    visiting: &mut BTreeSet<String>,
+) -> Result<CompiledFlow, CompileError> {
+    if depth > ir::MAX_SUBFLOW_DEPTH {
+        return Err(CompileError::invalid(format!(
+            "subflow nesting depth {depth} exceeds MAX_SUBFLOW_DEPTH ({})",
+            ir::MAX_SUBFLOW_DEPTH
+        )));
+    }
     if yaml.len() > MAX_SOURCE {
         return Err(CompileError::invalid(format!("the definition is {} bytes, more than {MAX_SOURCE}", yaml.len())));
     }
     let def: Definition = serde_yaml::from_str(yaml).map_err(|e| CompileError::invalid(e.to_string()))?;
+    let flow_key = format!("{}@{}", def.flow, def.version);
+    if !visiting.insert(flow_key.clone()) {
+        return Err(CompileError::UnboundedLoop {
+            detail: format!("cyclic subflow reference through {flow_key}"),
+        });
+    }
+    let result = compile_def(def, path, depth, visiting);
+    visiting.remove(&flow_key);
+    result
+}
+
+fn resolve_subflow_source(
+    uses: &str,
+    inline: &BTreeMap<String, String>,
+    parent_path: Option<&std::path::Path>,
+) -> Result<(String, Option<std::path::PathBuf>), CompileError> {
+    if let Some(src) = inline.get(uses) {
+        return Ok((src.clone(), parent_path.map(std::path::Path::to_path_buf)));
+    }
+    let Some((name, _ver)) = ir::parse_pinned_uses(uses) else {
+        return Err(CompileError::invalid(format!(
+            "subflow reference {uses:?} must be version-pinned as <flow>@<version>"
+        )));
+    };
+    let Some(parent_dir) = parent_path.and_then(|p| p.parent()) else {
+        return Err(CompileError::UnknownReference { from: "subflow uses".into(), name: uses.to_string() });
+    };
+    let candidates = [
+        parent_dir.join(format!("{name}.yaml")),
+        parent_dir.join("subflows").join(format!("{name}.yaml")),
+    ];
+    for cand in candidates {
+        if cand.is_file() {
+            let text = std::fs::read_to_string(&cand)
+                .map_err(|e| CompileError::invalid(format!("failed to read subflow {}: {e}", cand.display())))?;
+            return Ok((text, Some(cand)));
+        }
+    }
+    Err(CompileError::UnknownReference { from: "subflow uses".into(), name: uses.to_string() })
+}
+
+fn compile_def(
+    def: Definition,
+    path: Option<&std::path::Path>,
+    depth: u32,
+    visiting: &mut BTreeSet<String>,
+) -> Result<CompiledFlow, CompileError> {
     let external = load_agents(def.agents.as_deref(), path)?;
     if def.uses.is_some() {
         return Err(CompileError::Unsupported { feature: "A trait (uses at the top level)".into() });
@@ -119,7 +203,9 @@ pub fn compile_with_path(yaml: &str, path: Option<&std::path::Path>) -> Result<C
     if def.templates.is_some() {
         return Err(CompileError::Unsupported { feature: "A template".into() });
     }
-    if let Some((id, _)) = def.nodes.iter().find(|(_, n)| n.uses.is_some()) {
+    if let Some((id, _)) =
+        def.nodes.iter().find(|(_, n)| n.uses.is_some() && !matches!(n.class, ClassDef::Subflow | ClassDef::Map))
+    {
         return Err(CompileError::Unsupported { feature: format!("A subflow (uses on node {id})") });
     }
     let ids = def.nodes.iter().map(|(id, _)| id).chain(def.forks.iter().map(|(id, _)| id));
@@ -157,6 +243,8 @@ pub fn compile_with_path(yaml: &str, path: Option<&std::path::Path>) -> Result<C
         }
     };
 
+    let inline_subflows = def.subflows;
+    let mut subflows: BTreeMap<String, Ir> = BTreeMap::new();
     let mut nodes = BTreeMap::new();
     for (id, n) in def.nodes {
         let allowed = CLASS_FIELDS.iter().find(|(c, _)| *c == n.class).map_or(&[][..], |(_, f)| *f);
@@ -166,7 +254,35 @@ pub fn compile_with_path(yaml: &str, path: Option<&std::path::Path>) -> Result<C
                 n.class.name()
             )));
         }
-        let mut node = build_node(&id, n, &need)?;
+        let mut subflow_ir_hash = String::new();
+        if matches!(n.class, ClassDef::Subflow | ClassDef::Map) {
+            let uses_str = n
+                .uses
+                .as_ref()
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| CompileError::invalid(format!("node {id} requires a string uses: <flow>@<version>")))?;
+            let (name, ver) = ir::parse_pinned_uses(uses_str).ok_or_else(|| {
+                CompileError::invalid(format!(
+                    "node {id} uses {uses_str:?}, which must be version-pinned as <flow>@<version>"
+                ))
+            })?;
+            if let Some(existing) = subflows.get(uses_str) {
+                subflow_ir_hash = ir::content_hash(existing)?;
+            } else {
+                let (src, child_path) = resolve_subflow_source(uses_str, &inline_subflows, path)?;
+                let compiled_child = compile_inner(&src, child_path.as_deref(), depth + 1, visiting)?;
+                if compiled_child.ir().flow != name || compiled_child.ir().version != ver {
+                    return Err(CompileError::invalid(format!(
+                        "node {id} pins {uses_str} but resolved subflow is {}@{}",
+                        compiled_child.ir().flow,
+                        compiled_child.ir().version
+                    )));
+                }
+                subflow_ir_hash = compiled_child.hash().to_string();
+                subflows.insert(uses_str.to_string(), compiled_child.ir().clone());
+            }
+        }
+        let mut node = build_node(&id, n, &need, subflow_ir_hash)?;
         let launch = match &mut node.class {
             Class::Work { launch, .. } | Class::Choice { launch, .. } | Class::Effect { launch, .. } => Some(launch),
             _ => None,
@@ -205,6 +321,7 @@ pub fn compile_with_path(yaml: &str, path: Option<&std::path::Path>) -> Result<C
         repeats,
         workdir: def.workdir,
         receipt_stdin: def.receipt_stdin,
+        subflows,
     };
     ir.ir_version = ir::version_for(&ir);
     ir::validate(&ir)?;
@@ -247,7 +364,12 @@ fn is_word(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Result<Node, CompileError> {
+fn build_node(
+    id: &str,
+    n: NodeDef,
+    need: &dyn Fn(&String) -> Vec<Need>,
+    subflow_ir_hash: String,
+) -> Result<Node, CompileError> {
     let routing = n.routing.unwrap_or_default();
     let different_from = match routing.get("provider") {
         Some(provider) => different_from(id, provider)?,
@@ -307,6 +429,31 @@ fn build_node(id: &str, n: NodeDef, need: &dyn Fn(&String) -> Vec<Need>) -> Resu
             let fill_ask = ask.contains("{{");
             Class::Human { ask, fill_ask, required_body_fields: n.required_body_fields.unwrap_or_default() }
         }
+        ClassDef::Subflow => Class::Subflow {
+            uses: n
+                .uses
+                .and_then(|v| v.as_str().map(ToOwned::to_owned))
+                .unwrap_or_default(),
+            subflow_ir_hash,
+            with: n.with.unwrap_or_default(),
+        },
+        ClassDef::Map => Class::Map {
+            over: n.over.unwrap_or_default(),
+            item_key: n.item_key.unwrap_or_default(),
+            max_items: n.max_items.unwrap_or(0),
+            max_concurrency_param: n.max_concurrency_param,
+            ready_when: n.ready_when,
+            reserve_providers: n.reserve_providers,
+            provider_pool: n.provider_pool.unwrap_or_default(),
+            on_item_failure: n.on_item_failure.unwrap_or_default(),
+            item_retry_max: n.item_retry.map(|r| r.max).unwrap_or(0),
+            uses: n
+                .uses
+                .and_then(|v| v.as_str().map(ToOwned::to_owned))
+                .unwrap_or_default(),
+            subflow_ir_hash,
+            with: n.with.unwrap_or_default(),
+        },
     };
     Ok(Node {
         class,
@@ -423,7 +570,7 @@ fn check_no_outputs_placeholders(ir: &Ir) -> Result<(), CompileError> {
             Class::Pure { run } | Class::Observe { run, .. } => vec![run],
             Class::Work { verify, .. } => vec![verify],
             Class::Effect { run, reconcile, .. } => vec![run, reconcile],
-            Class::Choice { .. } | Class::Human { .. } => vec![],
+            Class::Choice { .. } | Class::Human { .. } | Class::Subflow { .. } | Class::Map { .. } => vec![],
         };
         words.extend(commands.into_iter().flatten().chain(&n.snapshot).map(|w| (format!("node {id}"), w)));
     }

@@ -326,7 +326,7 @@ fn an_event_replay_set_aside_is_not_on_the_spine() {
         outputs: Value::Null,
         verify: None,
         performer: None,
-        tool_use_id: None,
+        performers: Vec::new(), tool_use_id: None,
         audit: None,
     };
     let fi = run.fi.clone();

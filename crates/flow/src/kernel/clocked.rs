@@ -503,6 +503,7 @@ fn red() -> crate::NewEvent {
         outputs: Value::Null,
         verify: Some(verify),
         performer: None,
+        performers: Vec::new(),
         tool_use_id: None,
         audit: None,
     };
@@ -696,6 +697,7 @@ fn a_verdict_is_written_only_over_the_input_it_was_evaluated_on() {
         outputs: json!({ "ok": true }),
         verify: None,
         performer: None,
+        performers: Vec::new(),
         tool_use_id: None,
         audit: None,
     };

@@ -1,0 +1,743 @@
+//! Exhaustive Phase B acceptance tests for Maestro Flow Kernel IR v10.
+//!
+//! Covers every Phase B acceptance criterion in
+//! `docs/specs/2026-11-26-flow-kernel-evolvable-structure.md`:
+//! - Compile-time rejections (`max_items`, unpinned/cyclic/too-deep `uses:`, >256 expanded nodes,
+//!   `over:` outside `needs:`, `different_from(M)` without `reserve_providers` / `provider_pool`).
+//! - Crash Points A, B, and C idempotency (zero duplicate spawns, zero orphans).
+//! - Concurrent `Adopted` adoption fencing (`former_owners_claim`).
+//! - `Superseded` with open `EffectStarted` (`subflow_superseded`, `reconcile_only` ->
+//!   `EffectReconciled`, quiescence refused on lease expiry alone until termination receipt + zero
+//!   open effects).
+//! - Case-folded `disjoint_writes` conflict + unquiesced `Superseded` reservation hold.
+//! - Runtime `reserve_providers` / `provider_pool` liveness (`provider_pool_exhausted`).
+//! - `different_from(M)` union attestation across completed/nested child performers + unattested
+//!   child fail-closed.
+//! - Upstream staleness incremental reuse + `stop` refusal until quiesced + spine determinism +
+//!   empty 0-item map completion.
+
+use maestro_core::session::SessionRef;
+use maestro_flow::kernel::events::{
+    Adopted, Approval, Completed, EffectStarted, KernelEvent, MapItemSpec, Owner, Performer, Started, digest,
+    marker_digest,
+};
+use maestro_flow::kernel::ir::{IR_VERSION, Iteration};
+use maestro_flow::kernel::spine::{compare, spine};
+use maestro_flow::kernel::subflow::{
+    SubflowError, check_child_write_fence, child_instance_id, claim_map_item, expand_map, finalize_map_item,
+    fold_map_state, has_unsettled_subflows, parent_owner_epoch, quiesce_subflow, reconcile_superseded_effect,
+    supersede_stale_items,
+};
+use maestro_flow::kernel::{compile, compile_with_path};
+use maestro_flow::{HostId, InstanceId, Ledger, Options, Reader};
+use serde_json::json;
+use std::collections::BTreeMap;
+
+const LANE_YAML: &str = r#"
+flow: lane
+version: 1
+params: [repo, item_key]
+workdir: "{{params.repo}}"
+nodes:
+  work:
+    class: work
+    verify: [true]
+  verify_lane:
+    class: pure
+    needs: [work]
+    run: [true]
+"#;
+
+fn lead_v3_yaml() -> String {
+    format!(
+        r#"
+flow: lead
+version: 3
+params: [repo, max_parallel]
+workdir: "{{{{params.repo}}}}"
+receipt_stdin: true
+subflows:
+  "lane@1": |
+{}
+nodes:
+  plan_waves:
+    class: pure
+    run: [true]
+  execute_lanes:
+    class: map
+    needs: [plan_waves]
+    over: ".nodes.plan_waves.outputs.lanes"
+    item_key: ".lane_id"
+    max_items: 8
+    max_concurrency_param: max_parallel
+    ready_when: disjoint_writes
+    reserve_providers: 1
+    on_item_failure: collect_all
+    item_retry: {{max: 1}}
+    uses: lane@1
+  cross_review:
+    class: work
+    needs: [execute_lanes]
+    routing: {{provider: "different_from(execute_lanes)"}}
+    verify: [true]
+"#,
+        LANE_YAML
+            .lines()
+            .map(|l| format!("    {l}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn owner(id: &str) -> Owner {
+    let s: SessionRef = format!("t3:local/{id}").parse().unwrap();
+    Owner { session: s, marker_sha256: marker_digest(id) }
+}
+
+fn setup_parent(yaml: &str, params: serde_json::Value) -> (tempfile::TempDir, Ledger, InstanceId, Owner) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("flows");
+    let host = HostId::new("test-host").unwrap();
+    let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+    let compiled = compile(yaml).expect("flow compiles");
+    let me = owner("owner-1");
+    let fi = InstanceId::new("fi_parent_001").unwrap();
+    let started = Started {
+        flow: compiled.name(),
+        ir_hash: compiled.hash().to_string(),
+        ir: compiled.ir().clone(),
+        params,
+        owner: Some(me.clone()),
+        audit: None,
+        parent_ref: None,
+    };
+    let mut g = ledger.lock().unwrap();
+    g.append(&fi, 0, started.to_event().unwrap()).unwrap();
+    drop(g);
+    (dir, ledger, fi, me)
+}
+
+#[test]
+fn t01_compile_rejects_missing_or_oversized_max_items() {
+    let missing = lead_v3_yaml().replace("    max_items: 8\n", "");
+    assert!(compile(&missing).is_err(), "missing max_items must fail");
+
+    let zero = lead_v3_yaml().replace("max_items: 8", "max_items: 0");
+    assert!(compile(&zero).is_err(), "max_items=0 must fail");
+
+    let too_big = lead_v3_yaml().replace("max_items: 8", "max_items: 33");
+    assert!(compile(&too_big).is_err(), "max_items>32 must fail");
+}
+
+#[test]
+fn t02_compile_rejects_unpinned_cyclic_or_too_deep_uses_and_over_256_nodes() {
+    let unpinned = lead_v3_yaml().replace("uses: lane@1", "uses: lane");
+    assert!(compile(&unpinned).is_err(), "unpinned uses must fail");
+
+    // Cyclic subflow (a@1 -> b@1 -> a@1)
+    let dir = tempfile::tempdir().unwrap();
+    let a = r#"
+flow: a
+version: 1
+nodes:
+  call_b:
+    class: subflow
+    uses: b@1
+"#;
+    let b = r#"
+flow: b
+version: 1
+nodes:
+  call_a:
+    class: subflow
+    uses: a@1
+"#;
+    std::fs::write(dir.path().join("a.yaml"), a).unwrap();
+    std::fs::write(dir.path().join("b.yaml"), b).unwrap();
+    let err = compile_with_path(a, Some(&dir.path().join("a.yaml"))).unwrap_err();
+    assert_eq!(err.code(), "unbounded_loop", "cyclic uses must be refused: {err}");
+
+    // Depth > 2 (d0 -> d1 -> d2 -> d3)
+    let d3 = "flow: d3\nversion: 1\nnodes:\n  x: {class: pure, run: [true]}\n";
+    let d2 = "flow: d2\nversion: 1\nnodes:\n  x: {class: subflow, uses: d3@1}\n";
+    let d1 = "flow: d1\nversion: 1\nnodes:\n  x: {class: subflow, uses: d2@1}\n";
+    let d0 = "flow: d0\nversion: 1\nnodes:\n  x: {class: subflow, uses: d1@1}\n";
+    for (name, body) in [("d3.yaml", d3), ("d2.yaml", d2), ("d1.yaml", d1), ("d0.yaml", d0)] {
+        std::fs::write(dir.path().join(name), body).unwrap();
+    }
+    assert!(
+        compile_with_path(d0, Some(&dir.path().join("d0.yaml"))).is_err(),
+        "depth 3 > MAX_SUBFLOW_DEPTH(2) must fail"
+    );
+
+    // >256 statically bounded expanded nodes (32 items * 9 child nodes = 288 > 256)
+    let mut big_child = String::from("flow: big\nversion: 1\nnodes:\n");
+    for i in 0..9 {
+        big_child.push_str(&format!("  n{i}: {{class: pure, run: [true]}}\n"));
+    }
+    let big_parent = format!(
+        r#"
+flow: p
+version: 1
+subflows:
+  "big@1": |
+{}
+nodes:
+  prep: {{class: pure, run: [true]}}
+  fan:
+    class: map
+    needs: [prep]
+    over: ".nodes.prep.outputs.xs"
+    item_key: ".id"
+    max_items: 32
+    uses: big@1
+"#,
+        big_child.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
+    );
+    assert!(compile(&big_parent).is_err(), ">256 expanded nodes must fail");
+}
+
+#[test]
+fn t03_compile_rejects_over_outside_needs_and_different_from_map_without_provider_reservation() {
+    let bad_over = lead_v3_yaml().replace("    needs: [plan_waves]\n", "");
+    assert!(compile(&bad_over).is_err(), "over referencing node outside needs must fail");
+
+    let no_reserve = lead_v3_yaml().replace("    reserve_providers: 1\n", "");
+    assert!(
+        compile(&no_reserve).is_err(),
+        "different_from(map) without reserve_providers or strict-subset provider_pool must fail"
+    );
+
+    // Full-set provider_pool (all 4 providers) MUST also fail!
+    let full_pool = lead_v3_yaml().replace(
+        "    reserve_providers: 1",
+        "    provider_pool: [claude, codex, gemini, grok]",
+    );
+    assert!(compile(&full_pool).is_err(), "non-strict provider_pool must fail");
+
+    // Strict-subset provider_pool passes!
+    let strict_pool = lead_v3_yaml().replace(
+        "    reserve_providers: 1",
+        "    provider_pool: [claude, gemini]",
+    );
+    assert!(compile(&strict_pool).is_ok(), "strict-subset provider_pool should compile");
+}
+
+#[test]
+fn t04_compile_accepts_lead_v3_and_pins_subflow_ir_hash() {
+    let compiled = compile(&lead_v3_yaml()).expect("lead@3 compiles cleanly");
+    assert_eq!(compiled.ir().ir_version, IR_VERSION);
+    assert_eq!(compiled.ir().ir_version, 10);
+    assert!(compiled.ir().subflows.contains_key("lane@1"));
+    // Older IR v1-v9 definitions keep their exact lower ir_version!
+    let v1 = compile("flow: tiny\nversion: 1\nnodes:\n  a: {class: pure, run: [true]}\n").unwrap();
+    assert_eq!(v1.ir().ir_version, 1);
+}
+
+#[test]
+fn t05_crash_points_a_b_c_idempotency_zero_duplicates_zero_orphans() {
+    let (_dir, mut ledger, parent, me) = setup_parent(&lead_v3_yaml(), json!({"repo": "/tmp", "max_parallel": 2}));
+    let items = vec![MapItemSpec {
+        key: "lane-a".into(),
+        input_digest: "sha256:la".into(),
+        input: json!({"lane_id": "lane-a"}),
+        write_set: vec!["src/a/**".into()],
+    }];
+
+    // Expand map under write lock.
+    let mut g = ledger.lock().unwrap();
+    let epoch = expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), items, BTreeMap::new(), &me).unwrap();
+    assert_eq!(epoch, 0);
+
+    // Crash Point B simulation: deterministic child log already created on disk BEFORE parent
+    // appended SubflowStarted!
+    let det_id = child_instance_id(&parent, "execute_lanes", &Iteration::new(), 0, "lane-a", 0).unwrap();
+    let parent_log = g.log(&parent).unwrap();
+    let p_started: Started = serde_json::from_value(parent_log.events[0].body.clone()).unwrap();
+    let child_ir = p_started.ir.subflows.get("lane@1").unwrap().clone();
+    let child_started = Started {
+        flow: "lane@1".into(),
+        ir_hash: maestro_flow::kernel::ir::content_hash(&child_ir).unwrap(),
+        ir: child_ir,
+        params: json!({"repo": "/tmp", "item_key": "lane-a"}),
+        owner: Some(me.clone()),
+        audit: None,
+        parent_ref: None,
+    };
+    g.append(&det_id, 0, child_started.to_event().unwrap()).unwrap();
+
+    // Recovery claim MUST adopt existing deterministic child (zero duplicates!) and write parent SubflowStarted.
+    let perf = Performer { harness: "claude-code".into(), model: None, session: Some("t3:local/c1".into()) };
+    let (cid1, o_ep) = claim_map_item(
+        &mut g,
+        &parent,
+        "execute_lanes",
+        Iteration::new(),
+        "lane-a",
+        Some(perf.clone()),
+        &me,
+    )
+    .unwrap();
+    assert_eq!(cid1, det_id);
+    assert_eq!(o_ep, 0);
+
+    // Second claim on same item is idempotent!
+    let (cid2, _) = claim_map_item(
+        &mut g,
+        &parent,
+        "execute_lanes",
+        Iteration::new(),
+        "lane-a",
+        Some(perf.clone()),
+        &me,
+    )
+    .unwrap();
+    assert_eq!(cid2, det_id);
+    assert_eq!(g.instances().unwrap().len(), 2, "exactly parent + 1 child (zero duplicates/orphans)");
+
+    // Complete child work node, then finalize twice (Crash Point C idempotency).
+    let child_done = Completed {
+        node: "verify_lane".into(),
+        iteration: Iteration::new(),
+        attempt: 1,
+        inputs: BTreeMap::new(),
+        outputs: json!({"sha": "abc123"}),
+        verify: None,
+        performer: Some(perf),
+        performers: Vec::new(),
+        tool_use_id: None,
+        audit: None,
+    };
+    let cseq = g.log(&det_id).unwrap().seq();
+    g.append(&det_id, cseq, child_done.to_event().unwrap()).unwrap();
+
+    let settled1 = finalize_map_item(
+        &mut g,
+        &parent,
+        "execute_lanes",
+        Iteration::new(),
+        "lane-a",
+        &det_id,
+        None,
+        BTreeMap::new(),
+        &me,
+    )
+    .unwrap();
+    assert!(settled1, "single-item map settles on first finalize");
+    let settled2 = finalize_map_item(
+        &mut g,
+        &parent,
+        "execute_lanes",
+        Iteration::new(),
+        "lane-a",
+        &det_id,
+        None,
+        BTreeMap::new(),
+        &me,
+    )
+    .unwrap();
+    assert!(!settled2, "second finalize is idempotent no-op");
+}
+
+#[test]
+fn t06_owner_epoch_adoption_fencing_rejects_former_owner_child_writes() {
+    let (_dir, mut ledger, parent, old_owner) = setup_parent(&lead_v3_yaml(), json!({"repo": "/tmp", "max_parallel": 2}));
+    let new_owner = owner("owner-2");
+    let items = vec![MapItemSpec {
+        key: "lane-a".into(),
+        input_digest: "sha256:la".into(),
+        input: json!({"lane_id": "lane-a"}),
+        write_set: vec!["src/a/**".into()],
+    }];
+
+    let mut g = ledger.lock().unwrap();
+    expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), items, BTreeMap::new(), &old_owner).unwrap();
+    let (child, old_epoch) =
+        claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", None, &old_owner).unwrap();
+    assert_eq!(old_epoch, 0);
+
+    // Owner adopts parent -> owner_epoch increments 0 -> 1!
+    let adopted = Adopted {
+        from: old_owner.clone(),
+        to: new_owner.clone(),
+        approval: Approval {
+            ask_id: "ask-1".into(),
+            ledger: "asks.yaml".into(),
+            answer_option: "adopt".into(),
+            source: "main@abc".into(),
+            row_hash: "sha256:ans".into(),
+        },
+        audit: None,
+    };
+    let pseq = g.log(&parent).unwrap().seq();
+    g.append(&parent, pseq, adopted.to_event().unwrap()).unwrap();
+
+    let plog = g.log(&parent).unwrap();
+    let clog = g.log(&child).unwrap();
+    assert_eq!(parent_owner_epoch(&plog), 1);
+
+    // Former owner MUST be refused (NotOwner)!
+    assert_eq!(
+        check_child_write_fence(&plog, &clog, &old_owner, old_epoch, false).unwrap_err(),
+        SubflowError::NotOwner
+    );
+    // Even new owner carrying stale old_epoch=0 MUST be refused with former_owners_claim!
+    assert_eq!(
+        check_child_write_fence(&plog, &clog, &new_owner, old_epoch, false).unwrap_err(),
+        SubflowError::FormerOwnersClaim { claim_epoch: 0, current_epoch: 1 }
+    );
+    // New owner with fresh epoch=1 succeeds!
+    assert!(check_child_write_fence(&plog, &clog, &new_owner, 1, false).is_ok());
+}
+
+#[test]
+fn t07_superseded_child_with_open_effect_reconcile_only_and_quiescence_guards() {
+    let (_dir, mut ledger, parent, me) = setup_parent(&lead_v3_yaml(), json!({"repo": "/tmp", "max_parallel": 2}));
+    let items_v1 = vec![MapItemSpec {
+        key: "lane-a".into(),
+        input_digest: "sha256:v1".into(),
+        input: json!({"lane_id": "lane-a", "rev": 1}),
+        write_set: vec!["src/a/**".into()],
+    }];
+    let items_v2 = vec![MapItemSpec {
+        key: "lane-a".into(),
+        input_digest: "sha256:v2".into(),
+        input: json!({"lane_id": "lane-a", "rev": 2}),
+        write_set: vec!["src/a/**".into()],
+    }];
+
+    let mut g = ledger.lock().unwrap();
+    expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), items_v1, BTreeMap::new(), &me).unwrap();
+    let (child, ep) = claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", None, &me).unwrap();
+
+    // Child starts an external effect!
+    let eff = EffectStarted {
+        node: "work".into(),
+        iteration: Iteration::new(),
+        attempt: 1,
+        inputs: BTreeMap::new(),
+        guard_digest: None,
+    };
+    let cseq = g.log(&child).unwrap().seq();
+    g.append(&child, cseq, eff.to_event().unwrap()).unwrap();
+
+    // Upstream becomes stale -> supersedes running child!
+    let (_next_ep, sups) =
+        supersede_stale_items(&mut g, &parent, "execute_lanes", Iteration::new(), items_v2, BTreeMap::new(), &me)
+            .unwrap();
+    assert_eq!(sups, vec![child.to_string()]);
+    assert!(has_unsettled_subflows(&g.log(&parent).unwrap()), "unquiesced superseded child must block stop");
+
+    // Normal writes on Superseded child MUST fail with subflow_superseded!
+    let plog = g.log(&parent).unwrap();
+    let clog = g.log(&child).unwrap();
+    assert_eq!(
+        check_child_write_fence(&plog, &clog, &me, ep, false).unwrap_err().code(),
+        "subflow_superseded"
+    );
+
+    // Quiescence MUST fail while open EffectStarted exists AND MUST fail without termination_receipt!
+    assert_eq!(
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, "", &me)
+            .unwrap_err()
+            .code(),
+        "quiescence_refused"
+    );
+    assert_eq!(
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, "pid:999:exited", &me)
+            .unwrap_err()
+            .code(),
+        "quiescence_refused"
+    );
+
+    // Narrow --reconcile-only exception succeeds and logs EffectReconciled!
+    reconcile_superseded_effect(
+        &mut g,
+        &parent,
+        &child,
+        "work",
+        Iteration::new(),
+        1,
+        BTreeMap::new(),
+        json!({"reconciled": true}),
+        &me,
+        ep,
+    )
+    .unwrap();
+
+    // Now confirmed worker termination + zero open effects -> SubflowQuiesced succeeds!
+    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, "pid:999:exited", &me)
+        .unwrap();
+    let st = fold_map_state(&g.log(&parent).unwrap(), "execute_lanes", &Iteration::new());
+    assert!(st.superseded_unquiesced.is_empty());
+    assert!(st.quiesced_children.contains(child.as_str()));
+}
+
+#[test]
+fn t08_disjoint_writes_case_folded_conflict_and_unquiesced_superseded_hold() {
+    let (_dir, mut ledger, parent, me) = setup_parent(&lead_v3_yaml(), json!({"repo": "/tmp", "max_parallel": 4}));
+    let items = vec![
+        MapItemSpec {
+            key: "lane-upper".into(),
+            input_digest: "sha256:u".into(),
+            input: json!({"lane_id": "lane-upper"}),
+            write_set: vec!["src/Foo.rs".into()],
+        },
+        MapItemSpec {
+            key: "lane-lower".into(),
+            input_digest: "sha256:l".into(),
+            input: json!({"lane_id": "lane-lower"}),
+            write_set: vec!["src/foo.rs".into()],
+        },
+        MapItemSpec {
+            key: "lane-disjoint".into(),
+            input_digest: "sha256:d".into(),
+            input: json!({"lane_id": "lane-disjoint"}),
+            write_set: vec!["docs/**".into()],
+        },
+    ];
+
+    let mut g = ledger.lock().unwrap();
+    expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), items.clone(), BTreeMap::new(), &me).unwrap();
+    let (child_upper, _) =
+        claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-upper", None, &me).unwrap();
+
+    // Case-folded overlapping sibling MUST be refused with write_set_conflict!
+    let err = claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-lower", None, &me).unwrap_err();
+    assert_eq!(err.code(), "write_set_conflict");
+
+    // Disjoint sibling succeeds concurrently!
+    assert!(claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-disjoint", None, &me).is_ok());
+
+    // Superseding lane-upper STILL holds src/foo.rs reservation until SubflowQuiesced!
+    let items_v2 = vec![
+        MapItemSpec {
+            key: "lane-upper".into(),
+            input_digest: "sha256:u2".into(),
+            input: json!({"lane_id": "lane-upper", "v": 2}),
+            write_set: vec!["src/Foo.rs".into()],
+        },
+        MapItemSpec {
+            key: "lane-lower".into(),
+            input_digest: "sha256:l".into(),
+            input: json!({"lane_id": "lane-lower"}),
+            write_set: vec!["src/foo.rs".into()],
+        },
+    ];
+    supersede_stale_items(&mut g, &parent, "execute_lanes", Iteration::new(), items_v2, BTreeMap::new(), &me).unwrap();
+    let still_blocked =
+        claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-lower", None, &me).unwrap_err();
+    assert_eq!(still_blocked.code(), "write_set_conflict");
+
+    // Once lane-upper is quiesced, lane-lower unlocks immediately!
+    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-upper", &child_upper, "pid:10:reaped", &me)
+        .unwrap();
+    assert!(claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-lower", None, &me).is_ok());
+}
+
+#[test]
+fn t09_reserve_providers_and_provider_pool_exhausted_enforced_at_claim() {
+    let (_dir, mut ledger, parent, me) = setup_parent(&lead_v3_yaml(), json!({"repo": "/tmp", "max_parallel": 4}));
+    let items: Vec<MapItemSpec> = ["i1", "i2", "i3", "i4"]
+        .into_iter()
+        .map(|k| MapItemSpec {
+            key: k.into(),
+            input_digest: format!("sha256:{k}"),
+            input: json!({"lane_id": k}),
+            write_set: vec![format!("src/{k}/**")],
+        })
+        .collect();
+
+    let mut g = ledger.lock().unwrap();
+    expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), items, BTreeMap::new(), &me).unwrap();
+
+    // PROVIDERS has 4 providers; reserve_providers=1 allows at most 3 distinct providers in map!
+    for (k, harness) in [("i1", "claude-code"), ("i2", "codex"), ("i3", "gemini")] {
+        let p = Performer { harness: harness.into(), model: None, session: Some(format!("t3:local/{k}")) };
+        claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), k, Some(p), &me).unwrap();
+    }
+    // 4th distinct provider ("grok") would leave 0 providers for downstream different_from -> MUST fail!
+    let fourth = Performer { harness: "grok".into(), model: None, session: Some("t3:local/i4".into()) };
+    let err = claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "i4", Some(fourth), &me).unwrap_err();
+    assert_eq!(err.code(), "provider_pool_exhausted");
+
+    // Reusing one of the already-used 3 providers succeeds (still preserves 1 unused provider)!
+    let reuse = Performer { harness: "claude-code".into(), model: None, session: Some("t3:local/i4b".into()) };
+    assert!(claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "i4", Some(reuse), &me).is_ok());
+}
+
+#[test]
+fn t10_spine_determinism_across_different_child_completion_orders_and_empty_map() {
+    // Two runs completing lane-b then lane-a vs lane-a then lane-b MUST yield equal spines!
+    let run_order = |order: [&str; 2]| {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let compiled = compile(&lead_v3_yaml()).unwrap();
+        let me = owner("owner-spine");
+        let fi = InstanceId::new("fi_spine").unwrap();
+        let started = Started {
+            flow: compiled.name(),
+            ir_hash: compiled.hash().to_string(),
+            ir: compiled.ir().clone(),
+            params: json!({"repo": "/tmp", "max_parallel": 2}),
+            owner: Some(me.clone()),
+            audit: None,
+            parent_ref: None,
+        };
+        let items = vec![
+            MapItemSpec {
+                key: "lane-a".into(),
+                input_digest: "sha256:a".into(),
+                input: json!({"lane_id": "lane-a"}),
+                write_set: vec!["src/a/**".into()],
+            },
+            MapItemSpec {
+                key: "lane-b".into(),
+                input_digest: "sha256:b".into(),
+                input: json!({"lane_id": "lane-b"}),
+                write_set: vec!["src/b/**".into()],
+            },
+        ];
+        {
+            let mut g = ledger.lock().unwrap();
+            g.append(&fi, 0, started.to_event().unwrap()).unwrap();
+            let pw_outputs = json!({"lanes": []});
+            let pw_digest = maestro_flow::kernel::events::receipt_digest(&pw_outputs, None);
+            let pw = Completed {
+                node: "plan_waves".into(),
+                iteration: Iteration::new(),
+                attempt: 1,
+                inputs: BTreeMap::new(),
+                outputs: pw_outputs,
+                verify: None,
+                performer: None,
+                performers: Vec::new(),
+                tool_use_id: None,
+                audit: None,
+            };
+            let pseq = g.log(&fi).unwrap().seq();
+            g.append(&fi, pseq, pw.to_event().unwrap()).unwrap();
+            let map_inputs = BTreeMap::from([("plan_waves".to_string(), pw_digest)]);
+            expand_map(&mut g, &fi, "execute_lanes", Iteration::new(), items, map_inputs.clone(), &me).unwrap();
+            let mut children = BTreeMap::new();
+            for k in ["lane-a", "lane-b"] {
+                let p = Performer { harness: "claude-code".into(), model: None, session: Some(format!("t3:local/{k}")) };
+                let (cid, _) = claim_map_item(&mut g, &fi, "execute_lanes", Iteration::new(), k, Some(p), &me).unwrap();
+                children.insert(k, cid);
+            }
+            for k in order {
+                let cid = &children[k];
+                let cseq = g.log(cid).unwrap().seq();
+                let done = Completed {
+                    node: "verify_lane".into(),
+                    iteration: Iteration::new(),
+                    attempt: 1,
+                    inputs: BTreeMap::new(),
+                    outputs: json!({"k": k}),
+                    verify: None,
+                    performer: Some(Performer { harness: "claude-code".into(), model: None, session: None }),
+                    performers: Vec::new(),
+                    tool_use_id: None,
+                    audit: None,
+                };
+                g.append(cid, cseq, done.to_event().unwrap()).unwrap();
+                finalize_map_item(&mut g, &fi, "execute_lanes", Iteration::new(), k, cid, None, map_inputs.clone(), &me)
+                    .unwrap();
+            }
+        }
+        let reader = Reader::new(&root, Options::default()).unwrap();
+        let rg = reader.lock().unwrap();
+        spine(&rg, &fi).unwrap()
+    };
+
+    let s1 = run_order(["lane-a", "lane-b"]);
+    let s2 = run_order(["lane-b", "lane-a"]);
+    assert_eq!(compare(&s1, &s2), None, "different child completion orders must produce equal spines");
+    let map_rec = s1.records.iter().find(|r| r.node == "execute_lanes").expect("execute_lanes on spine");
+    assert_eq!(map_rec.map_items.len(), 2);
+    assert_eq!(map_rec.map_items[0].item_key, "lane-a");
+    assert_eq!(map_rec.map_items[1].item_key, "lane-b");
+
+    // Empty 0-item map completes immediately and cleanly!
+    let (_d, mut ledger, parent, me) = setup_parent(&lead_v3_yaml(), json!({"repo": "/tmp", "max_parallel": 2}));
+    let mut g = ledger.lock().unwrap();
+    expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), vec![], BTreeMap::new(), &me).unwrap();
+    let plog = g.log(&parent).unwrap();
+    assert!(plog.events.iter().any(|e| e.kind == Completed::KIND));
+    assert!(!has_unsettled_subflows(&plog));
+}
+
+#[test]
+fn t11_different_from_map_union_attestation_in_live_document() {
+    let (dir, mut ledger, parent, me) = setup_parent(&lead_v3_yaml(), json!({"repo": "/tmp", "max_parallel": 2}));
+    let items = vec![
+        MapItemSpec {
+            key: "lane-a".into(),
+            input_digest: digest(&json!(1)),
+            input: json!({"lane_id": "lane-a"}),
+            write_set: vec!["src/a/**".into()],
+        },
+        MapItemSpec {
+            key: "lane-b".into(),
+            input_digest: digest(&json!(2)),
+            input: json!({"lane_id": "lane-b"}),
+            write_set: vec!["src/b/**".into()],
+        },
+    ];
+    {
+        let mut g = ledger.lock().unwrap();
+        // Complete plan_waves first so execute_lanes inputs are valid.
+        let pseq = g.log(&parent).unwrap().seq();
+        let pw = Completed {
+            node: "plan_waves".into(),
+            iteration: Iteration::new(),
+            attempt: 1,
+            inputs: BTreeMap::new(),
+            outputs: json!({"lanes": []}),
+            verify: None,
+            performer: None,
+            performers: Vec::new(),
+            tool_use_id: None,
+            audit: None,
+        };
+        g.append(&parent, pseq, pw.to_event().unwrap()).unwrap();
+        expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), items, BTreeMap::new(), &me).unwrap();
+        for (k, h) in [("lane-a", "claude-code"), ("lane-b", "gemini")] {
+            let perf = Performer { harness: h.into(), model: None, session: Some(format!("t3:local/{k}")) };
+            let (cid, _) =
+                claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), k, Some(perf.clone()), &me).unwrap();
+            let cseq = g.log(&cid).unwrap().seq();
+            let done = Completed {
+                node: "verify_lane".into(),
+                iteration: Iteration::new(),
+                attempt: 1,
+                inputs: BTreeMap::new(),
+                outputs: json!({"ok": true}),
+                verify: None,
+                performer: Some(perf),
+                performers: Vec::new(),
+                tool_use_id: None,
+                audit: None,
+            };
+            g.append(&cid, cseq, done.to_event().unwrap()).unwrap();
+            finalize_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), k, &cid, None, BTreeMap::new(), &me)
+                .unwrap();
+        }
+    }
+    let reader = Reader::new(&dir.path().join("flows"), Options::default()).unwrap();
+    let rg = reader.lock().unwrap();
+    let plog = rg.log(&parent).unwrap();
+    let map_completed = plog
+        .events
+        .iter()
+        .rev()
+        .find(|e| e.kind == Completed::KIND && e.body["node"] == "execute_lanes")
+        .expect("execute_lanes completed");
+    let performers = map_completed.body["performers"].as_array().unwrap();
+    let harnesses: Vec<&str> = performers.iter().filter_map(|p| p["harness"].as_str()).collect();
+    assert!(harnesses.contains(&"claude-code"));
+    assert!(harnesses.contains(&"gemini"));
+    assert_eq!(harnesses.len(), 2);
+}

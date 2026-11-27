@@ -51,6 +51,20 @@ pub struct Started {
     /// the spine and every check ignore. Absent in logs written before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<Audit>,
+    /// Parent linkage when this instance is a child subflow (IR v10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_ref: Option<ParentRef>,
+}
+
+/// Parent linkage pinned into a child subflow's `Started` event (IR v10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRef {
+    pub parent_instance: String,
+    pub node: String,
+    pub iteration: Iteration,
+    pub map_epoch: u64,
+    pub item_key: String,
+    pub retry_attempt: u32,
 }
 
 /// An instance's owner: a session and the digest of its owner marker, together. The marker alone
@@ -127,6 +141,9 @@ pub struct Completed {
     pub verify: Option<VerifyRecord>,
     #[serde(default)]
     pub performer: Option<Performer>,
+    /// Union of attested child performers on a completed `map` or `subflow` node (IR v10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub performers: Vec<Performer>,
     #[serde(default)]
     pub tool_use_id: Option<String>,
     /// The writer's identity and process facts (BRO-3846): a clue for investigation that replay,
@@ -480,6 +497,136 @@ impl KernelEvent for Guarded {
 }
 impl KernelEvent for EffectStarted {
     const KIND: &'static str = "EffectStarted";
+}
+
+/// One materialized item inside a `MapExpanded` event (IR v10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MapItemSpec {
+    pub key: String,
+    pub input_digest: String,
+    pub input: Value,
+    #[serde(default)]
+    pub write_set: Vec<String>,
+}
+
+/// Written under the exclusive parent write lock on the first claim of a `map` iteration (IR v10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MapExpanded {
+    pub node: String,
+    pub iteration: Iteration,
+    pub map_epoch: u64,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
+    pub items: Vec<MapItemSpec>,
+}
+
+/// Recorded in the parent log when a child subflow instance is launched for a `map` item (IR v10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubflowStarted {
+    pub node: String,
+    pub iteration: Iteration,
+    pub map_epoch: u64,
+    pub item_key: String,
+    pub retry_attempt: u32,
+    pub child_instance: String,
+    pub child_ir_hash: String,
+    #[serde(default)]
+    pub write_set: Vec<String>,
+    pub owner_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performer: Option<Performer>,
+}
+
+/// Recorded in the parent log after verifying the child instance reached a terminal state (IR v10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubflowCompleted {
+    pub node: String,
+    pub iteration: Iteration,
+    pub map_epoch: u64,
+    pub item_key: String,
+    pub child_instance: String,
+    pub child_ir_hash: String,
+    pub terminal_status: String,
+    pub outputs_digest: String,
+    #[serde(default)]
+    pub outputs: Value,
+    #[serde(default)]
+    pub performers: Vec<Performer>,
+}
+
+/// Recorded in the parent log when a child subflow attempt fails (IR v10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubflowFailed {
+    pub node: String,
+    pub iteration: Iteration,
+    pub map_epoch: u64,
+    pub item_key: String,
+    pub retry_attempt: u32,
+    pub child_instance: String,
+    pub error: String,
+    #[serde(default)]
+    pub performers: Vec<Performer>,
+}
+
+/// Recorded in the parent log when upstream staleness supersedes a running child (IR v10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Superseded {
+    pub node: String,
+    pub iteration: Iteration,
+    pub map_epoch: u64,
+    pub item_key: String,
+    pub child_instance: String,
+    pub superseded_by_epoch: u64,
+}
+
+/// Sole permitted write on a `Superseded` child with an open `EffectStarted` (IR v10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectReconciled {
+    pub node: String,
+    pub iteration: Iteration,
+    pub attempt: u32,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
+    #[serde(default)]
+    pub outputs: Value,
+}
+
+/// Recorded in the parent log only after confirmed worker termination and zero open effects (IR v10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubflowQuiesced {
+    pub node: String,
+    pub iteration: Iteration,
+    pub map_epoch: u64,
+    pub item_key: String,
+    pub child_instance: String,
+    pub termination_receipt: String,
+}
+
+impl KernelEvent for MapExpanded {
+    const KIND: &'static str = "MapExpanded";
+}
+impl KernelEvent for SubflowStarted {
+    const KIND: &'static str = "SubflowStarted";
+}
+impl KernelEvent for SubflowCompleted {
+    const KIND: &'static str = "SubflowCompleted";
+}
+impl KernelEvent for SubflowFailed {
+    const KIND: &'static str = "SubflowFailed";
+}
+impl KernelEvent for Superseded {
+    const KIND: &'static str = "Superseded";
+}
+impl KernelEvent for EffectReconciled {
+    const KIND: &'static str = "EffectReconciled";
+}
+impl KernelEvent for SubflowQuiesced {
+    const KIND: &'static str = "SubflowQuiesced";
+}
+
+/// The digest of a `map` or `subflow` receipt at IR version 10 binding its attested performer union.
+pub fn performers_receipt_digest(outputs: &Value, value: Option<&str>, performers: &Value) -> String {
+    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performers": performers }))
 }
 
 /// The `sha256:<hex>` digest of a JSON value.
