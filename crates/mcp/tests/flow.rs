@@ -646,3 +646,96 @@ fn mcp_amend_rejects_oversized_reason_before_kernel() {
     assert_eq!(code(&v), "ask_body_invalid", "{v}");
     assert!(v.to_string().contains("MCP amend reason exceeds 2048 bytes"), "{v}");
 }
+
+/// The Flows pages' read (`maestro_mcp::flows_web`) drives the real kernel: before `start` the
+/// ledger is said unread, never empty; a claim the owner holds is `Running` with its claim named;
+/// the shape keeps the IR's switch; the read writes nothing; and the run page marks the node.
+#[test]
+fn the_flows_pages_read_the_ledger_as_the_kernel_replays_it() {
+    use maestro_view::flows::{NodeState, RunState};
+    let f = fx();
+    let none = maestro_mcp::flows_web::read(&f.store.paths);
+    assert!(none.read.is_err(), "no ledger is unread, not empty: {none:?}");
+
+    let fi = f.begin();
+    // Ready and unclaimed is queued work, never running.
+    let unclaimed = maestro_mcp::flows_web::read(&f.store.paths);
+    let first = &unclaimed.read.as_ref().expect("the ledger reads")[0];
+    assert_eq!(first.live.as_ref().unwrap().nodes["review"].state, NodeState::Ready);
+    assert_eq!(first.state(), RunState::Queued);
+    f.claim(&fi, "review");
+    let before = f.tree();
+    let ledger = maestro_mcp::flows_web::read(&f.store.paths);
+    assert!(f.tree() == before, "the pages' read changed the machine");
+    let instances = ledger.read.as_ref().expect("the ledger reads");
+    assert!(ledger.unread.is_empty(), "{:?}", ledger.unread);
+    let [i] = instances.as_slice() else { panic!("one instance: {instances:?}") };
+    assert_eq!((i.flow.as_str(), i.version, i.kernel()), ("decide", 1, "decide@1".to_string()));
+    assert!(i.ir_hash.starts_with("sha256:"), "{}", i.ir_hash);
+    assert_eq!(i.state(), RunState::Running);
+    let live = i.live.as_ref().expect("the run replays");
+    assert_eq!(live.nodes["review"].state, NodeState::Running);
+    let claim = live.nodes["review"].claim.as_deref().expect("a running node names its claim");
+    assert_eq!(claim, "Its claim is held by the run's owner", "the claim is the assessment's, not a raw event's");
+    assert_eq!(live.owner.as_deref(), Some("direct:-/d1"), "the owner is replay's");
+    assert!(i.steps.iter().all(|s| s.rejected.is_none()), "nothing was set aside: {:?}", i.steps);
+    assert_eq!(live.nodes["pick"].state, NodeState::Blocked);
+    assert_eq!(live.nodes["pick"].unmet, ["Needs review"]);
+    assert_eq!(i.frontier(), Some(vec![("review", NodeState::Running)]));
+    assert_eq!(i.steps.iter().map(|s| s.kind.as_str()).collect::<Vec<_>>(), ["Started", "Claimed"]);
+    let ship = i.shape.nodes.iter().find(|n| n.id == "ship").unwrap();
+    assert_eq!(ship.switch, Some(("pick".to_string(), "ship".to_string())));
+    let pick = i.shape.nodes.iter().find(|n| n.id == "pick").unwrap();
+    assert!(pick.facts.iter().any(|(k, v)| k == "edge ship" && v.contains("verdict")), "{:?}", pick.facts);
+
+    // The pages share one walk: a second read within the window is the same walk, not another,
+    // and once the window has passed the next read walks the ledger again.
+    let first = maestro_mcp::flows_web::read_shared(&f.store.paths);
+    let again = maestro_mcp::flows_web::read_shared(&f.store.paths);
+    assert!(std::sync::Arc::ptr_eq(&first, &again), "a read within the window walks the ledger again");
+    std::thread::sleep(maestro_mcp::flows_web::SHARED_FOR + std::time::Duration::from_millis(50));
+    let later = maestro_mcp::flows_web::read_shared(&f.store.paths);
+    assert!(!std::sync::Arc::ptr_eq(&first, &later), "a read past the window is served a stale walk");
+
+    let at = maestro_store::views::now();
+    let (html, title) = maestro_view::flows_page(&ledger, &maestro_view::FlowsPage::Run(fi.clone()), at).unwrap();
+    assert!(title.starts_with("decide@1 "), "{title}");
+    assert!(html.contains(r#"data-class="work" data-state="running""#), "{html}");
+    let (list, _) = maestro_view::flows_page(&ledger, &maestro_view::FlowsPage::List, at).unwrap();
+    assert!(list.contains("1 run, 1 running, 1 open, in 1 kernel."), "{list}");
+}
+
+/// Pages polling as fast as they can never hold the kernel's writers off: with four threads reading
+/// the ledger back to back, a writer's claim still goes through, well inside the ten seconds a
+/// writer waits on a held lock. This guards progress; it does not isolate the idle gap after each
+/// walk, which shortens the writer's wait but whose absence this host's lock did not turn into
+/// starvation.
+#[test]
+fn polling_pages_never_starve_a_writer() {
+    let f = fx();
+    let fi = f.begin();
+    for _ in 0..40 {
+        f.begin();
+    }
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let (paths, stop) = (f.store.paths.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    drop(maestro_mcp::flows_web::read_shared(&paths));
+                }
+            })
+        })
+        .collect();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let began = std::time::Instant::now();
+    let claimed = f.d1(CLAIM, json!({ "instance": fi, "node_id": "review" }));
+    let took = began.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for r in readers {
+        r.join().unwrap();
+    }
+    assert_eq!(claimed["ok"], true, "the writer was starved: {claimed}");
+    assert!(took < std::time::Duration::from_secs(3), "the writer waited {took:?} behind polling pages");
+}

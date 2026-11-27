@@ -97,6 +97,9 @@ pub struct Writer {
     pub owner_dir: PathBuf,
     /// The T3 CLI that wakes a session, if any.
     pub t3: Option<T3>,
+    /// Fallback T3 thread id (e.g. Meta Orchestrator) to triage an answered ask when the ask has
+    /// no origin session, a non-T3 origin, or an unreachable origin thread.
+    pub fallback_thread: Option<String>,
     /// Whether to push and land (off in tests).
     pub remote: bool,
 }
@@ -121,26 +124,74 @@ use maestro_store::ledger::git;
 pub enum T3 {
     /// This one (`MAESTRO_T3_BIN`).
     Fixed(PathBuf),
-    /// The CLI of the T3 server running now, under this T3 home, resolved at each wake: T3 records
-    /// its version in `runtime/service-state.json`, and only that version's CLI may open the
-    /// database the server owns (`bin/t3` runs the desktop app's, which refuses when they differ).
+    /// The CLI of the T3 server running now, under this T3 home, resolved at each wake: prefer the
+    /// live server recorded in `userdata/server-runtime.json` (which matches the running Desktop
+    /// app or service), then `runtime/service-state.json`, with `bin/t3` as fallback.
     Active(PathBuf),
 }
 
+fn version_cli(home: &Path, version: &str) -> Option<PathBuf> {
+    let ok = !version.is_empty()
+        && version != "."
+        && version != ".."
+        && !version.starts_with('-')
+        && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if !ok {
+        return None;
+    }
+    let cli = home.join("runtime/versions").join(version).join("t3");
+    cli.exists().then_some(cli)
+}
+
+fn json_str(path: &Path, key: &str) -> Option<String> {
+    let state: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    state.get(key)?.as_str().map(str::to_string)
+}
+
 impl T3 {
-    pub fn resolve(&self) -> Option<PathBuf> {
+    /// Ordered, deduplicated CLI candidates to try when waking a T3 session.
+    pub fn candidates(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut push = |p: PathBuf| {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        };
         match self {
-            T3::Fixed(p) => Some(p.clone()),
+            T3::Fixed(p) => push(p.clone()),
             T3::Active(home) => {
-                let state: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(home.join("runtime/service-state.json")).ok()?).ok()?;
-                let v = state.get("activeVersion")?.as_str()?;
-                let ok =
-                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-                let cli = home.join("runtime/versions").join(v).join("t3");
-                if ok && cli.exists() { Some(cli) } else { Some(home.join("bin/t3")).filter(|p| p.exists()) }
+                let live = json_str(&home.join("userdata/server-runtime.json"), "serverVersion");
+                let active = json_str(&home.join("runtime/service-state.json"), "activeVersion");
+                if live.is_none() && active.is_none() {
+                    return out;
+                }
+                let bin = home.join("bin/t3");
+                let has_bin = bin.exists();
+                // The running server writes its own version to `userdata/server-runtime.json`.
+                // When the Desktop app owns the database, its version is served by `bin/t3`, not a
+                // stale standalone `runtime/service-state.json`.
+                if let Some(v) = live.as_deref() {
+                    if let Some(cli) = version_cli(home, v) {
+                        push(cli);
+                    } else if has_bin {
+                        push(bin.clone());
+                    }
+                }
+                if let Some(v) = active.as_deref()
+                    && let Some(cli) = version_cli(home, v)
+                {
+                    push(cli);
+                }
+                if has_bin {
+                    push(bin);
+                }
             }
         }
+        out
+    }
+
+    pub fn resolve(&self) -> Option<PathBuf> {
+        self.candidates().into_iter().next()
     }
 }
 
@@ -153,6 +204,20 @@ pub struct Book {
 impl Book {
     pub fn get(&self, id: &str) -> Option<Receipt> {
         self.inner.lock().ok()?.get(id).cloned()
+    }
+
+    /// `(ledger, handle)` pairs currently in the undo window or being written to the ledger.
+    pub fn in_flight(&self) -> std::collections::BTreeSet<(String, String)> {
+        self.inner
+            .lock()
+            .ok()
+            .map(|m| {
+                m.values()
+                    .filter(|r| matches!(r.stage, Stage::Signed | Stage::Applying))
+                    .map(|r| (r.intent.ledger.clone(), r.intent.handle.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn put(&self, r: Receipt) {
@@ -385,28 +450,104 @@ pub fn wake_message(r: &Receipt, commit: &str) -> String {
     )
 }
 
+/// The triage message the fallback orchestrator gets when the original asking session is missing,
+/// not a T3 session, or no longer reachable.
+pub fn fallback_wake_message(r: &Receipt, commit: &str, origin_session: Option<&str>, reason: &str) -> String {
+    let note = r.intent.note.as_deref().map(|n| format!("\nTheir note: {n}")).unwrap_or_default();
+    let origin = origin_session.unwrap_or("none");
+    format!(
+        "[maestro] Fallback triage: the owner answered {}#{}: {} (option `{}`).{note}\n\
+         They signed it with their passkey and Maestro wrote it to `{BRANCH}` at {commit}, so it is in effect now. \
+         Original session (`{origin}`) could not be woken ({reason}).\n\
+         Inspect the ask, linked PR/ticket, and current fleet state to determine whether it still makes sense to carry this decision forward (route or dispatch work) or disregard it as already resolved/superseded, and record why.\n\
+         Answer id {}: if you already triaged this id, this is a repeat after a restart; ignore it.",
+        r.intent.ledger, r.intent.handle, r.label, r.intent.option, r.id
+    )
+}
+
+fn t3_thread_of(session: &str) -> Option<&str> {
+    session.strip_prefix("t3:").and_then(|s| s.split_once('/')).map(|(_, t)| t).filter(|t| {
+        !t.is_empty()
+            && *t != "."
+            && *t != ".."
+            && !t.starts_with('-')
+            && t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
+    })
+}
+
 /// Wake the session an ask names (`t3:<environment>/<thread>`), as its next turn.
 pub fn wake(t3: Option<&Path>, session: Option<&str>, message: &str) -> String {
-    let Some(session) = session else { return "no session is named on the ask".into() };
-    let Some(thread) = session.strip_prefix("t3:").and_then(|s| s.split_once('/')).map(|(_, t)| t) else {
-        return format!("{session} is not a T3 session");
+    wake_once(t3, session, message).0
+}
+
+fn wake_once(t3: Option<&Path>, session: Option<&str>, message: &str) -> (String, bool) {
+    let Some(session) = session else { return ("no session is named on the ask".into(), false) };
+    let Some(thread) = t3_thread_of(session) else {
+        return (format!("{session} is not a T3 session"), false);
     };
-    let Some(t3) = t3 else { return "no T3 CLI is configured".into() };
+    let Some(t3) = t3 else { return ("no T3 CLI is configured".into(), false) };
     match Command::new(t3).args(["thread", "send", thread, message]).output() {
-        Ok(o) if o.status.success() => format!("told T3 thread {thread}"),
+        Ok(o) if o.status.success() => (format!("told T3 thread {thread}"), false),
         Ok(o) => {
-            // The CLI may say why on either stream; the last line is the reason.
+            // Check full output for database-owner mismatch before summarizing to one line.
             let said = format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            let db_mismatch = said.contains("ServerOwnsDatabaseError");
             let why = said
                 .lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
-                .find(|l| l.contains("Error") || l.contains("error"))
+                .find(|l| l.contains("ServerOwnsDatabaseError") || l.contains("Error") || l.contains("error"))
                 .or_else(|| said.lines().map(str::trim).rfind(|l| !l.is_empty()))
                 .unwrap_or("no output");
-            format!("T3 did not take it (exit {:?}): {why}", o.status.code())
+            (format!("T3 did not take it (exit {:?}): {why}", o.status.code()), db_mismatch)
         }
-        Err(e) => format!("T3 did not run: {e}"),
+        Err(e) => (format!("T3 did not run: {e}"), false),
+    }
+}
+
+/// Try each T3 CLI candidate in order; retry on the next candidate when a CLI rejects the running
+/// server's database schema (`ServerOwnsDatabaseError`).
+pub fn wake_candidates(candidates: &[PathBuf], session: Option<&str>, message: &str) -> String {
+    if candidates.is_empty() {
+        return wake(None, session, message);
+    }
+    let mut last = String::new();
+    for cli in candidates {
+        let (out, db_mismatch) = wake_once(Some(cli.as_path()), session, message);
+        if !db_mismatch {
+            return out;
+        }
+        last = out;
+    }
+    last
+}
+
+/// Wake the ask's own T3 session; if none exists or it cannot be woken, route a triage message to
+/// the configured fallback orchestrator thread (skipping if the origin already named that thread).
+pub fn wake_with_fallback(
+    candidates: &[PathBuf],
+    session: Option<&str>,
+    fallback_thread: Option<&str>,
+    r: &Receipt,
+    commit: &str,
+) -> String {
+    let primary = wake_candidates(candidates, session, &wake_message(r, commit));
+    if primary.starts_with("told T3 thread ") {
+        return primary;
+    }
+    let Some(fb) = fallback_thread.filter(|t| !t.is_empty()) else {
+        return primary;
+    };
+    if session.and_then(t3_thread_of) == Some(fb) {
+        return primary;
+    }
+    let fb_session = format!("t3:_/{fb}");
+    let fb_msg = fallback_wake_message(r, commit, session, &primary);
+    let fb_out = wake_candidates(candidates, Some(&fb_session), &fb_msg);
+    if fb_out.starts_with("told T3 thread ") {
+        format!("{primary}; routed to fallback T3 thread {fb}")
+    } else {
+        format!("{primary}; fallback T3 thread {fb} failed: {fb_out}")
     }
 }
 
@@ -425,13 +566,11 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
             r.commit = Some(commit.clone());
             book.put(r.clone());
             let _ = log(&w.owner_dir, &r);
-            let cli = w.t3.as_ref().and_then(T3::resolve);
-            r.woke = Some(wake(cli.as_deref(), session, &wake_message(&r, &commit)));
+            let candidates = w.t3.as_ref().map(T3::candidates).unwrap_or_default();
+            r.woke = Some(wake_with_fallback(&candidates, session, w.fallback_thread.as_deref(), &r, &commit));
             book.put(r.clone());
-            if w.remote {
-                r.landing = Some(land(w));
-                book.put(r.clone());
-            }
+            r.landing = Some(if w.remote { land(w) } else { "local only (not pushed)".into() });
+            book.put(r.clone());
             // Settled last, and only once the final receipt is on disk: a crash before this resumes
             // the answer, which is found written by its id, and the wake and the landing are tried again.
             if log(&w.owner_dir, &r).is_ok() {
@@ -531,6 +670,7 @@ mod tests {
             checkout: state.path().join("checkout"),
             owner_dir: state.path().join("owner"),
             t3: None,
+            fallback_thread: None,
             remote: false,
         };
         (ws, state, w)
@@ -705,5 +845,94 @@ mod tests {
         assert_eq!(wake(None, None, "m"), "no session is named on the ask");
         assert_eq!(wake(None, Some("paseo:x"), "m"), "paseo:x is not a T3 session");
         assert_eq!(wake(Some(Path::new("/bin/echo")), Some("t3:env/th"), "m"), "told T3 thread th");
+    }
+
+    #[test]
+    fn active_t3_prefers_live_server_runtime_over_stale_service_state() {
+        let home = tempfile::tempdir().unwrap();
+        let stale_cli = home.path().join("runtime/versions/0.1.12-nightly/t3");
+        let bin_cli = home.path().join("bin/t3");
+        std::fs::create_dir_all(stale_cli.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(bin_cli.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(home.path().join("userdata")).unwrap();
+        std::fs::write(&stale_cli, "").unwrap();
+        std::fs::write(&bin_cli, "").unwrap();
+        std::fs::write(home.path().join("runtime/service-state.json"), r#"{"activeVersion":"0.1.12-nightly"}"#)
+            .unwrap();
+        std::fs::write(home.path().join("userdata/server-runtime.json"), r#"{"serverVersion":"0.1.11"}"#).unwrap();
+        let candidates = T3::Active(home.path().into()).candidates();
+        assert_eq!(candidates, vec![bin_cli, stale_cli]);
+    }
+
+    /// Write an executable script in a short-lived child process so the multi-threaded test
+    /// binary never holds a writable fd across a sibling thread's fork() (Linux ETXTBSY).
+    fn write_executable(path: &Path, body: &str) {
+        use std::io::Write;
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 0755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn wake_candidates_retries_when_first_cli_hits_server_owns_database_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad-t3");
+        let good = dir.path().join("good-t3");
+        write_executable(
+            &bad,
+            "#!/bin/sh\necho 'Error: failed to send' >&2\necho '  Caused by: ServerOwnsDatabaseError: mismatch' >&2\nexit 1\n",
+        );
+        write_executable(&good, "#!/bin/sh\nexit 0\n");
+        assert_eq!(wake_candidates(&[bad, good], Some("t3:env/th-9"), "msg"), "told T3 thread th-9");
+    }
+
+    #[test]
+    fn fallback_routes_to_orchestrator_when_origin_missing_non_t3_or_dead_and_avoids_self_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_file = dir.path().join("calls.log");
+        let fake_t3 = dir.path().join("fake-t3");
+        write_executable(
+            &fake_t3,
+            &format!(
+                "#!/bin/sh\nprintf \"CALL::%s\\n%s\\n\" \"$3\" \"$4\" >> '{}'\nif [ \"$3\" = \"dead-thread\" ] || [ \"$3\" = \"meta-orch\" -a -f '{}' ]; then echo 'Error: thread not found' >&2; exit 1; fi\nexit 0\n",
+                log_file.display(),
+                dir.path().join("fail-meta").display()
+            ),
+        );
+        let r = receipt(Intent::answer("l.yaml", "a1", "h1", "yes", None), 0);
+        let cands = vec![fake_t3];
+
+        // 1. Missing origin session -> routed to fallback orchestrator with triage prompt.
+        let out = wake_with_fallback(&cands, None, Some("meta-orch"), &r, "deadbeef");
+        assert_eq!(out, "no session is named on the ask; routed to fallback T3 thread meta-orch");
+
+        // 2. Non-T3 origin -> routed to fallback orchestrator.
+        let out = wake_with_fallback(&cands, Some("paseo:local/abc"), Some("meta-orch"), &r, "deadbeef");
+        assert_eq!(out, "paseo:local/abc is not a T3 session; routed to fallback T3 thread meta-orch");
+
+        // 3. Dead T3 origin -> routed to fallback orchestrator.
+        let out = wake_with_fallback(&cands, Some("t3:env/dead-thread"), Some("meta-orch"), &r, "deadbeef");
+        assert!(out.contains("routed to fallback T3 thread meta-orch"), "got: {out}");
+
+        // 4. Live T3 origin -> wakes origin directly, no fallback.
+        let out = wake_with_fallback(&cands, Some("t3:env/live-thread"), Some("meta-orch"), &r, "deadbeef");
+        assert_eq!(out, "told T3 thread live-thread");
+
+        // 5. Origin IS the fallback thread and fails -> does not send twice.
+        std::fs::write(dir.path().join("fail-meta"), "").unwrap();
+        let before = std::fs::read_to_string(&log_file).unwrap().lines().filter(|l| l.starts_with("CALL::")).count();
+        let out = wake_with_fallback(&cands, Some("t3:env/meta-orch"), Some("meta-orch"), &r, "deadbeef");
+        assert!(out.starts_with("T3 did not take it"), "got: {out}");
+        assert!(!out.contains("fallback T3 thread"), "must not retry fallback when origin is fallback");
+        let after = std::fs::read_to_string(&log_file).unwrap().lines().filter(|l| l.starts_with("CALL::")).count();
+        assert_eq!(after - before, 1, "only one attempt when origin == fallback");
+
+        let logged = std::fs::read_to_string(&log_file).unwrap();
+        assert!(logged.contains("Fallback triage:"), "fallback message must carry triage instruction");
     }
 }

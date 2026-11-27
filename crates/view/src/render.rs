@@ -58,6 +58,9 @@ pub(crate) struct Ctx<'a> {
     /// Where the owner answers (BRO-4042): the secure web page's origin. Outside the web pages
     /// (the MCP App, the snapshot), an open decision links there to be signed with the passkey.
     pub(crate) answer_origin: Option<String>,
+    /// `(ledger, handle)` pairs currently in the daemon's undo/write window, so `/decisions`
+    /// advances past just-signed answers immediately.
+    pub(crate) in_flight: std::collections::BTreeSet<(String, String)>,
     /// Asks answered in the working tree or on maestro/answers but open at the read tree, read once per render
     /// and only by a block that shows them.
     unlanded: std::cell::OnceCell<Section<Vec<views::Waiting>>>,
@@ -72,6 +75,11 @@ pub(crate) struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Whether an ask is currently in the daemon's undo or write window.
+    pub(crate) fn is_in_flight(&self, ledger: &str, handle: &str) -> bool {
+        self.in_flight.contains(&(ledger.to_string(), handle.to_string()))
+    }
+
     /// Whether the open row exists only on the ledger branch.
     pub(crate) fn filed(&self, lf: &maestro_store::LedgerFile, ask: &maestro_core::ask::Ask) -> bool {
         let main = self.main_asks();
@@ -158,8 +166,20 @@ pub fn render_app(store: &Store, v: &Validated, at: jiff::Timestamp, answer_orig
 /// with the header's [`Shell`](crate::page::Shell) read in the same render, so the header and
 /// the page never disagree. Every other block renders as [`render_with`] renders it.
 pub fn render_web(store: &Store, v: &Validated, at: jiff::Timestamp, owner: Owner) -> (Rendered, crate::page::Shell) {
+    render_web_with_pending(store, v, at, owner, std::collections::BTreeSet::new())
+}
+
+/// Like [`render_web`], knowing which `(ledger, handle)` answers are already signed and saving.
+pub fn render_web_with_pending(
+    store: &Store,
+    v: &Validated,
+    at: jiff::Timestamp,
+    owner: Owner,
+    in_flight: std::collections::BTreeSet<(String, String)>,
+) -> (Rendered, crate::page::Shell) {
     let store = store.read_scope();
-    let cx = Ctx::new(&store, at, None, Some(owner), None);
+    let mut cx = Ctx::new(&store, at, None, Some(owner), None);
+    cx.in_flight = in_flight;
     let screen = match &v.root.block {
         Block::Today(_) => crate::screens::web_today::today(&cx, &v.root.id),
         Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
@@ -169,6 +189,14 @@ pub fn render_web(store: &Store, v: &Validated, at: jiff::Timestamp, owner: Owne
     };
     let rendered = finish(&cx, v, screen);
     (rendered, crate::screens::web::shell(&cx))
+}
+
+/// The web header's [`Shell`](crate::page::Shell) alone, for a page rendered from another source
+/// than the store (the Flows pages read the flow ledger): the same read the other pages' header is.
+pub fn web_shell(store: &Store, at: jiff::Timestamp, owner: Owner) -> crate::page::Shell {
+    let store = store.read_scope();
+    let cx = Ctx::new(&store, at, None, Some(owner), None);
+    crate::screens::web::shell(&cx)
 }
 
 impl<'a> Ctx<'a> {
@@ -190,6 +218,7 @@ impl<'a> Ctx<'a> {
             answer_thread: answer_thread.cloned(),
             web,
             answer_origin,
+            in_flight: std::collections::BTreeSet::new(),
             unlanded: std::cell::OnceCell::from(waiting),
             main_asks: std::cell::OnceCell::new(),
             ids: std::cell::Cell::new(0),

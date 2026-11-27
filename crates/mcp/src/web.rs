@@ -1,4 +1,4 @@
-//! Maestro's web pages (BRO-3588): Decisions, one decision, Today and Health, rendered on the
+//! Maestro's web pages (BRO-3588): Decisions, one decision, Today, Flows and Health, rendered on the
 //! server by `maestro-view` from the same catalog blocks the MCP App places, laid out as the
 //! approved design (BRO-3783, maestro#20), on the daemon
 //! `maestro serve --http` already runs. A phone or browser on the tailnet reads them with no
@@ -77,6 +77,9 @@ pub fn router_with(server: MaestroServer, local: SocketAddr, owner: Result<crate
         .route("/decisions/{ledger}/{id}", get(decision))
         .route("/today", get(today))
         .route("/health", get(health))
+        .route("/flows", get(flows))
+        .route("/flows/kernel/{name}", get(flow_kernel))
+        .route("/flows/run/{id}", get(flow_run))
         .route("/manifest.webmanifest", get(manifest))
         .route("/apple-touch-icon.png", get(icon_180))
         .route("/icon-192.png", get(icon_192))
@@ -169,6 +172,57 @@ fn absent(store: &maestro_store::Store, ledger: &str, id: &str) -> bool {
     section.data.is_some() && matches.is_empty() && unread.is_empty()
 }
 
+/// The owner's answering as the header shows it for this request.
+fn owner_of(web: &Web, headers: &HeaderMap) -> maestro_view::render::Owner {
+    match &web.owner {
+        // Opened at another address than the secure one, the page links there to answer.
+        Ok(o) if request_authority(headers, &o.party).is_some_and(|a| a != o.party.authority) => {
+            maestro_view::render::Owner::Elsewhere(o.party.origin.clone())
+        }
+        Ok(o) => o.state(),
+        Err(e) => maestro_view::render::Owner::Off(e.clone()),
+    }
+}
+
+/// A Flows page (`maestro_view::FlowsPage`): the flow ledger read for this request
+/// ([`crate::flows_web`]) under the same header every page has. A kernel or run the ledger,
+/// read in full, does not hold is no page.
+async fn flows_page(web: &Web, uri: &Uri, headers: &HeaderMap, which: maestro_view::FlowsPage) -> Response {
+    if !admitted(uri, headers, &web.hosts) {
+        return refused();
+    }
+    let server = web.server.clone();
+    let owner = owner_of(web, headers);
+    let rendered = tokio::task::spawn_blocking(move || {
+        let store = server.store();
+        let ledger = crate::flows_web::read_shared(&store.paths);
+        // Ages are counted from after the read, so no event the read saw is ahead of the clock.
+        let at = maestro_store::views::now();
+        let (html, title) = maestro_view::flows_page(&ledger, &which, at)?;
+        Some((html, title, maestro_view::render::web_shell(&store, at, owner)))
+    })
+    .await;
+    match rendered {
+        Ok(Some((html, title, shell))) => {
+            with_headers(page::web(&html, &title, "/flows", &shell).into_response(), "text/html; charset=utf-8")
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "no such flow\n").into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "the render did not finish\n").into_response(),
+    }
+}
+
+async fn flows(State(web): State<Web>, uri: Uri, headers: HeaderMap) -> Response {
+    flows_page(&web, &uri, &headers, maestro_view::FlowsPage::List).await
+}
+
+async fn flow_kernel(State(web): State<Web>, uri: Uri, headers: HeaderMap, Path(name): Path<String>) -> Response {
+    flows_page(&web, &uri, &headers, maestro_view::FlowsPage::Kernel(name)).await
+}
+
+async fn flow_run(State(web): State<Web>, uri: Uri, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    flows_page(&web, &uri, &headers, maestro_view::FlowsPage::Run(id)).await
+}
+
 /// Render one block as a page, read from a store resolved for this request.
 async fn page_of(
     web: &Web,
@@ -188,16 +242,10 @@ async fn page_of(
         Err(e) => return (StatusCode::NOT_FOUND, format!("no such page: {e}\n")).into_response(),
     };
     let server = web.server.clone();
-    let owner = match &web.owner {
-        // Opened at another address than the secure one, the page links there to answer.
-        Ok(o) if request_authority(headers, &o.party).is_some_and(|a| a != o.party.authority) => {
-            maestro_view::render::Owner::Elsewhere(o.party.origin.clone())
-        }
-        Ok(o) => o.state(),
-        Err(e) => maestro_view::render::Owner::Off(e.clone()),
-    };
+    let owner = owner_of(web, headers);
+    let in_flight = web.owner.as_ref().map(|o| o.book.in_flight()).unwrap_or_default();
     let rendered = tokio::task::spawn_blocking(move || {
-        let store = server.store();
+        let store = server.store().read_scope();
         // A readable ledger with no such ask is no page; an unread one still renders as unavailable.
         if let Some((ledger, id)) = &ask
             && absent(&store, ledger, id)
@@ -205,7 +253,7 @@ async fn page_of(
             return None;
         }
         let at = maestro_store::views::now();
-        Some(maestro_view::render::render_web(&store, &validated, at, owner))
+        Some(maestro_view::render::render_web_with_pending(&store, &validated, at, owner, in_flight))
     })
     .await;
     match rendered {

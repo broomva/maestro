@@ -8,6 +8,7 @@
 //! plugin is still the one writer, and these screens say so where the answer would go.
 
 mod decision;
+pub mod flows_web;
 pub(crate) mod health;
 pub(crate) mod health_web;
 mod inbox;

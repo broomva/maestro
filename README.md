@@ -545,10 +545,24 @@ Maestro decides every value on it:
   sha256. The page's Content-Security-Policy allows no fetch and no script but that bridge, by its
   hash, so markup in a forged tool result runs nothing (the e2e checks it). There is no WebAssembly:
   T3's CSP blocks it.
+- The Flows pages (`/flows`, `/flows/kernel/<flow>`, `/flows/run/<instance>`) read the flow
+  ledger as `maestro_flow_status` does, under one shared lock and writing nothing
+  (`crates/mcp/src/flows_web.rs`), and state only what the kernel's reads report (status and the
+  stop gate's assessment). The ledger is the catalog: a kernel is a flow name, a revision is the IR
+  hash its runs pinned; its shape is drawn only once a run of it replayed. A kernel's page draws its shape
+  (nodes by class, needs, switches, repeats, with the open runs at each node), its ontology and
+  its lineage (each revision with what changed from the one before). A run's page shows where it
+  is (held claims, ready nodes, waits, a pending repeat verdict), its shape coloured by replay,
+  and its raw log with each event replay set aside marked. A wait on an ask links to the ask in
+  Decisions, which says whether it is answered; these pages never say `Needs you`. Every count
+  comes from one accounting (`flows::Tally`), and a run not read or not replayed is counted
+  unknown, never open, finished or absent. While open, a page re-reads itself (every 2 s with a
+  run going, `crates/view/assets/live.js`, tested by `crates/view/assets/live.test.js`) and swaps
+  in place.
 - The web pages (`maestro serve --http`: `/decisions`, `/decisions/<ledger>/<id>`, `/today`,
-  `/health`) are the same blocks rendered on the server, laid out as the approved design
-  (maestro#20, BRO-3783). They run one script, `crates/view/assets/owner.js`, named in the policy by
-  its hash. An open decision takes the owner's answer in place (BRO-4042): choose an option, add a
+  `/flows`, `/health`) are the same blocks rendered on the server, laid out as the approved design
+  (maestro#20, BRO-3783). They run one script, named in the policy by its hash: `crates/view/assets/owner.js`
+  with `navigation.js` and `live.js` joined to it. An open decision takes the owner's answer in place (BRO-4042): choose an option, add a
   note, press Answer, confirm with Touch ID or Face ID. Maestro holds it 8 seconds for undo, writes
   it to `maestro/ledger` in its own checkout (`MAESTRO_ANSWERS_CHECKOUT`, else
   `~/.local/state/maestro/answers-checkout`) with the passkey's proof in the commit's
