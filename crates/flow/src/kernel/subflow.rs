@@ -669,31 +669,9 @@ pub fn claim_map_item(
             let parent_repo = Path::new(parent_s);
             match std::fs::symlink_metadata(child_wt) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Crash occurred after child Started was appended and before git worktree add.
+                    // Crash occurred after child Started was appended and before (or during) staged worktree promotion.
                     let wt_root = guard.root_path().join("worktrees");
-                    if let Ok(meta) = std::fs::symlink_metadata(&wt_root)
-                        && meta.file_type().is_symlink()
-                    {
-                        return Err(SubflowError::Storage(format!(
-                            "refusing symlinked worktrees root: {}",
-                            wt_root.display()
-                        )));
-                    }
-                    std::fs::create_dir_all(&wt_root).map_err(|e| SubflowError::Storage(e.to_string()))?;
-                    let add = Command::new("git")
-                        .args(["worktree", "add", "--detach", "-q"])
-                        .arg(child_wt)
-                        .arg(base_sha)
-                        .current_dir(parent_repo)
-                        .output()
-                        .map_err(|e| SubflowError::Storage(format!("git worktree add failed: {e}")))?;
-                    if !add.status.success() {
-                        return Err(SubflowError::Storage(format!(
-                            "git worktree add failed for {}: {}",
-                            child_wt.display(),
-                            String::from_utf8_lossy(&add.stderr).trim()
-                        )));
-                    }
+                    allocate_child_worktree_atomic(parent_repo, &wt_root, child_id.as_str(), base_sha)?;
                 }
                 Err(e) => return Err(SubflowError::Storage(format!("child worktree metadata failed: {e}"))),
                 Ok(_) => {}
@@ -778,22 +756,9 @@ pub fn claim_map_item(
         let ev = child_started.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
         guard.append(&child_id, 0, ev)
             .map_err(|e| SubflowError::Storage(e.to_string()))?;
-        if let Some((base_wd, child_wt, sha)) = pending_wt {
-            let add = Command::new("git")
-                .args(["worktree", "add", "--detach", "-q"])
-                .arg(&child_wt)
-                .arg(&sha)
-                .current_dir(&base_wd)
-                .output()
-                .map_err(|e| SubflowError::Storage(format!("git worktree add failed: {e}")))?;
-            if !add.status.success() {
-                return Err(SubflowError::Storage(format!(
-                    "git worktree add failed for {}: {}",
-                    child_wt.display(),
-                    String::from_utf8_lossy(&add.stderr).trim()
-                )));
-            }
-            verify_allocated_child_worktree(&child_wt, &base_wd, Some(&sha))?;
+        if let Some((base_wd, _child_wt, sha)) = pending_wt {
+            let wt_root = guard.root_path().join("worktrees");
+            allocate_child_worktree_atomic(&base_wd, &wt_root, child_id.as_str(), &sha)?;
         }
     }
 
@@ -900,6 +865,89 @@ fn has_specific_open_effect(child_log: &Log, node: &str, iteration: &Iteration, 
         }
     }
     open
+}
+
+/// Atomically allocates a detached git worktree for `child_id` at `base_sha` using a sibling
+/// staging directory (`<wt_root>/.staging-<child_id>-<pid>`) followed by `git worktree move`,
+/// cleaning up any leftover staging directories from an interrupted prior `git worktree add` so
+/// crashes before OR during allocation never strand the deterministic child.
+fn allocate_child_worktree_atomic(
+    parent_repo: &Path,
+    wt_root: &Path,
+    child_id: &str,
+    base_sha: &str,
+) -> Result<PathBuf, SubflowError> {
+    if let Ok(meta) = std::fs::symlink_metadata(wt_root)
+        && meta.file_type().is_symlink()
+    {
+        return Err(SubflowError::Storage(format!(
+            "refusing symlinked worktrees root: {}",
+            wt_root.display()
+        )));
+    }
+    std::fs::create_dir_all(wt_root).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let staging_prefix = format!(".staging-{child_id}-");
+    if let Ok(entries) = std::fs::read_dir(wt_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(&staging_prefix) {
+                let p = entry.path();
+                let _ = Command::new("git")
+                    .args(["worktree", "remove", "--force"])
+                    .arg(&p)
+                    .current_dir(parent_repo)
+                    .output();
+                let _ = std::fs::remove_dir_all(&p);
+            }
+        }
+    }
+    let _ = Command::new("git").args(["worktree", "prune"]).current_dir(parent_repo).output();
+    let child_wt = wt_root.join(child_id);
+    if std::fs::symlink_metadata(&child_wt).is_ok() {
+        return Err(SubflowError::Storage(format!(
+            "refusing pre-existing child worktree path (must not exist before allocation): {}",
+            child_wt.display()
+        )));
+    }
+    let staging = wt_root.join(format!("{staging_prefix}{}", std::process::id()));
+    let add = Command::new("git")
+        .args(["worktree", "add", "--detach", "-q"])
+        .arg(&staging)
+        .arg(base_sha)
+        .current_dir(parent_repo)
+        .output()
+        .map_err(|e| SubflowError::Storage(format!("git worktree add failed: {e}")))?;
+    if !add.status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(SubflowError::Storage(format!(
+            "git worktree add failed for {}: {}",
+            staging.display(),
+            String::from_utf8_lossy(&add.stderr).trim()
+        )));
+    }
+    verify_allocated_child_worktree(&staging, parent_repo, Some(base_sha))?;
+    let mv = Command::new("git")
+        .args(["worktree", "move"])
+        .arg(&staging)
+        .arg(&child_wt)
+        .current_dir(parent_repo)
+        .output()
+        .map_err(|e| SubflowError::Storage(format!("git worktree move failed: {e}")))?;
+    if !mv.status.success() {
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&staging)
+            .current_dir(parent_repo)
+            .output();
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(SubflowError::Storage(format!(
+            "git worktree move failed for {}: {}",
+            child_wt.display(),
+            String::from_utf8_lossy(&mv.stderr).trim()
+        )));
+    }
+    verify_allocated_child_worktree(&child_wt, parent_repo, Some(base_sha))?;
+    Ok(child_wt)
 }
 
 /// Verifies that `child_wt` is an authentic, non-symlink detached git worktree belonging to
@@ -1076,12 +1124,27 @@ pub fn reconcile_superseded_effect(
     Ok(())
 }
 
-/// Verifies that EVERY `Claimed.audit.process.pid` ever recorded in `child_log` is confirmed dead
-/// (`kill(pid, 0) == ESRCH`), returning the full set of verified-dead recorded PIDs.
-/// Prevents an earlier dead claimant from standing in for a later still-alive worker, and prevents
-/// a worktree-only receipt from releasing a reservation while any recorded worker is still alive.
-fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, SubflowError> {
-    let mut recorded_pids = BTreeSet::new();
+/// Verifies that EVERY dedicated worker process group (`Claimed.worker_pgid` and
+/// `child_started.params["worker_pgid"]`) ever recorded for this child has completely terminated
+/// (`kill(-pgid, 0) == ESRCH`). Never reads `Claimed.audit.process.pid` (which identifies a
+/// short-lived CLI/MCP transport process, not the worker agent or its subprocesses).
+/// Fails closed if ANY `Claimed` event lacks `worker_pgid > 1` or if ANY member of ANY recorded
+/// worker process group is still alive.
+fn verify_all_child_workers_dead(child_log: &Log, child_started: &Started) -> Result<BTreeSet<u32>, SubflowError> {
+    let mut recorded_pgids = BTreeSet::new();
+    if let Some(pgid) = child_started
+        .params
+        .get("worker_pgid")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+    {
+        if pgid <= 1 {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("child {} Started.params has invalid worker_pgid {pgid}", child_log.instance),
+            });
+        }
+        recorded_pgids.insert(pgid);
+    }
     for ev in &child_log.events {
         if ev.kind == Claimed::KIND {
             let c = serde_json::from_value::<Claimed>(ev.body.clone()).map_err(|e| {
@@ -1089,42 +1152,42 @@ fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, Subfl
                     detail: format!("malformed Claimed event in child {}: {e}", child_log.instance),
                 }
             })?;
-            let Some(audit) = c.audit else {
+            let Some(pgid) = c.worker_pgid else {
                 return Err(SubflowError::QuiescenceRefused {
                     detail: format!(
-                        "Claimed event (node={}, attempt={}) in child {} is missing worker process audit PID; cannot prove worker termination",
+                        "Claimed event (node={}, attempt={}) in child {} is missing dedicated worker_pgid; cannot prove worker process group terminated",
                         c.node, c.attempt, child_log.instance
                     ),
                 });
             };
-            if audit.process.pid == 0 {
+            if pgid <= 1 {
                 return Err(SubflowError::QuiescenceRefused {
                     detail: format!(
-                        "Claimed event (node={}, attempt={}) in child {} has invalid zero worker PID",
+                        "Claimed event (node={}, attempt={}) in child {} has invalid worker_pgid {pgid}",
                         c.node, c.attempt, child_log.instance
                     ),
                 });
             }
-            recorded_pids.insert(audit.process.pid);
+            recorded_pgids.insert(pgid);
         }
     }
-    for &raw_pid in &recorded_pids {
-        let Ok(pid_i32) = i32::try_from(raw_pid) else {
+    for &raw_pgid in &recorded_pgids {
+        let Ok(pgid_i32) = i32::try_from(raw_pgid) else {
             return Err(SubflowError::QuiescenceRefused {
-                detail: format!("invalid recorded worker pid {raw_pid}"),
+                detail: format!("invalid recorded worker_pgid {raw_pgid}"),
             });
         };
-        let Some(pid) = rustix::process::Pid::from_raw(pid_i32) else {
+        let Some(pgid) = rustix::process::Pid::from_raw(pgid_i32) else {
             return Err(SubflowError::QuiescenceRefused {
-                detail: format!("invalid zero recorded worker pid {raw_pid}"),
+                detail: format!("invalid zero recorded worker_pgid {raw_pgid}"),
             });
         };
-        match rustix::process::test_kill_process(pid) {
+        match rustix::process::test_kill_process_group(pgid) {
             Err(rustix::io::Errno::SRCH) => {}
             Ok(()) => {
                 return Err(SubflowError::QuiescenceRefused {
                     detail: format!(
-                        "recorded worker pid {raw_pid} for child {} is still alive; cannot mark quiescent or reconcile",
+                        "worker process group pgid={raw_pgid} for child {} still has live process(es); cannot mark quiescent or reconcile",
                         child_log.instance
                     ),
                 });
@@ -1132,13 +1195,13 @@ fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, Subfl
             Err(err) => {
                 return Err(SubflowError::QuiescenceRefused {
                     detail: format!(
-                        "recorded worker pid {raw_pid} liveness check failed ({err}); refusing quiescence"
+                        "worker process group pgid={raw_pgid} liveness check failed ({err}); refusing quiescence"
                     ),
                 });
             }
         }
     }
-    Ok(recorded_pids)
+    Ok(recorded_pgids)
 }
 
 /// Recursively verifies that `root` and EVERY file and subdirectory inside it is non-symlink and
@@ -1179,16 +1242,15 @@ fn verify_tree_readonly_recursive(root: &Path) -> Result<(), SubflowError> {
 }
 
 /// Verifies a structured `termination_receipt` bound STRICTLY to THIS child's own allocated
-/// `child_worktree` and EVERY `Claimed.audit.process.pid` recorded in `child_log`:
-/// - ALWAYS verifies ALL recorded worker PIDs in `child_log` are confirmed dead (`ESRCH`) first!
-/// - `pid:<u32>:exited|reaped`: `<pid>` MUST be in `recorded_pids` (which are ALL confirmed dead),
-///   and when `!for_reconcile` (quiescence) any allocated `child_worktree` must ALSO be removed or
-///   recursively read-only.
+/// `child_worktree` and EVERY dedicated worker process group (`Claimed.worker_pgid`) recorded in
+/// `child_log` (never trusting CLI/MCP `Audit.process.pid`!):
+/// - ALWAYS verifies EVERY recorded `worker_pgid` process group has completely exited (`kill(-pgid, 0) == ESRCH`) first!
+/// - `pgid:<u32>:exited|reaped`: `<pgid>` MUST be in `recorded_pgids` (ALL confirmed dead via `kill(-pgid, 0)`),
+///   and when `!for_reconcile` (quiescence) any allocated `child_worktree` must ALSO be removed or recursively read-only.
 /// - `worktree_removed:<path>`: `<path>` MUST equal `child_started.params["child_worktree"]`,
-///   `symlink_metadata` must return `NotFound`, AND all recorded worker PIDs are confirmed dead.
+///   `symlink_metadata` must return `NotFound`, AND every recorded `worker_pgid` is confirmed dead.
 /// - `worktree_readonly:<path>`: `<path>` MUST equal `child_started.params["child_worktree"]`,
-///   be recursively read-only with zero writable files/dirs and zero symlinks, AND all recorded
-///   worker PIDs are confirmed dead.
+///   be recursively read-only with zero writable files/dirs and zero symlinks, AND every recorded `worker_pgid` is dead.
 fn verify_termination_receipt(
     receipt: &str,
     child_log: &Log,
@@ -1198,8 +1260,8 @@ fn verify_termination_receipt(
     let r = receipt.trim();
     let expected_wt = child_started.params.get("child_worktree").and_then(Value::as_str);
 
-    // ALWAYS confirm EVERY recorded worker PID for this child is dead before accepting ANY receipt!
-    let recorded_pids = verify_all_child_workers_dead(child_log)?;
+    // ALWAYS confirm EVERY recorded worker process group for this child is dead before accepting ANY receipt!
+    let recorded_pgids = verify_all_child_workers_dead(child_log, child_started)?;
 
     let check_wt_frozen_or_removed = |wt_str: &str| -> Result<(), SubflowError> {
         let p = Path::new(wt_str);
@@ -1226,22 +1288,22 @@ fn verify_termination_receipt(
         }
     };
 
-    if let Some(rest) = r.strip_prefix("pid:") {
+    if let Some(rest) = r.strip_prefix("pgid:") {
         let parts: Vec<&str> = rest.split(':').collect();
         if parts.len() == 2
             && matches!(parts[1], "exited" | "reaped")
-            && let Ok(raw_pid) = parts[0].parse::<u32>()
-            && raw_pid > 0
+            && let Ok(raw_pgid) = parts[0].parse::<u32>()
+            && raw_pgid > 1
         {
-            if !recorded_pids.contains(&raw_pid) {
+            if !recorded_pgids.contains(&raw_pgid) {
                 return Err(SubflowError::QuiescenceRefused {
                     detail: format!(
-                        "pid {raw_pid} is not bound to child {} (recorded Claimed.audit.pid set: {recorded_pids:?})",
+                        "pgid {raw_pgid} is not bound to child {} (recorded worker_pgid set: {recorded_pgids:?})",
                         child_log.instance
                     ),
                 });
             }
-            // All recorded_pids (including raw_pid and any later claimants) were already verified dead above.
+            // All recorded_pgids (including raw_pgid and any later claimants) were already verified dead above.
             if !for_reconcile
                 && let Some(wt_str) = expected_wt
             {
@@ -1250,7 +1312,7 @@ fn verify_termination_receipt(
             return Ok(());
         }
         return Err(SubflowError::QuiescenceRefused {
-            detail: format!("malformed pid termination_receipt {r:?} (expected pid:<positive_int>:exited|reaped)"),
+            detail: format!("malformed pgid termination_receipt {r:?} (expected pgid:<pgid>:exited|reaped)"),
         });
     }
     if let Some(path_str) = r.strip_prefix("worktree_removed:") {

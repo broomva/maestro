@@ -127,6 +127,11 @@ pub struct Claimed {
     /// Parent `owner_epoch` when a child subflow claim was created (IR v10 adoption fencing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_epoch: Option<u64>,
+    /// Dedicated worker process group ID (`pgid > 1`) bound to an IR v10 child subflow claim so
+    /// quiescence/reconciliation verifies the entire worker process group exited (`kill(-pgid, 0) == ESRCH`),
+    /// never relying on `audit.process.pid` (which identifies the CLI/MCP process).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_pgid: Option<u32>,
 }
 
 /// The receipt: a node accepted in an iteration, with the verify the kernel ran.

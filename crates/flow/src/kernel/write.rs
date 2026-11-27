@@ -773,13 +773,14 @@ pub fn claim_as(
         claim_inputs.insert("__map_item_key".to_string(), ik);
         claim_inputs.insert("__map_child_instance".to_string(), cid);
     }
-    if started.parent_ref.is_some()
-        && !session.audit().is_some_and(|a| a.process.pid > 0)
-    {
+    let worker_pgid = session
+        .worker_pgid()
+        .or_else(|| started.params.get("worker_pgid").and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()));
+    if started.parent_ref.is_some() && !worker_pgid.is_some_and(|pgid| pgid > 1) {
         return Err(Refusal::ChildFenced {
             child: instance.to_string(),
-            code: "missing_worker_audit",
-            detail: "child subflow claim requires an attested worker process PID in session.audit()".into(),
+            code: "missing_worker_pgid",
+            detail: "child subflow claim requires a dedicated worker process group ID (worker_pgid > 1), distinct from CLI/MCP audit".into(),
         }
         .into());
     }
@@ -795,6 +796,7 @@ pub fn claim_as(
         cancel_at: cancel_at.map(|at| at.to_string()),
         audit: session.audit().cloned(),
         owner_epoch: child_claim_epoch,
+        worker_pgid,
     };
     let appended = append_writable(&mut guard, instance, log.seq(), claimed.to_event()?)?;
     Ok(Claim {
@@ -1309,7 +1311,7 @@ pub fn complete_as(
             let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
             let fence_store = FencingStore::open(&fence_db)
                 .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
-            if let Err(e) = fence_store.verify_registered_target(&fence_resource, &plan.argv) {
+            if let Err(e) = fence_store.verify_registered_target(&fence_resource, &plan.argv, &plan.cwd) {
                 return refuse(&mut guard, &held, ("unregistered_fenced_target", e.to_string()), &[]);
             }
             let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
@@ -1592,7 +1594,7 @@ fn run_fenced_effect(
     let rlock = fence_store
         .acquire_resource_lock(&fence_resource)
         .map_err(|e| KernelError::Encode(format!("fencing lock failed: {e}")))?;
-    if let Err(e) = fence_store.verify_registered_target(&fence_resource, &plan.argv) {
+    if let Err(e) = fence_store.verify_registered_target(&fence_resource, &plan.argv, &plan.cwd) {
         drop(rlock);
         return Ok((
             Ran::Failed { code: "unregistered_fenced_target", detail: e.to_string(), stderr: Vec::new() },

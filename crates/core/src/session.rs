@@ -555,6 +555,10 @@ pub struct VerifiedSession {
     /// the events its writes append. Never an input to any check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audit: Option<Audit>,
+    /// Dedicated worker process group ID (`pgid > 1`) for IR v10 child subflow quiescence
+    /// verification (`kill(-pgid, 0) == ESRCH`), distinct from any short-lived CLI/MCP audit PID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_pgid: Option<u32>,
 }
 
 /// What a flow event records of the writer (BRO-3846): how its identity was established, and facts
@@ -618,6 +622,7 @@ impl VerifiedSession {
             owner_marker: None,
             pending_permissions,
             audit: None,
+            worker_pgid: None,
         }
     }
 
@@ -629,6 +634,16 @@ impl VerifiedSession {
     /// What events record of this writer (see [`Audit`]).
     pub fn audit(&self) -> Option<&Audit> {
         self.audit.as_ref()
+    }
+
+    pub fn with_worker_pgid(mut self, pgid: u32) -> Self {
+        self.worker_pgid = Some(pgid);
+        self
+    }
+
+    /// Dedicated worker process group ID for IR v10 child subflow termination tracking.
+    pub fn worker_pgid(&self) -> Option<u32> {
+        self.worker_pgid
     }
 
     pub fn with_incarnation(mut self, incarnation: impl Into<String>) -> Self {

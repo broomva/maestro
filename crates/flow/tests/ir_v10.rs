@@ -102,15 +102,50 @@ fn verified_owner(id: &str) -> VerifiedSession {
     let s: SessionRef = format!("t3:local/{id}").parse().unwrap();
     VerifiedSession::new(s, "/tmp", Some(Harness::Codex), None, vec![])
         .with_owner_marker(id)
-        .with_audit(Audit {
-            identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
-            process: ProcessFacts { pid: std::process::id(), ..Default::default() },
-        })
+        .with_worker_pgid(std::process::id())
 }
 
-fn verified_owner_unaudited(id: &str) -> VerifiedSession {
+fn verified_owner_no_pgid(id: &str) -> VerifiedSession {
     let s: SessionRef = format!("t3:local/{id}").parse().unwrap();
     VerifiedSession::new(s, "/tmp", Some(Harness::Codex), None, vec![]).with_owner_marker(id)
+}
+
+fn spawn_worker_pgrp() -> (std::process::Child, u32) {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let mut child = Command::new("python3")
+        .args([
+            "-c",
+            "import os, sys, time; os.setpgrp(); sys.stdout.write(str(os.getpgrp()) + '\\n'); sys.stdout.flush(); time.sleep(60)",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let pgid: u32 = line.trim().parse().unwrap();
+    (child, pgid)
+}
+
+fn spawn_dead_pgrp() -> u32 {
+    let out = Command::new("python3")
+        .args(["-c", "import os; os.setpgrp(); print(os.getpgrp())"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap().trim().parse().unwrap()
+}
+
+fn write_immutable_script(bin_dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
+    std::fs::create_dir_all(bin_dir).unwrap();
+    let p = bin_dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+    p
 }
 
 fn complete_lane_child(
@@ -167,11 +202,12 @@ fn remove_child_worktree_receipt(g: &mut maestro_flow::WriteGuard<'_>, child: &I
     format!("worktree_removed:{wt}")
 }
 
-/// Returns a shell snippet that atomically executes BOTH a target state mutation AND consumes
-/// `MAESTRO_FENCING_EPOCH` inside ONE SQLite `BEGIN IMMEDIATE` transaction in `MAESTRO_FENCING_DB`.
-fn atomic_target_commit_py(extra_py: &str) -> String {
-    format!(
-        r#"python3 -c '
+/// Writes an immutable (`0o555`) standalone Python executable outside the worktree that atomically
+/// executes BOTH a target state mutation AND consumes `MAESTRO_FENCING_EPOCH` inside ONE SQLite
+/// `BEGIN IMMEDIATE` transaction in `MAESTRO_FENCING_DB`.
+fn write_atomic_target_script(bin_dir: &std::path::Path, name: &str, extra_py: &str) -> PathBuf {
+    let body = format!(
+        r#"#!/usr/bin/env python3
 import os, sqlite3, sys
 {extra_py}
 db = os.environ["MAESTRO_FENCING_DB"]
@@ -187,11 +223,12 @@ row = conn.execute("SELECT granted_epoch, written_epoch FROM resource_epochs WHE
 if not row or row[0] != ep or row[1] >= ep:
     conn.execute("ROLLBACK")
     sys.exit(2)
-conn.execute("UPDATE resource_epochs SET written_epoch = ?, last_op_id = ?, last_payload_digest = ?, last_result_json = \"{{}}\" WHERE resource_id = ?", (ep, op, dig, res))
+conn.execute("UPDATE resource_epochs SET written_epoch = ?, last_op_id = ?, last_payload_digest = ?, last_result_json = '{{}}' WHERE resource_id = ?", (ep, op, dig, res))
 conn.execute("INSERT INTO target_writes (resource, epoch, op_id) VALUES (?, ?, ?)", (res, ep, op))
 conn.execute("COMMIT")
-'"#
-    )
+"#
+    );
+    write_immutable_script(bin_dir, name, &body)
 }
 
 fn init_git_repo(wt: &std::path::Path) {
@@ -559,9 +596,8 @@ nodes:
     expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), items_v1, BTreeMap::new(), &me).unwrap();
     let (child, ep) = claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", None, &me).unwrap();
 
-    // Record a real live worker Claimed event + open EffectStarted on the child!
-    let mut live_worker = Command::new("sleep").arg("60").spawn().unwrap();
-    let live_pid = live_worker.id();
+    // Record a real live worker process group + open EffectStarted on the child!
+    let (mut live_worker, live_pgid) = spawn_worker_pgrp();
     let claimed_ev = Claimed {
         node: "work".into(),
         iteration: Iteration::new(),
@@ -572,11 +608,9 @@ nodes:
         cancel_at: None,
         performer: None,
         owner_epoch: Some(ep),
+        worker_pgid: Some(live_pgid),
         tool_use_id: None,
-        audit: Some(Audit {
-            identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
-            process: ProcessFacts { pid: live_pid, ..Default::default() },
-        }),
+        audit: None,
     };
     let cseq0 = g.log(&child).unwrap().seq();
     g.append(&child, cseq0, claimed_ev.to_event().unwrap()).unwrap();
@@ -613,14 +647,14 @@ nodes:
         "quiescence_refused"
     );
     assert_eq!(
-        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, "pid:999:exited", &me)
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, "pgid:999:exited", &me)
             .unwrap_err()
             .code(),
         "quiescence_refused"
     );
 
     // Reconcile for a WRONG attempt (attempt=99) MUST fail closed!
-    let pid_rcpt = format!("pid:{live_pid}:exited");
+    let pgid_rcpt = format!("pgid:{live_pgid}:exited");
     assert_eq!(
         reconcile_superseded_effect(
             &mut g,
@@ -631,7 +665,7 @@ nodes:
             99,
             BTreeMap::new(),
             json!({"ok": true}),
-            &pid_rcpt,
+            &pgid_rcpt,
             &me,
             ep,
         )
@@ -639,7 +673,7 @@ nodes:
         .code(),
         "subflow_superseded"
     );
-    // Reconcile while the original worker PID is STILL ALIVE MUST fail closed (Round 5 Finding #3)!
+    // Reconcile while the original worker process group is STILL ALIVE MUST fail closed!
     assert_eq!(
         reconcile_superseded_effect(
             &mut g,
@@ -650,7 +684,7 @@ nodes:
             1,
             BTreeMap::new(),
             json!({"ok": true}),
-            &pid_rcpt,
+            &pgid_rcpt,
             &me,
             ep,
         )
@@ -665,7 +699,7 @@ nodes:
     };
     assert!(!child_wt.join("reconcile_ran.txt").exists(), "reconcile command must not run while worker is alive");
 
-    // Kill and reap the original worker -> post-termination reconcile now executes!
+    // Kill and reap the original worker process group -> post-termination reconcile now executes!
     let _ = live_worker.kill();
     let _ = live_worker.wait();
     reconcile_superseded_effect(
@@ -677,7 +711,7 @@ nodes:
         1,
         BTreeMap::new(),
         json!({"ok": true}),
-        &pid_rcpt,
+        &pgid_rcpt,
         &me,
         ep,
     )
@@ -958,14 +992,16 @@ fn t12_effect_fencing_wired_in_write_rs_and_atomic_tx() {
     let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
     let sess = verified_owner("owner-fencer");
 
+    let bin_dir = dir.path().join("bin");
     // Effect flow that verifies MAESTRO_FENCING_EPOCH, MAESTRO_FENCING_RESOURCE, and MAESTRO_FENCING_DB
-    // 1. Real target-side atomic epoch consumption: the effect command atomically mutates
-    //    `target_writes` AND consumes `written_epoch = MAESTRO_FENCING_EPOCH` in ONE SQLite tx!
+    // 1. Real target-side atomic epoch consumption: the immutable registered executable atomically
+    //    mutates `target_writes` AND consumes `written_epoch = MAESTRO_FENCING_EPOCH` in ONE SQLite tx!
     let marker = workdir.join("seen_epoch.txt");
-    let target_cmd = atomic_target_commit_py(&format!(
-        r#"open({:?}, "w").write(os.environ["MAESTRO_FENCING_EPOCH"])"#,
-        marker.display().to_string()
-    ));
+    let target_exe = write_atomic_target_script(
+        &bin_dir,
+        "fenced-ship",
+        &format!(r#"open({:?}, "w").write(os.environ["MAESTRO_FENCING_EPOCH"])"#, marker.display().to_string()),
+    );
     let flow_yaml = format!(
         r#"
 flow: fenced_eff
@@ -975,16 +1011,14 @@ workdir: "{{{{params.repo}}}}"
 nodes:
   ship:
     class: effect
-    run: [sh, -c, {}]
+    run: [{}]
     reconcile: [sh, -c, "true"]
 "#,
-        serde_json::to_string(&target_cmd).unwrap()
+        serde_json::to_string(&target_exe.to_string_lossy()).unwrap()
     );
     let compiled = compile(&flow_yaml).unwrap();
     let fstore_reg = FencingStore::open(root.join("fencing_epochs.sqlite")).unwrap();
-    fstore_reg
-        .register_fenced_target("branch:main", &["sh".into(), "-c".into(), target_cmd.clone()])
-        .unwrap();
+    fstore_reg.register_fenced_target("branch:main", &target_exe, &[]).unwrap();
     let s1 = start(
         &mut ledger,
         &sess,
@@ -999,21 +1033,23 @@ nodes:
 
     // 2. A registered fenced effect whose target fails to consume MAESTRO_FENCING_EPOCH MUST be
     //    refused fail-closed with `target_did_not_consume_epoch`!
-    fstore_reg
-        .register_fenced_target("branch:unconsumed", &["sh".into(), "-c".into(), "true".into()])
-        .unwrap();
-    let flow_unconsumed_yaml = r#"
+    let noop_exe = write_immutable_script(&bin_dir, "fenced-noop", "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n");
+    fstore_reg.register_fenced_target("branch:unconsumed", &noop_exe, &[]).unwrap();
+    let flow_unconsumed_yaml = format!(
+        r#"
 flow: fenced_unconsumed
 version: 1
 params: [repo, fencing_resource]
-workdir: "{{params.repo}}"
+workdir: "{{{{params.repo}}}}"
 nodes:
   ship:
     class: effect
-    run: [sh, -c, "true"]
+    run: [{}]
     reconcile: [sh, -c, "true"]
-"#;
-    let compiled_u = compile(flow_unconsumed_yaml).unwrap();
+"#,
+        serde_json::to_string(&noop_exe.to_string_lossy()).unwrap()
+    );
+    let compiled_u = compile(&flow_unconsumed_yaml).unwrap();
     let su = start(
         &mut ledger,
         &sess,
@@ -1030,13 +1066,15 @@ nodes:
     // Mid-flight stale epoch rejection: another worker advances granted_epoch in fencing_epochs.sqlite
     // before the effect finishes -> complete() MUST refuse with `stale_fencing_epoch`!
     let db_path = root.join("fencing_epochs.sqlite");
-    let stale_py = format!(
-        "import sqlite3; c=sqlite3.connect(r'{}'); c.execute(\"UPDATE resource_epochs SET granted_epoch = granted_epoch + 1 WHERE resource_id = 'branch:stale'\"); c.commit()",
-        db_path.display()
+    let stale_exe = write_immutable_script(
+        &bin_dir,
+        "fenced-stale",
+        &format!(
+            "#!/usr/bin/env python3\nimport sqlite3\nc=sqlite3.connect({:?})\nc.execute(\"UPDATE resource_epochs SET granted_epoch = granted_epoch + 1 WHERE resource_id = 'branch:stale'\")\nc.commit()\n",
+            db_path.display().to_string()
+        ),
     );
-    fstore_reg
-        .register_fenced_target("branch:stale", &["python3".into(), "-c".into(), stale_py.clone()])
-        .unwrap();
+    fstore_reg.register_fenced_target("branch:stale", &stale_exe, &[]).unwrap();
     let flow_stale_yaml = format!(
         r#"
 flow: fenced_stale
@@ -1046,10 +1084,10 @@ workdir: "{{{{params.repo}}}}"
 nodes:
   ship:
     class: effect
-    run: [python3, -c, {}]
+    run: [{}]
     reconcile: [sh, -c, "true"]
 "#,
-        serde_json::to_string(&stale_py).unwrap()
+        serde_json::to_string(&stale_exe.to_string_lossy()).unwrap()
     );
     let compiled_stale = compile(&flow_stale_yaml).unwrap();
     let s2 = start(
@@ -1253,16 +1291,9 @@ fn t15_performer_union_includes_failed_attempt_when_retry_succeeds() {
             performer: Some(p_claude),
             tool_use_id: None,
             cancel_at: None,
-            audit: Some({
-                let mut dead = Command::new("true").spawn().unwrap();
-                let dead_pid = dead.id();
-                let _ = dead.wait();
-                Audit {
-                    identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
-                    process: ProcessFacts { pid: dead_pid, ..Default::default() },
-                }
-            }),
+            audit: None,
             owner_epoch: Some(0),
+            worker_pgid: Some(spawn_dead_pgrp()),
         };
         g.append(&cid1, c1_seq, c1_claim.to_event().unwrap()).unwrap();
         finalize_map_item(
@@ -1359,11 +1390,14 @@ fn t17_stale_fencing_epoch_blocks_subprocess_before_target_mutation() {
     assert_eq!((e1, e2), (1, 2));
 
     // Stale worker bound to fencing_epoch=1 tries to run a Class::Effect that would write `mutated.txt`.
+    let bin_dir = dir.path().join("bin");
     let target = workdir.join("mutated.txt");
-    let stale_cmd = format!(r#"printf mutated > "{}""#, target.display());
-    fstore
-        .register_fenced_target("branch:protected", &["sh".into(), "-c".into(), stale_cmd.clone()])
-        .unwrap();
+    let stale_exe = write_immutable_script(
+        &bin_dir,
+        "fenced-mutate",
+        &format!("#!/usr/bin/env python3\nopen({:?}, 'w').write('mutated')\n", target.display().to_string()),
+    );
+    fstore.register_fenced_target("branch:protected", &stale_exe, &[]).unwrap();
     let yaml = format!(
         r#"
 flow: stale_target_guard
@@ -1373,10 +1407,10 @@ workdir: "{{{{params.repo}}}}"
 nodes:
   ship:
     class: effect
-    run: [sh, -c, {}]
+    run: [{}]
     reconcile: [sh, -c, "true"]
 "#,
-        serde_json::to_string(&stale_cmd).unwrap()
+        serde_json::to_string(&stale_exe.to_string_lossy()).unwrap()
     );
     let compiled = compile(&yaml).unwrap();
     let s = start(
@@ -1578,14 +1612,19 @@ fn t20_grant_epoch_blocks_while_effect_holds_resource_lock() {
     let db_path = root.join("fencing_epochs.sqlite");
     let started_flag = workdir.join("effect_running.txt");
 
+    let bin_dir = dir.path().join("bin");
     // Effect command signals it started, sleeps 200ms, then performs a REAL target-side atomic
     // SQLite mutation + epoch consumption in ONE BEGIN IMMEDIATE transaction!
-    let target_cmd = atomic_target_commit_py(&format!(
-        r#"import time
+    let target_exe = write_atomic_target_script(
+        &bin_dir,
+        "fenced-serial",
+        &format!(
+            r#"import time
 open({:?}, "w").write("started")
 time.sleep(0.2)"#,
-        started_flag.display().to_string()
-    ));
+            started_flag.display().to_string()
+        ),
+    );
     let yaml = format!(
         r#"
 flow: serialized_effect
@@ -1595,15 +1634,15 @@ workdir: "{{{{params.repo}}}}"
 nodes:
   ship:
     class: effect
-    run: [sh, -c, {}]
+    run: [{}]
     reconcile: [sh, -c, "true"]
 "#,
-        serde_json::to_string(&target_cmd).unwrap()
+        serde_json::to_string(&target_exe.to_string_lossy()).unwrap()
     );
     let compiled = compile(&yaml).unwrap();
     FencingStore::open(&db_path)
         .unwrap()
-        .register_fenced_target("branch:serialized", &["sh".into(), "-c".into(), target_cmd.clone()])
+        .register_fenced_target("branch:serialized", &target_exe, &[])
         .unwrap();
     let s = start(
         &mut ledger,
@@ -1897,13 +1936,10 @@ fn t23_round5_quiescence_reconcile_fencing_and_worktree_hardening() {
             cstart.params.get("child_worktree").and_then(|v| v.as_str()).unwrap().to_string()
         };
 
-        // Attempt 1: dead historical PID; Attempt 2: STILL-ALIVE worker PID!
-        let mut dead_proc = Command::new("true").spawn().unwrap();
-        let dead_pid = dead_proc.id();
-        let _ = dead_proc.wait();
-        let mut live_proc = Command::new("sleep").arg("60").spawn().unwrap();
-        let live_pid = live_proc.id();
-        for (attempt, pid) in [(1u32, dead_pid), (2u32, live_pid)] {
+        // Attempt 1: dead historical process group; Attempt 2: STILL-ALIVE worker process group!
+        let dead_pgid = spawn_dead_pgrp();
+        let (mut live_proc, live_pgid) = spawn_worker_pgrp();
+        for (attempt, pgid) in [(1u32, dead_pgid), (2u32, live_pgid)] {
             let cev = Claimed {
                 node: "work".into(),
                 iteration: Iteration::new(),
@@ -1914,11 +1950,9 @@ fn t23_round5_quiescence_reconcile_fencing_and_worktree_hardening() {
                 cancel_at: None,
                 performer: None,
                 owner_epoch: Some(ep),
+                worker_pgid: Some(pgid),
                 tool_use_id: None,
-                audit: Some(Audit {
-                    identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
-                    process: ProcessFacts { pid, ..Default::default() },
-                }),
+                audit: None,
             };
             let seq = g.log(&cid).unwrap().seq();
             g.append(&cid, seq, cev.to_event().unwrap()).unwrap();
@@ -1926,9 +1960,9 @@ fn t23_round5_quiescence_reconcile_fencing_and_worktree_hardening() {
         finalize_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, Some("boom"), BTreeMap::new(), &me)
             .unwrap();
 
-        // Historical dead PID while attempt 2 worker is still alive -> REFUSED!
+        // Historical dead PGID while attempt 2 worker process group is still alive -> REFUSED!
         assert_eq!(
-            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &format!("pid:{dead_pid}:exited"), &me)
+            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &format!("pgid:{dead_pgid}:exited"), &me)
                 .unwrap_err()
                 .code(),
             "quiescence_refused"
@@ -1946,7 +1980,7 @@ fn t23_round5_quiescence_reconcile_fencing_and_worktree_hardening() {
             );
             let _ = std::fs::set_permissions(&child_wt_str, std::fs::Permissions::from_mode(0o755));
         }
-        // Even after removing child_wt, worktree_removed MUST fail while live_pid is alive!
+        // Even after removing child_wt, worktree_removed MUST fail while live_pgid is alive!
         let removed_rcpt = remove_child_worktree_receipt(&mut g, &cid);
         assert_eq!(
             quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &removed_rcpt, &me)
@@ -1954,7 +1988,7 @@ fn t23_round5_quiescence_reconcile_fencing_and_worktree_hardening() {
                 .code(),
             "quiescence_refused"
         );
-        // Kill & reap live_pid -> NOW quiescence succeeds!
+        // Kill & reap live_proc -> NOW quiescence succeeds!
         let _ = live_proc.kill();
         let _ = live_proc.wait();
         quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &removed_rcpt, &me)
@@ -2067,7 +2101,7 @@ fn t24_round6_audit_prefencing_and_crash_recovery() {
         let host = HostId::new("test-host").unwrap();
         let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
         let sess = verified_owner("owner-r6-audit");
-        let unaudited = verified_owner_unaudited("owner-r6-audit");
+        let no_pgid = verified_owner_no_pgid("owner-r6-audit");
         let compiled = compile(&lead_v3_yaml()).unwrap();
         let started = start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2})).unwrap();
         let cp = claim(&mut ledger, &sess, &started.instance, "plan_waves").unwrap();
@@ -2082,14 +2116,12 @@ fn t24_round6_audit_prefencing_and_crash_recovery() {
         let cm = claim(&mut ledger, &sess, &started.instance, "execute_lanes").unwrap();
         let cid = InstanceId::new(cm.inputs.get("__map_child_instance").unwrap()).unwrap();
 
-        // Unaudited session MUST be refused when claiming inside a child subflow!
-        let err = claim(&mut ledger, &unaudited, &cid, "work").unwrap_err();
-        assert_eq!(err.code(), "missing_worker_audit", "child claim without audit PID must fail closed");
+        // Session without dedicated worker_pgid MUST be refused when claiming inside a child subflow!
+        let err = claim(&mut ledger, &no_pgid, &cid, "work").unwrap_err();
+        assert_eq!(err.code(), "missing_worker_pgid", "child claim without worker_pgid must fail closed");
 
-        // Hand-crafted child log with dead attempt 1 + unaudited attempt 2 -> quiescence MUST refuse!
-        let mut dead = Command::new("true").spawn().unwrap();
-        let dead_pid = dead.id();
-        let _ = dead.wait();
+        // Hand-crafted child log with dead attempt 1 + missing-worker_pgid attempt 2 -> quiescence MUST refuse!
+        let dead_pgid = spawn_dead_pgrp();
         let me = owner("owner-r6-audit");
         let mut g = ledger.lock().unwrap();
         let ep = parent_owner_epoch(&g.log(&started.instance).unwrap());
@@ -2103,11 +2135,9 @@ fn t24_round6_audit_prefencing_and_crash_recovery() {
             cancel_at: None,
             performer: None,
             owner_epoch: Some(ep),
+            worker_pgid: Some(dead_pgid),
             tool_use_id: None,
-            audit: Some(Audit {
-                identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
-                process: ProcessFacts { pid: dead_pid, ..Default::default() },
-            }),
+            audit: None,
         };
         let c2 = Claimed {
             node: "work".into(),
@@ -2119,6 +2149,7 @@ fn t24_round6_audit_prefencing_and_crash_recovery() {
             cancel_at: None,
             performer: None,
             owner_epoch: Some(ep),
+            worker_pgid: None,
             tool_use_id: None,
             audit: None,
         };
@@ -2343,5 +2374,268 @@ subflows:
         assert!(wt_d.is_dir(), "crash between child Started and git worktree add must recover cleanly");
     }
 }
+
+#[test]
+fn t25_round7_pgrp_termination_content_addressed_targets_and_staging_recovery() {
+    // 1. Round 7 P1 #1: short-lived CLI process exits (audit.process.pid is dead!) while the
+    //    worker agent remains alive in its dedicated process group (`worker_pgid`) -> quiescence
+    //    MUST refuse ALL receipts (`pid:<dead_cli>`, `pgid:<agent_pgid>`, `worktree_removed:`)
+    //    until the entire worker process group exits!
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-r7-pgrp");
+        let compiled = compile(&lead_v3_yaml()).unwrap();
+        let started = start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2})).unwrap();
+        let me = owner("owner-r7-pgrp");
+        let mut g = ledger.lock().unwrap();
+        expand_map(
+            &mut g,
+            &started.instance,
+            "execute_lanes",
+            Iteration::new(),
+            vec![MapItemSpec {
+                key: "lane-a".into(),
+                input_digest: digest(&json!(1)),
+                input: json!({"lane_id": "lane-a"}),
+                write_set: vec!["src/a/**".into()],
+            }],
+            BTreeMap::new(),
+            &me,
+        )
+        .unwrap();
+        let (cid, ep) = claim_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", None, &me).unwrap();
+
+        // Live agent in its own process group; short-lived CLI process already exited!
+        let (mut agent_proc, agent_pgid) = spawn_worker_pgrp();
+        let mut cli_proc = Command::new("true").spawn().unwrap();
+        let dead_cli_pid = cli_proc.id();
+        let _ = cli_proc.wait();
+        let cev = Claimed {
+            node: "work".into(),
+            iteration: Iteration::new(),
+            attempt: 1,
+            inputs: BTreeMap::new(),
+            token_sha256: "sha256:cli-claim".into(),
+            lease_until: "2099-01-01T00:00:00Z".into(),
+            cancel_at: None,
+            performer: None,
+            owner_epoch: Some(ep),
+            worker_pgid: Some(agent_pgid),
+            tool_use_id: None,
+            audit: Some(Audit {
+                identity: IdentityFacts { mode: "cli".into(), variable: None, thread: None },
+                process: ProcessFacts { pid: dead_cli_pid, ..Default::default() },
+            }),
+        };
+        let seq = g.log(&cid).unwrap().seq();
+        g.append(&cid, seq, cev.to_event().unwrap()).unwrap();
+        finalize_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, Some("fail"), BTreeMap::new(), &me)
+            .unwrap();
+        let removed_rcpt = remove_child_worktree_receipt(&mut g, &cid);
+
+        // Dead CLI PID receipt -> REFUSED (single-PID CLI death proves nothing!).
+        assert_eq!(
+            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &format!("pid:{dead_cli_pid}:exited"), &me)
+                .unwrap_err()
+                .code(),
+            "quiescence_refused"
+        );
+        // Live agent process group receipt -> REFUSED!
+        assert_eq!(
+            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &format!("pgid:{agent_pgid}:exited"), &me)
+                .unwrap_err()
+                .code(),
+            "quiescence_refused"
+        );
+        // Even worktree_removed -> REFUSED while agent_pgid is alive!
+        assert_eq!(
+            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &removed_rcpt, &me)
+                .unwrap_err()
+                .code(),
+            "quiescence_refused"
+        );
+        // Kill & reap agent_proc -> kill(-agent_pgid, 0) == ESRCH -> NOW succeeds!
+        let _ = agent_proc.kill();
+        let _ = agent_proc.wait();
+        quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &format!("pgid:{agent_pgid}:exited"), &me)
+            .unwrap();
+    }
+
+    // 2. Round 7 P1 #2: content-addressed immutable target registration refuses shells, relative
+    //    ./ship in worktree, writable executables, executables inside cwd, AND post-registration
+    //    script tampering BEFORE executing anything!
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("flows");
+        let workdir = dir.path().join("work");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-r7-target");
+        let fstore = FencingStore::open(root.join("fencing_epochs.sqlite")).unwrap();
+
+        // Generic shell (/bin/sh) MUST be refused at registration!
+        assert!(
+            fstore.register_fenced_target("branch:r7", std::path::Path::new("/bin/sh"), &["-c".into(), "./ship".into()]).is_err(),
+            "generic shell /bin/sh MUST be rejected by register_fenced_target"
+        );
+        // Relative path (./ship) MUST be refused at registration!
+        assert!(
+            fstore.register_fenced_target("branch:r7", std::path::Path::new("./ship"), &[]).is_err(),
+            "relative ./ship MUST be rejected by register_fenced_target"
+        );
+        // Writable executable MUST be refused at registration!
+        let writable_exe = bin_dir.join("writable-ship");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(&writable_exe, "#!/usr/bin/env python3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&writable_exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            fstore.register_fenced_target("branch:r7", &writable_exe, &[]).is_err(),
+            "writable executable MUST be rejected by register_fenced_target"
+        );
+        // Executable residing INSIDE workdir MUST be refused by verify_registered_target!
+        let inside_exe = write_immutable_script(&workdir, "inside-ship", "#!/usr/bin/env python3\n");
+        fstore.register_fenced_target("branch:r7-inside", &inside_exe, &[]).unwrap();
+        assert!(
+            fstore.verify_registered_target("branch:r7-inside", &[inside_exe.to_string_lossy().to_string()], &workdir).is_err(),
+            "executable inside effect workdir MUST be refused before execution"
+        );
+
+        // Register a valid immutable target outside workdir, then TAMPER with its bytes on disk!
+        let tampered_flag = workdir.join("tampered_ran.txt");
+        let exe = write_atomic_target_script(&bin_dir, "ship-tamper", "");
+        fstore.register_fenced_target("branch:r7-tamper", &exe, &[]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::write(
+                &exe,
+                format!("#!/usr/bin/env python3\nopen({:?}, 'w').write('leaked')\n", tampered_flag.display().to_string()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        let yaml = format!(
+            r#"
+flow: tamper_guard
+version: 1
+params: [repo, fencing_resource]
+workdir: "{{{{params.repo}}}}"
+nodes:
+  ship:
+    class: effect
+    run: [{}]
+    reconcile: [sh, -c, "true"]
+"#,
+            serde_json::to_string(&exe.to_string_lossy()).unwrap()
+        );
+        let compiled = compile(&yaml).unwrap();
+        let s = start(
+            &mut ledger,
+            &sess,
+            &compiled,
+            json!({"repo": workdir.to_str().unwrap(), "fencing_resource": "branch:r7-tamper"}),
+        )
+        .unwrap();
+        let c = claim(&mut ledger, &sess, &s.instance, "ship").unwrap();
+        match complete(&mut ledger, &sess, &c.token, json!({"ok": true}), &Limits::default()).unwrap() {
+            Completion::Refused { code, .. } => assert_eq!(code, "unregistered_fenced_target"),
+            other => panic!("expected unregistered_fenced_target after byte tampering, got {other:?}"),
+        }
+        assert!(!tampered_flag.exists(), "tampered target script MUST NEVER execute!");
+    }
+
+    // 3. Round 7 P2: interruption DURING `git worktree add` leaves a partial `.staging-<cid>-*`
+    //    directory -> retry cleans it up, prunes, allocates atomically via `git worktree move`,
+    //    and succeeds cleanly without stranding!
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-r7-stage");
+        let compiled = compile(&lead_v3_yaml()).unwrap();
+        let started = start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2})).unwrap();
+        let me = owner("owner-r7-stage");
+        let mut g = ledger.lock().unwrap();
+        expand_map(
+            &mut g,
+            &started.instance,
+            "execute_lanes",
+            Iteration::new(),
+            vec![MapItemSpec {
+                key: "lane-stage".into(),
+                input_digest: digest(&json!(1)),
+                input: json!({"lane_id": "lane-stage"}),
+                write_set: vec!["src/s/**".into()],
+            }],
+            BTreeMap::new(),
+            &me,
+        )
+        .unwrap();
+        let base_sha = String::from_utf8(
+            Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&wt).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let cid = child_instance_id(&started.instance, "execute_lanes", &Iteration::new(), 0, "lane-stage", 0).unwrap();
+        let wt_root = root.join("worktrees");
+        let wt_final = wt_root.join(cid.as_str());
+        // Simulate crash DURING git worktree add: child Started exists, partial .staging-<cid>-99999 exists!
+        let partial_staging = wt_root.join(format!(".staging-{}-99999", cid.as_str()));
+        std::fs::create_dir_all(&partial_staging).unwrap();
+        std::fs::write(partial_staging.join("partial-junk"), "interrupted").unwrap();
+        let p_started: Started = serde_json::from_value(g.log(&started.instance).unwrap().events[0].body.clone()).unwrap();
+        let child_ir = p_started.ir.subflows.get("lane@1").unwrap().clone();
+        let subflow_hash = match &p_started.ir.nodes["execute_lanes"].class {
+            maestro_flow::kernel::ir::Class::Map { subflow_ir_hash, .. } => subflow_ir_hash.clone(),
+            _ => unreachable!(),
+        };
+        let pre_started = Started {
+            flow: "lane@1".into(),
+            ir_hash: subflow_hash,
+            ir: child_ir,
+            params: json!({
+                "item": {"lane_id": "lane-stage"},
+                "item_key": "lane-stage",
+                "parent_repo": wt.to_str().unwrap(),
+                "repo": wt_final.to_str().unwrap(),
+                "child_worktree": wt_final.to_str().unwrap(),
+                "base_sha": base_sha,
+            }),
+            owner: Some(me.clone()),
+            audit: None,
+            parent_ref: Some(maestro_flow::kernel::events::ParentRef {
+                parent_instance: started.instance.to_string(),
+                node: "execute_lanes".into(),
+                iteration: Iteration::new(),
+                map_epoch: 0,
+                item_key: "lane-stage".into(),
+                retry_attempt: 0,
+            }),
+        };
+        g.append(&cid, 0, pre_started.to_event().unwrap()).unwrap();
+        let (recovered_cid, _) =
+            claim_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-stage", None, &me).unwrap();
+        assert_eq!(recovered_cid, cid);
+        assert!(!partial_staging.exists(), "stale partial staging dir must be cleaned up on recovery");
+        assert!(wt_final.is_dir(), "atomic staged allocation must promote final child_worktree");
+    }
+}
+
 
 

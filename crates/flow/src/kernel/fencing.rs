@@ -67,8 +67,10 @@ impl FencingStore {
              );
              CREATE TABLE IF NOT EXISTS registered_targets (
                  resource_id TEXT NOT NULL,
-                 argv_digest TEXT NOT NULL,
-                 PRIMARY KEY (resource_id, argv_digest)
+                 exe_path TEXT NOT NULL,
+                 exe_sha256 TEXT NOT NULL,
+                 args_digest TEXT NOT NULL,
+                 PRIMARY KEY (resource_id, exe_path, exe_sha256, args_digest)
              );
              COMMIT;",
         )
@@ -284,45 +286,167 @@ impl FencingStore {
         Ok(ResourceLockGuard { _file: file })
     }
 
-    /// Deterministic digest of an effect command's exact `argv` vector for pre-execution target registration.
-    pub fn argv_digest(argv: &[String]) -> String {
-        let json = serde_json::to_string(argv).unwrap_or_default();
+    /// Generic shells and script-eval interpreters that can run arbitrary untrusted code from
+    /// arguments or cwd; forbidden as registered fenced target executables.
+    fn is_forbidden_interpreter(path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return true;
+        };
+        let lower = name.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "sh" | "bash"
+                | "zsh"
+                | "dash"
+                | "fish"
+                | "ksh"
+                | "csh"
+                | "tcsh"
+                | "ash"
+                | "python"
+                | "python2"
+                | "python3"
+                | "node"
+                | "nodejs"
+                | "deno"
+                | "bun"
+                | "perl"
+                | "ruby"
+                | "php"
+                | "lua"
+                | "awk"
+                | "gawk"
+                | "mawk"
+                | "nawk"
+                | "env"
+                | "xargs"
+        ) || lower.starts_with("python3.")
+            || lower.starts_with("python2.")
+    }
+
+    /// Validates that `exe_path` is an absolute, non-symlink, read-only, executable regular file
+    /// (not a shell/interpreter) and returns `(canonical_path_string, sha256_of_exact_bytes)`.
+    fn inspect_fenced_executable(exe_path: &Path, forbid_under_cwd: Option<&Path>) -> Result<(String, String), FencingError> {
+        if !exe_path.is_absolute() {
+            return Err(FencingError::Storage(format!(
+                "fenced target executable must be an absolute path (no relative/PATH commands): {}",
+                exe_path.display()
+            )));
+        }
+        let meta = std::fs::symlink_metadata(exe_path)
+            .map_err(|e| FencingError::Storage(format!("fenced target executable metadata failed: {e}")))?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(FencingError::Storage(format!(
+                "fenced target executable must be a regular non-symlink file: {}",
+                exe_path.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode();
+            if (mode & 0o111) == 0 {
+                return Err(FencingError::Storage(format!(
+                    "fenced target executable is not executable (mode {:o}): {}",
+                    mode & 0o777,
+                    exe_path.display()
+                )));
+            }
+            if (mode & 0o222) != 0 {
+                return Err(FencingError::Storage(format!(
+                    "fenced target executable must be read-only (mode {:o} has write bits): {}",
+                    mode & 0o777,
+                    exe_path.display()
+                )));
+            }
+        }
+        if Self::is_forbidden_interpreter(exe_path) {
+            return Err(FencingError::Storage(format!(
+                "generic shell/interpreter forbidden as registered fenced target: {}",
+                exe_path.display()
+            )));
+        }
+        let canon_exe = std::fs::canonicalize(exe_path)
+            .map_err(|e| FencingError::Storage(format!("canonicalize fenced target failed: {e}")))?;
+        if Self::is_forbidden_interpreter(&canon_exe) {
+            return Err(FencingError::Storage(format!(
+                "fenced target resolves to forbidden shell/interpreter: {}",
+                canon_exe.display()
+            )));
+        }
+        if let Some(cwd) = forbid_under_cwd {
+            let canon_cwd = std::fs::canonicalize(cwd)
+                .map_err(|e| FencingError::Storage(format!("canonicalize effect cwd failed: {e}")))?;
+            if canon_exe.starts_with(&canon_cwd) {
+                return Err(FencingError::Storage(format!(
+                    "fenced target executable {} must reside outside effect workdir {}",
+                    canon_exe.display(),
+                    canon_cwd.display()
+                )));
+            }
+        }
+        let bytes = std::fs::read(&canon_exe)
+            .map_err(|e| FencingError::Storage(format!("read fenced target bytes failed: {e}")))?;
+        Ok((canon_exe.to_string_lossy().to_string(), line_hash(&bytes)))
+    }
+
+    /// Deterministic digest of an effect target's argument tail (`argv[1..]`).
+    pub fn args_digest(args: &[String]) -> String {
+        let json = serde_json::to_string(args).unwrap_or_default();
         line_hash(json.as_bytes())
     }
 
-    /// Registers an attested fenced target command (`argv` digest) for `resource_id`, certifying
-    /// that this command enforces target-side atomic epoch consumption (`granted_epoch == epoch &&
-    /// written_epoch < epoch`) inside its own mutation transaction.
-    pub fn register_fenced_target(&self, resource_id: &str, argv: &[String]) -> Result<String, FencingError> {
-        if resource_id.is_empty() || argv.is_empty() {
-            return Err(FencingError::Storage("resource_id and argv must be non-empty".into()));
+    /// Registers a content-addressed, read-only, non-interpreter fenced target executable and its
+    /// exact argument list for `resource_id`, binding the SHA-256 of the executable's bytes on disk.
+    pub fn register_fenced_target(
+        &self,
+        resource_id: &str,
+        exe_path: &Path,
+        args: &[String],
+    ) -> Result<String, FencingError> {
+        if resource_id.is_empty() {
+            return Err(FencingError::Storage("resource_id must be non-empty".into()));
         }
-        let digest = Self::argv_digest(argv);
+        let (canon_exe, exe_sha256) = Self::inspect_fenced_executable(exe_path, None)?;
+        let args_digest = Self::args_digest(args);
         let conn = self.connect()?;
         conn.execute(
-            "INSERT OR IGNORE INTO registered_targets (resource_id, argv_digest) VALUES (?1, ?2)",
-            params![resource_id, digest],
+            "INSERT OR IGNORE INTO registered_targets (resource_id, exe_path, exe_sha256, args_digest)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![resource_id, canon_exe, exe_sha256, args_digest],
         )
         .map_err(|e| FencingError::Storage(format!("register fenced target: {e}")))?;
-        Ok(digest)
+        Ok(exe_sha256)
     }
 
-    /// Pre-execution target contract check: refuses any effect command whose exact `argv` digest
-    /// has NOT been registered as a fenced target for `resource_id` BEFORE spawning the subprocess.
-    pub fn verify_registered_target(&self, resource_id: &str, argv: &[String]) -> Result<(), FencingError> {
-        let digest = Self::argv_digest(argv);
+    /// Pre-execution content-addressed target check: verifies `argv[0]` is an absolute, non-symlink,
+    /// read-only, non-interpreter executable residing OUTSIDE `cwd`, re-hashes its exact bytes on
+    /// disk right before execution, and confirms `(resource_id, canon_exe, exe_sha256, args_digest)`
+    /// is registered in `FencingStore`.
+    pub fn verify_registered_target(
+        &self,
+        resource_id: &str,
+        argv: &[String],
+        cwd: &Path,
+    ) -> Result<(), FencingError> {
+        let Some((exe, rest)) = argv.split_first() else {
+            return Err(FencingError::Storage("empty effect argv".into()));
+        };
+        let (canon_exe, current_sha256) = Self::inspect_fenced_executable(Path::new(exe), Some(cwd))?;
+        let args_digest = Self::args_digest(rest);
         let conn = self.connect()?;
         let found: Option<i64> = conn
             .query_row(
-                "SELECT 1 FROM registered_targets WHERE resource_id = ?1 AND argv_digest = ?2",
-                params![resource_id, digest],
+                "SELECT 1 FROM registered_targets
+                 WHERE resource_id = ?1 AND exe_path = ?2 AND exe_sha256 = ?3 AND args_digest = ?4",
+                params![resource_id, canon_exe, current_sha256, args_digest],
                 |r| r.get(0),
             )
             .optional()
             .map_err(|e| FencingError::Storage(format!("verify registered target: {e}")))?;
         if found.is_none() {
             return Err(FencingError::Storage(format!(
-                "effect argv ({digest}) is not a registered fenced target for resource {resource_id:?}; refusing to execute unfenced command"
+                "effect executable {canon_exe:?} (sha256={current_sha256}, args={args_digest}) is not registered for resource {resource_id:?}; refusing to execute"
             )));
         }
         Ok(())
