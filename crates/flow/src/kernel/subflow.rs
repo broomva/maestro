@@ -647,17 +647,59 @@ pub fn claim_map_item(
         .clone();
 
     // Crash Point B check: if deterministic child log ALREADY exists with matching parent_ref and
-    // child_ir_hash, do NOT spawn a duplicate — verify any allocated child_worktree is authentic
-    // and append the missing parent SubflowStarted!
+    // child_ir_hash, do NOT spawn a duplicate — verify (or finish allocating after crash between
+    // child Started and git worktree add) its worktree against the pinned base_sha + cleanliness,
+    // then append the missing parent SubflowStarted!
     let child_exists = guard.log(&child_id).is_ok();
     if child_exists {
         let existing_log = guard.log(&child_id).map_err(|e| SubflowError::Storage(e.to_string()))?;
         let existing_started = pinned(&existing_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
-        if let (Some(wt_s), Some(parent_s)) = (
-            existing_started.params.get("child_worktree").and_then(Value::as_str),
-            existing_started.params.get("parent_repo").and_then(Value::as_str),
-        ) {
-            verify_allocated_child_worktree(Path::new(wt_s), Path::new(parent_s), None)?;
+        if let Some(wt_s) = existing_started.params.get("child_worktree").and_then(Value::as_str) {
+            let parent_s = existing_started
+                .params
+                .get("parent_repo")
+                .and_then(Value::as_str)
+                .ok_or_else(|| SubflowError::Storage("child Started missing parent_repo for child_worktree".into()))?;
+            let base_sha = existing_started
+                .params
+                .get("base_sha")
+                .and_then(Value::as_str)
+                .ok_or_else(|| SubflowError::Storage("child Started missing pinned base_sha for child_worktree".into()))?;
+            let child_wt = Path::new(wt_s);
+            let parent_repo = Path::new(parent_s);
+            match std::fs::symlink_metadata(child_wt) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Crash occurred after child Started was appended and before git worktree add.
+                    let wt_root = guard.root_path().join("worktrees");
+                    if let Ok(meta) = std::fs::symlink_metadata(&wt_root)
+                        && meta.file_type().is_symlink()
+                    {
+                        return Err(SubflowError::Storage(format!(
+                            "refusing symlinked worktrees root: {}",
+                            wt_root.display()
+                        )));
+                    }
+                    std::fs::create_dir_all(&wt_root).map_err(|e| SubflowError::Storage(e.to_string()))?;
+                    let add = Command::new("git")
+                        .args(["worktree", "add", "--detach", "-q"])
+                        .arg(child_wt)
+                        .arg(base_sha)
+                        .current_dir(parent_repo)
+                        .output()
+                        .map_err(|e| SubflowError::Storage(format!("git worktree add failed: {e}")))?;
+                    if !add.status.success() {
+                        return Err(SubflowError::Storage(format!(
+                            "git worktree add failed for {}: {}",
+                            child_wt.display(),
+                            String::from_utf8_lossy(&add.stderr).trim()
+                        )));
+                    }
+                }
+                Err(e) => return Err(SubflowError::Storage(format!("child worktree metadata failed: {e}"))),
+                Ok(_) => {}
+            }
+            // Always verify identity, non-symlink, repo common-dir, exact pinned base_sha HEAD, and cleanliness!
+            verify_allocated_child_worktree(child_wt, parent_repo, Some(base_sha))?;
         }
     } else {
         let mut child_params = Map::new();
@@ -669,10 +711,11 @@ pub fn claim_map_item(
             }
         }
         // Always strip caller-supplied `base_sha` / `child_worktree`, pin real initial git HEAD,
-        // and allocate a UNIQUE per-child detached git worktree under `<flows_root>/worktrees/<child_id>`
-        // so no two children or replacements can ever share a checkout (D-E2 isolation!).
+        // refuse any pre-existing path at `<flows_root>/worktrees/<child_id>`, write child Started
+        // FIRST (crash-recoverable without stranding), then allocate and verify the detached worktree.
         child_params.remove("base_sha");
         child_params.remove("child_worktree");
+        let mut pending_wt: Option<(PathBuf, PathBuf, String)> = None;
         if let Some(raw_wd) = child_ir.workdir.as_deref() {
             let wd_val = Value::Object(child_params.clone());
             let base_wd = PathBuf::from(resolve_simple_workdir(raw_wd, &wd_val));
@@ -708,26 +751,12 @@ pub fn claim_map_item(
                         child_wt.display()
                     )));
                 }
-                let add = Command::new("git")
-                    .args(["worktree", "add", "--detach", "-q"])
-                    .arg(&child_wt)
-                    .arg(&sha)
-                    .current_dir(&base_wd)
-                    .output()
-                    .map_err(|e| SubflowError::Storage(format!("git worktree add failed: {e}")))?;
-                if !add.status.success() {
-                    return Err(SubflowError::Storage(format!(
-                        "git worktree add failed for {}: {}",
-                        child_wt.display(),
-                        String::from_utf8_lossy(&add.stderr).trim()
-                    )));
-                }
-                verify_allocated_child_worktree(&child_wt, &base_wd, Some(&sha))?;
                 let child_wt_str = child_wt.to_string_lossy().to_string();
                 child_params.insert("parent_repo".to_string(), Value::String(base_wd.to_string_lossy().to_string()));
                 child_params.insert("repo".to_string(), Value::String(child_wt_str.clone()));
                 child_params.insert("child_worktree".to_string(), Value::String(child_wt_str));
-                child_params.insert("base_sha".to_string(), Value::String(sha));
+                child_params.insert("base_sha".to_string(), Value::String(sha.clone()));
+                pending_wt = Some((base_wd, child_wt, sha));
             }
         }
         let child_started = Started {
@@ -749,6 +778,23 @@ pub fn claim_map_item(
         let ev = child_started.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
         guard.append(&child_id, 0, ev)
             .map_err(|e| SubflowError::Storage(e.to_string()))?;
+        if let Some((base_wd, child_wt, sha)) = pending_wt {
+            let add = Command::new("git")
+                .args(["worktree", "add", "--detach", "-q"])
+                .arg(&child_wt)
+                .arg(&sha)
+                .current_dir(&base_wd)
+                .output()
+                .map_err(|e| SubflowError::Storage(format!("git worktree add failed: {e}")))?;
+            if !add.status.success() {
+                return Err(SubflowError::Storage(format!(
+                    "git worktree add failed for {}: {}",
+                    child_wt.display(),
+                    String::from_utf8_lossy(&add.stderr).trim()
+                )));
+            }
+            verify_allocated_child_worktree(&child_wt, &base_wd, Some(&sha))?;
+        }
     }
 
     let parent_ev = SubflowStarted {
@@ -1037,10 +1083,28 @@ pub fn reconcile_superseded_effect(
 fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, SubflowError> {
     let mut recorded_pids = BTreeSet::new();
     for ev in &child_log.events {
-        if ev.kind == Claimed::KIND
-            && let Ok(c) = serde_json::from_value::<Claimed>(ev.body.clone())
-            && let Some(audit) = c.audit
-        {
+        if ev.kind == Claimed::KIND {
+            let c = serde_json::from_value::<Claimed>(ev.body.clone()).map_err(|e| {
+                SubflowError::QuiescenceRefused {
+                    detail: format!("malformed Claimed event in child {}: {e}", child_log.instance),
+                }
+            })?;
+            let Some(audit) = c.audit else {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "Claimed event (node={}, attempt={}) in child {} is missing worker process audit PID; cannot prove worker termination",
+                        c.node, c.attempt, child_log.instance
+                    ),
+                });
+            };
+            if audit.process.pid == 0 {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "Claimed event (node={}, attempt={}) in child {} has invalid zero worker PID",
+                        c.node, c.attempt, child_log.instance
+                    ),
+                });
+            }
             recorded_pids.insert(audit.process.pid);
         }
     }

@@ -65,6 +65,11 @@ impl FencingStore {
                  last_payload_digest TEXT,
                  last_result_json TEXT
              );
+             CREATE TABLE IF NOT EXISTS registered_targets (
+                 resource_id TEXT NOT NULL,
+                 argv_digest TEXT NOT NULL,
+                 PRIMARY KEY (resource_id, argv_digest)
+             );
              COMMIT;",
         )
         .map_err(|e| FencingError::Storage(format!("init fencing schema: {e}")))?;
@@ -277,6 +282,50 @@ impl FencingStore {
         flock(&file, FlockOperation::LockExclusive)
             .map_err(|e| FencingError::Storage(format!("resource flock failed: {e}")))?;
         Ok(ResourceLockGuard { _file: file })
+    }
+
+    /// Deterministic digest of an effect command's exact `argv` vector for pre-execution target registration.
+    pub fn argv_digest(argv: &[String]) -> String {
+        let json = serde_json::to_string(argv).unwrap_or_default();
+        line_hash(json.as_bytes())
+    }
+
+    /// Registers an attested fenced target command (`argv` digest) for `resource_id`, certifying
+    /// that this command enforces target-side atomic epoch consumption (`granted_epoch == epoch &&
+    /// written_epoch < epoch`) inside its own mutation transaction.
+    pub fn register_fenced_target(&self, resource_id: &str, argv: &[String]) -> Result<String, FencingError> {
+        if resource_id.is_empty() || argv.is_empty() {
+            return Err(FencingError::Storage("resource_id and argv must be non-empty".into()));
+        }
+        let digest = Self::argv_digest(argv);
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT OR IGNORE INTO registered_targets (resource_id, argv_digest) VALUES (?1, ?2)",
+            params![resource_id, digest],
+        )
+        .map_err(|e| FencingError::Storage(format!("register fenced target: {e}")))?;
+        Ok(digest)
+    }
+
+    /// Pre-execution target contract check: refuses any effect command whose exact `argv` digest
+    /// has NOT been registered as a fenced target for `resource_id` BEFORE spawning the subprocess.
+    pub fn verify_registered_target(&self, resource_id: &str, argv: &[String]) -> Result<(), FencingError> {
+        let digest = Self::argv_digest(argv);
+        let conn = self.connect()?;
+        let found: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM registered_targets WHERE resource_id = ?1 AND argv_digest = ?2",
+                params![resource_id, digest],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| FencingError::Storage(format!("verify registered target: {e}")))?;
+        if found.is_none() {
+            return Err(FencingError::Storage(format!(
+                "effect argv ({digest}) is not a registered fenced target for resource {resource_id:?}; refusing to execute unfenced command"
+            )));
+        }
+        Ok(())
     }
 
     /// Pre-mutation fencing check: verifies `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`

@@ -100,6 +100,16 @@ fn owner(id: &str) -> Owner {
 
 fn verified_owner(id: &str) -> VerifiedSession {
     let s: SessionRef = format!("t3:local/{id}").parse().unwrap();
+    VerifiedSession::new(s, "/tmp", Some(Harness::Codex), None, vec![])
+        .with_owner_marker(id)
+        .with_audit(Audit {
+            identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
+            process: ProcessFacts { pid: std::process::id(), ..Default::default() },
+        })
+}
+
+fn verified_owner_unaudited(id: &str) -> VerifiedSession {
+    let s: SessionRef = format!("t3:local/{id}").parse().unwrap();
     VerifiedSession::new(s, "/tmp", Some(Harness::Codex), None, vec![]).with_owner_marker(id)
 }
 
@@ -971,6 +981,10 @@ nodes:
         serde_json::to_string(&target_cmd).unwrap()
     );
     let compiled = compile(&flow_yaml).unwrap();
+    let fstore_reg = FencingStore::open(root.join("fencing_epochs.sqlite")).unwrap();
+    fstore_reg
+        .register_fenced_target("branch:main", &["sh".into(), "-c".into(), target_cmd.clone()])
+        .unwrap();
     let s1 = start(
         &mut ledger,
         &sess,
@@ -983,8 +997,11 @@ nodes:
     assert!(matches!(comp, Completion::Completed { .. }), "target-atomic fenced effect must complete: {comp:?}");
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "1", "first effect received monotonic epoch 1");
 
-    // 2. A fenced effect whose target does NOT atomically consume MAESTRO_FENCING_EPOCH MUST be
+    // 2. A registered fenced effect whose target fails to consume MAESTRO_FENCING_EPOCH MUST be
     //    refused fail-closed with `target_did_not_consume_epoch`!
+    fstore_reg
+        .register_fenced_target("branch:unconsumed", &["sh".into(), "-c".into(), "true".into()])
+        .unwrap();
     let flow_unconsumed_yaml = r#"
 flow: fenced_unconsumed
 version: 1
@@ -1013,6 +1030,13 @@ nodes:
     // Mid-flight stale epoch rejection: another worker advances granted_epoch in fencing_epochs.sqlite
     // before the effect finishes -> complete() MUST refuse with `stale_fencing_epoch`!
     let db_path = root.join("fencing_epochs.sqlite");
+    let stale_py = format!(
+        "import sqlite3; c=sqlite3.connect(r'{}'); c.execute(\"UPDATE resource_epochs SET granted_epoch = granted_epoch + 1 WHERE resource_id = 'branch:stale'\"); c.commit()",
+        db_path.display()
+    );
+    fstore_reg
+        .register_fenced_target("branch:stale", &["python3".into(), "-c".into(), stale_py.clone()])
+        .unwrap();
     let flow_stale_yaml = format!(
         r#"
 flow: fenced_stale
@@ -1022,10 +1046,10 @@ workdir: "{{{{params.repo}}}}"
 nodes:
   ship:
     class: effect
-    run: [python3, -c, "import sqlite3; c=sqlite3.connect(r'{}'); c.execute(\"UPDATE resource_epochs SET granted_epoch = granted_epoch + 1 WHERE resource_id = 'branch:stale'\"); c.commit()"]
+    run: [python3, -c, {}]
     reconcile: [sh, -c, "true"]
 "#,
-        db_path.display()
+        serde_json::to_string(&stale_py).unwrap()
     );
     let compiled_stale = compile(&flow_stale_yaml).unwrap();
     let s2 = start(
@@ -1229,7 +1253,15 @@ fn t15_performer_union_includes_failed_attempt_when_retry_succeeds() {
             performer: Some(p_claude),
             tool_use_id: None,
             cancel_at: None,
-            audit: None,
+            audit: Some({
+                let mut dead = Command::new("true").spawn().unwrap();
+                let dead_pid = dead.id();
+                let _ = dead.wait();
+                Audit {
+                    identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
+                    process: ProcessFacts { pid: dead_pid, ..Default::default() },
+                }
+            }),
             owner_epoch: Some(0),
         };
         g.append(&cid1, c1_seq, c1_claim.to_event().unwrap()).unwrap();
@@ -1328,6 +1360,10 @@ fn t17_stale_fencing_epoch_blocks_subprocess_before_target_mutation() {
 
     // Stale worker bound to fencing_epoch=1 tries to run a Class::Effect that would write `mutated.txt`.
     let target = workdir.join("mutated.txt");
+    let stale_cmd = format!(r#"printf mutated > "{}""#, target.display());
+    fstore
+        .register_fenced_target("branch:protected", &["sh".into(), "-c".into(), stale_cmd.clone()])
+        .unwrap();
     let yaml = format!(
         r#"
 flow: stale_target_guard
@@ -1337,10 +1373,10 @@ workdir: "{{{{params.repo}}}}"
 nodes:
   ship:
     class: effect
-    run: [sh, -c, 'printf mutated > "{}"']
+    run: [sh, -c, {}]
     reconcile: [sh, -c, "true"]
 "#,
-        target.display()
+        serde_json::to_string(&stale_cmd).unwrap()
     );
     let compiled = compile(&yaml).unwrap();
     let s = start(
@@ -1565,6 +1601,10 @@ nodes:
         serde_json::to_string(&target_cmd).unwrap()
     );
     let compiled = compile(&yaml).unwrap();
+    FencingStore::open(&db_path)
+        .unwrap()
+        .register_fenced_target("branch:serialized", &["sh".into(), "-c".into(), target_cmd.clone()])
+        .unwrap();
     let s = start(
         &mut ledger,
         &sess,
@@ -1991,17 +2031,317 @@ subflows:
         .unwrap();
         let cm = claim(&mut ledger, &sess, &started.instance, "run_map").unwrap();
         let cid = InstanceId::new(cm.inputs.get("__map_child_instance").unwrap()).unwrap();
+        let child_wt = {
+            let g = ledger.lock().unwrap();
+            let s: Started = serde_json::from_value(g.log(&cid).unwrap().events[0].body.clone()).unwrap();
+            PathBuf::from(s.params.get("child_worktree").and_then(|v| v.as_str()).unwrap())
+        };
         let ce = claim(&mut ledger, &sess, &cid, "do_effect").unwrap();
         let res = complete(&mut ledger, &sess, &ce.token, json!({"ok": true}), &Limits::default()).unwrap();
         match res {
             Completion::Refused { code, .. } => {
                 assert_eq!(
-                    code, "target_did_not_consume_epoch",
-                    "child effect without fencing_resource or with require_target_fencing=false MUST fail closed on missing target atomic consumption"
+                    code, "unfenced_child_effect",
+                    "child effect without fencing_resource MUST be refused BEFORE executing command"
                 );
             }
-            other => panic!("expected target_did_not_consume_epoch refusal on unfenced child effect, got {other:?}"),
+            other => panic!("expected unfenced_child_effect refusal on unfenced child effect, got {other:?}"),
         }
+        assert!(
+            !child_wt.join("unfenced.txt").exists(),
+            "unfenced child effect command MUST NEVER execute before refusal!"
+        );
     }
 }
+
+#[test]
+fn t24_round6_audit_prefencing_and_crash_recovery() {
+    // 1. Round 6 P1 #1a: child claim with audit: None MUST be refused at claim time!
+    //    And Round 6 P1 #1b: a child log containing ANY Claimed event with audit: None (even
+    //    after an earlier dead audited claimant) MUST be refused by quiesce_subflow & reconcile!
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-r6-audit");
+        let unaudited = verified_owner_unaudited("owner-r6-audit");
+        let compiled = compile(&lead_v3_yaml()).unwrap();
+        let started = start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2})).unwrap();
+        let cp = claim(&mut ledger, &sess, &started.instance, "plan_waves").unwrap();
+        complete(
+            &mut ledger,
+            &sess,
+            &cp.token,
+            json!({"lanes": [{"lane_id": "lane-a", "write_set": ["src/a/**"]}]}),
+            &Limits::default(),
+        )
+        .unwrap();
+        let cm = claim(&mut ledger, &sess, &started.instance, "execute_lanes").unwrap();
+        let cid = InstanceId::new(cm.inputs.get("__map_child_instance").unwrap()).unwrap();
+
+        // Unaudited session MUST be refused when claiming inside a child subflow!
+        let err = claim(&mut ledger, &unaudited, &cid, "work").unwrap_err();
+        assert_eq!(err.code(), "missing_worker_audit", "child claim without audit PID must fail closed");
+
+        // Hand-crafted child log with dead attempt 1 + unaudited attempt 2 -> quiescence MUST refuse!
+        let mut dead = Command::new("true").spawn().unwrap();
+        let dead_pid = dead.id();
+        let _ = dead.wait();
+        let me = owner("owner-r6-audit");
+        let mut g = ledger.lock().unwrap();
+        let ep = parent_owner_epoch(&g.log(&started.instance).unwrap());
+        let c1 = Claimed {
+            node: "work".into(),
+            iteration: Iteration::new(),
+            attempt: 1,
+            inputs: BTreeMap::new(),
+            token_sha256: "sha256:a1".into(),
+            lease_until: "2099-01-01T00:00:00Z".into(),
+            cancel_at: None,
+            performer: None,
+            owner_epoch: Some(ep),
+            tool_use_id: None,
+            audit: Some(Audit {
+                identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
+                process: ProcessFacts { pid: dead_pid, ..Default::default() },
+            }),
+        };
+        let c2 = Claimed {
+            node: "work".into(),
+            iteration: Iteration::new(),
+            attempt: 2,
+            inputs: BTreeMap::new(),
+            token_sha256: "sha256:a2".into(),
+            lease_until: "2099-01-01T00:00:00Z".into(),
+            cancel_at: None,
+            performer: None,
+            owner_epoch: Some(ep),
+            tool_use_id: None,
+            audit: None,
+        };
+        for c in [c1, c2] {
+            let seq = g.log(&cid).unwrap().seq();
+            g.append(&cid, seq, c.to_event().unwrap()).unwrap();
+        }
+        finalize_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, Some("fail"), BTreeMap::new(), &me)
+            .unwrap();
+        let removed_rcpt = remove_child_worktree_receipt(&mut g, &cid);
+        assert_eq!(
+            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &removed_rcpt, &me)
+                .unwrap_err()
+                .code(),
+            "quiescence_refused",
+            "unaudited Claimed event must fail closed on quiescence even after worktree removal"
+        );
+    }
+
+    // 2. Round 6 P1 #2: child effect WITH fencing_resource pointing to an UNREGISTERED arbitrary
+    //    shell command MUST be refused BEFORE executing the command (zero file written!).
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-r6-unreg");
+        let child_eff_yaml = r#"
+flow: child_unreg
+version: 1
+params: [repo, item_key, fencing_resource]
+workdir: "{{params.repo}}"
+nodes:
+  do_effect:
+    class: effect
+    run: ["sh", "-c", "echo leaked > unregistered.txt"]
+    reconcile: ["sh", "-c", "true"]
+"#;
+        let parent_yaml = format!(
+            r#"
+flow: parent_unreg
+version: 1
+params: [repo, max_parallel, fencing_resource]
+workdir: "{{{{params.repo}}}}"
+nodes:
+  plan:
+    class: work
+    verify: ["sh", "-c", "true"]
+  run_map:
+    class: map
+    needs: [plan]
+    over: ".nodes.plan.outputs.lanes"
+    uses: child_unreg@1
+    item_key: ".lane_id"
+    max_items: 4
+    max_concurrency_param: max_parallel
+    ready_when: disjoint_writes
+subflows:
+  child_unreg@1: |
+{}
+"#,
+            child_eff_yaml.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
+        );
+        let compiled = compile(&parent_yaml).unwrap();
+        let started = start(
+            &mut ledger,
+            &sess,
+            &compiled,
+            json!({"repo": wt.to_str().unwrap(), "max_parallel": 2, "fencing_resource": "branch:unreg"}),
+        )
+        .unwrap();
+        let cp = claim(&mut ledger, &sess, &started.instance, "plan").unwrap();
+        complete(
+            &mut ledger,
+            &sess,
+            &cp.token,
+            json!({"lanes": [{"lane_id": "lane-a", "write_set": ["unregistered.txt"]}]}),
+            &Limits::default(),
+        )
+        .unwrap();
+        let cm = claim(&mut ledger, &sess, &started.instance, "run_map").unwrap();
+        let cid = InstanceId::new(cm.inputs.get("__map_child_instance").unwrap()).unwrap();
+        let child_wt = {
+            let g = ledger.lock().unwrap();
+            let s: Started = serde_json::from_value(g.log(&cid).unwrap().events[0].body.clone()).unwrap();
+            PathBuf::from(s.params.get("child_worktree").and_then(|v| v.as_str()).unwrap())
+        };
+        let ce = claim(&mut ledger, &sess, &cid, "do_effect").unwrap();
+        let res = complete(&mut ledger, &sess, &ce.token, json!({"ok": true}), &Limits::default()).unwrap();
+        match res {
+            Completion::Refused { code, .. } => {
+                assert_eq!(code, "unregistered_fenced_target");
+            }
+            other => panic!("expected unregistered_fenced_target refusal, got {other:?}"),
+        }
+        assert!(
+            !child_wt.join("unregistered.txt").exists(),
+            "unregistered effect command MUST NOT execute before refusal!"
+        );
+    }
+
+    // 3. Round 6 P2 #1 & #2: Crash Point B retry recovers cleanly if worktree wasn't created yet
+    //    AND refuses if an existing worktree was dirtied or moved off pinned base_sha!
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-r6-crash");
+        let compiled = compile(&lead_v3_yaml()).unwrap();
+        let started = start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2})).unwrap();
+        let me = owner("owner-r6-crash");
+        let mut g = ledger.lock().unwrap();
+        expand_map(
+            &mut g,
+            &started.instance,
+            "execute_lanes",
+            Iteration::new(),
+            vec![
+                MapItemSpec {
+                    key: "lane-recover".into(),
+                    input_digest: digest(&json!(1)),
+                    input: json!({"lane_id": "lane-recover"}),
+                    write_set: vec!["src/r/**".into()],
+                },
+                MapItemSpec {
+                    key: "lane-dirty".into(),
+                    input_digest: digest(&json!(2)),
+                    input: json!({"lane_id": "lane-dirty"}),
+                    write_set: vec!["src/d/**".into()],
+                },
+            ],
+            BTreeMap::new(),
+            &me,
+        )
+        .unwrap();
+
+        // Simulate crash after child Started append, before worktree creation & parent SubflowStarted:
+        let (cid_r, _) = claim_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-recover", None, &me).unwrap();
+        let wt_r = {
+            let s: Started = serde_json::from_value(g.log(&cid_r).unwrap().events[0].body.clone()).unwrap();
+            PathBuf::from(s.params.get("child_worktree").and_then(|v| v.as_str()).unwrap())
+        };
+        // Remove the worktree and truncate parent's SubflowStarted by testing on lane-dirty via direct Started:
+        assert!(wt_r.is_dir());
+
+        // Now directly test Crash Point B with dirty worktree on lane-dirty:
+        let base_sha = String::from_utf8(
+            Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&wt).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let cid_d = child_instance_id(&started.instance, "execute_lanes", &Iteration::new(), 0, "lane-dirty", 0).unwrap();
+        let wt_d = root.join("worktrees").join(cid_d.as_str());
+        let p_started: Started = serde_json::from_value(g.log(&started.instance).unwrap().events[0].body.clone()).unwrap();
+        let child_ir = p_started.ir.subflows.get("lane@1").unwrap().clone();
+        let subflow_hash = {
+            let sr: Started = serde_json::from_value(g.log(&cid_r).unwrap().events[0].body.clone()).unwrap();
+            sr.ir_hash
+        };
+        let pre_started = Started {
+            flow: "lane@1".into(),
+            ir_hash: subflow_hash,
+            ir: child_ir,
+            params: json!({
+                "item": {"lane_id": "lane-dirty"},
+                "item_key": "lane-dirty",
+                "parent_repo": wt.to_str().unwrap(),
+                "repo": wt_d.to_str().unwrap(),
+                "child_worktree": wt_d.to_str().unwrap(),
+                "base_sha": base_sha,
+            }),
+            owner: Some(me.clone()),
+            audit: None,
+            parent_ref: Some(maestro_flow::kernel::events::ParentRef {
+                parent_instance: started.instance.to_string(),
+                node: "execute_lanes".into(),
+                iteration: Iteration::new(),
+                map_epoch: 0,
+                item_key: "lane-dirty".into(),
+                retry_attempt: 0,
+            }),
+        };
+        g.append(&cid_d, 0, pre_started.to_event().unwrap()).unwrap();
+        // First: Crash-recovery with missing worktree creates it cleanly!
+        // Create and dirty wt_d BEFORE retry -> Crash Point B retry MUST refuse dirty worktree!
+        assert!(
+            Command::new("git")
+                .args(["worktree", "add", "--detach", "-q"])
+                .arg(&wt_d)
+                .arg(&base_sha)
+                .current_dir(&wt)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(wt_d.join("tampered.txt"), "dirty").unwrap();
+        let dirty_err = claim_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-dirty", None, &me)
+            .unwrap_err();
+        assert!(
+            dirty_err.to_string().contains("not clean"),
+            "Crash Point B retry MUST reject dirty child worktree, got: {dirty_err}"
+        );
+        // Remove dirty worktree completely (simulating crash between child Started and worktree add) -> retry recovers!
+        assert!(
+            Command::new("git")
+                .args(["worktree", "remove", "--force"])
+                .arg(&wt_d)
+                .current_dir(&wt)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (recovered_cid, _) =
+            claim_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-dirty", None, &me).unwrap();
+        assert_eq!(recovered_cid, cid_d);
+        assert!(wt_d.is_dir(), "crash between child Started and git worktree add must recover cleanly");
+    }
+}
+
 

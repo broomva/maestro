@@ -773,6 +773,16 @@ pub fn claim_as(
         claim_inputs.insert("__map_item_key".to_string(), ik);
         claim_inputs.insert("__map_child_instance".to_string(), cid);
     }
+    if started.parent_ref.is_some()
+        && !session.audit().is_some_and(|a| a.process.pid > 0)
+    {
+        return Err(Refusal::ChildFenced {
+            child: instance.to_string(),
+            code: "missing_worker_audit",
+            detail: "child subflow claim requires an attested worker process PID in session.audit()".into(),
+        }
+        .into());
+    }
     let claimed = Claimed {
         node: node.to_string(),
         iteration: enabled.iteration.clone(),
@@ -1281,11 +1291,27 @@ pub fn complete_as(
             .get("fencing_resource")
             .and_then(Value::as_str)
             .is_some_and(|s| !s.is_empty());
-        // ALL IR v10 child subflow effects AND any effect declaring `fencing_resource` MUST
-        // enforce target-side atomic epoch consumption (no opt-out, no post-hoc controller commit).
-        // Legacy IR v3-v9 non-child effects without `fencing_resource` retain pre-v10 behavior.
+        // ALL IR v10 child subflow effects MUST declare an explicit `fencing_resource` AND execute
+        // a registered target-atomic fenced command (verified BEFORE exec::run); otherwise refuse
+        // before recording EffectStarted or spawning any subprocess!
+        if is_child_subflow && !explicit_fencing {
+            return refuse(
+                &mut guard,
+                &held,
+                (
+                    "unfenced_child_effect",
+                    "child subflow Class::Effect requires explicit fencing_resource and a registered target-atomic fenced command".to_string(),
+                ),
+                &[],
+            );
+        }
         if is_child_subflow || explicit_fencing {
             let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
+            let fence_store = FencingStore::open(&fence_db)
+                .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
+            if let Err(e) = fence_store.verify_registered_target(&fence_resource, &plan.argv) {
+                return refuse(&mut guard, &held, ("unregistered_fenced_target", e.to_string()), &[]);
+            }
             let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
             let op_id = format!("{}:{}:{}", instance.as_str(), held.rec.node, held.rec.attempt);
             effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id));
@@ -1566,6 +1592,13 @@ fn run_fenced_effect(
     let rlock = fence_store
         .acquire_resource_lock(&fence_resource)
         .map_err(|e| KernelError::Encode(format!("fencing lock failed: {e}")))?;
+    if let Err(e) = fence_store.verify_registered_target(&fence_resource, &plan.argv) {
+        drop(rlock);
+        return Ok((
+            Ran::Failed { code: "unregistered_fenced_target", detail: e.to_string(), stderr: Vec::new() },
+            None,
+        ));
+    }
     let epoch = match pinned_epoch {
         Some(ep) => {
             if let Err(e) = fence_store.verify_epoch_current(&fence_resource, ep) {
