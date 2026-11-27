@@ -218,6 +218,11 @@ pub(crate) fn body(cx: &Ctx, lf: &LedgerFile, a: &Ask, landing: Landing, ambiguo
                     bdi { (a.handle()) }
                     @if let Some(at) = &a.asked_at { br; "asked " bdi { (at) } }
                 }
+                @if state == AskState::Open {
+                    @if let Some(route) = cx.route_for(a.origin.as_ref().and_then(|o| o.session.as_deref())) {
+                        (delivery_route(&route))
+                    }
+                }
                 @if answering {
                     div class="mv-sign" {
                         p class="mv-sign-title" { "What you will sign" }
@@ -276,6 +281,74 @@ fn handoff(cx: &Ctx, lf: &LedgerFile, a: &Ask, t: &crate::handoff::AnswerThread)
 
 fn place(a: &Ask) -> &'static str {
     if a.class == Some(AskClass::Idea) { "Paseo · Maestro · Initiatives" } else { "Paseo · Maestro · Decisions" }
+}
+
+fn fallback_effect(fallback: Option<&str>) -> Markup {
+    html! {
+        @if let Some(fb) = fallback {
+            "Signing writes the ledger and routes triage to fallback thread " span class="bv-code" { bdi { (fb) } } "."
+        } @else {
+            "Signing writes the ledger only; no fallback thread is configured."
+        }
+    }
+}
+
+/// Pre-signature delivery route notice (BRO-4229): shows whether a signed answer can wake the
+/// asking T3 thread directly or why it is unresolved/unroutable before the owner signs.
+fn delivery_route(route: &crate::render::AnswerRoute) -> Markup {
+    use crate::render::AnswerRoute;
+    match route {
+        AnswerRoute::DirectLocal { environment, thread, .. } => html! {
+            p class="mv-route bv-meta" data-delivery-route="direct-local" {
+                "Delivery: T3 thread " span class="bv-code" { bdi { (thread) } }
+                @if let Some(env) = environment {
+                    " on local environment " span class="bv-code" { bdi { (env) } }
+                }
+                "."
+            }
+        },
+        AnswerRoute::UnresolvedT3 { session, reason, fallback } => html! {
+            p class="mv-callout mv-route" data-delivery-route="unresolved" data-tone="warning" {
+                "Unresolved T3 destination: " span class="bv-code" { bdi { (session) } }
+                " (" (reason) "). " (fallback_effect(fallback.as_deref()))
+            }
+        },
+        AnswerRoute::RemoteLinkedUnsupported { session, environment, thread, fallback } => html! {
+            p class="mv-callout mv-route" data-delivery-route="remote-unsupported" data-tone="warning" {
+                "Linked T3 environment not directly routable: " span class="bv-code" { bdi { (session) } }
+                " targets linked environment " span class="bv-code" { bdi { (environment) } }
+                " (thread " span class="bv-code" { bdi { (thread) } }
+                "), and the installed T3 CLI transport sends only to local threads. "
+                (fallback_effect(fallback.as_deref()))
+            }
+        },
+        AnswerRoute::RemoteUnlinked { session, environment, thread, fallback } => html! {
+            p class="mv-callout mv-route" data-delivery-route="remote-unlinked" data-tone="warning" {
+                "Unlinked T3 environment: " span class="bv-code" { bdi { (session) } }
+                " targets environment " span class="bv-code" { bdi { (environment) } }
+                " (thread " span class="bv-code" { bdi { (thread) } }
+                "), which is not linked on this host and will not be routed locally. "
+                (fallback_effect(fallback.as_deref()))
+            }
+        },
+        AnswerRoute::T3RegistryUnavailable { session, reason, fallback } => html! {
+            p class="mv-callout mv-route" data-delivery-route="registry-unavailable" data-tone="warning" {
+                "T3 destination not verified: " span class="bv-code" { bdi { (session) } }
+                " (" (reason) "). " (fallback_effect(fallback.as_deref()))
+            }
+        },
+        AnswerRoute::NonT3OrMissing { origin, fallback } => html! {
+            p class="mv-callout mv-route" data-delivery-route="non-t3" data-tone="warning" {
+                @if let Some(origin) = origin {
+                    "No direct T3 destination: origin " span class="bv-code" { bdi { (origin) } }
+                    " is not a T3 session. "
+                } @else {
+                    "No origin session recorded on this ask. "
+                }
+                (fallback_effect(fallback.as_deref()))
+            }
+        },
+    }
 }
 
 /// Whether this decision takes the owner's answer on this page: `None` where it does not (the

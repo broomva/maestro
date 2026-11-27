@@ -258,7 +258,7 @@ mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_em
 mutate $decision 'filter(|_| a.class != Some(AskClass::Idea) && !a.options.is_empty())' 'filter(|_| a.class != Some(AskClass::Idea))'
 mutate $decision '        @if landing == Landing::Unknown {' '        @if false {'
 mutate $decision '        } @else if state == AskState::Archived {' '        } @else if false {'
-mutate $web 'render_web_with_pending(&store, &validated, at, owner, in_flight)' 'render_web_with_pending(&store, &validated, at, maestro_view::render::Owner::Off(String::new()), in_flight)'
+mutate $web 'render_web_with_route(&store, &validated, at, owner, in_flight, Some(&resolve))' 'render_web_with_route(&store, &validated, at, maestro_view::render::Owner::Off(String::new()), in_flight, Some(&resolve))'
 # The owner's answer (BRO-4042): only the page itself, only a passkey over the very intent, only
 # the hash the owner saw, an undo that holds only inside its window, an edit that reads back.
 pk=crates/store/src/passkey.rs
@@ -313,7 +313,7 @@ mutate $ans '            Stage::Undone => return Ok(r.clone()),' '            St
 mutate $ans '        if now_ms >= r.applies_at_ms {' '        if false {'
 mutate $ans '            _ => return Err("it was already written".into()),' '            _ => {}'
 mutate $ans "        && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));" '        && true;'
-mutate $ans '    if session.and_then(t3_thread_of) == Some(fb) {' '    if false {'
+mutate $ans '    if local_same_as_fallback {' '    if false {'
 mutate $ow "        && !thread.starts_with('-')" ''
 mutate $ans '        let r = m.get_mut(id).filter(|r| r.stage == Stage::Signed)?;' '        let r = m.get_mut(id)?;'
 mutate $ledger '    git(&w.checkout, &["reset", "-q", "--hard"])?;' ''
@@ -3048,6 +3048,23 @@ mutate crates/mcp/src/flows_web.rs '&& done.elapsed() < SHARED_FOR' '&& true'
 mutate crates/view/src/screens/flows_web.rs 'let linked = latest.then(|| kernel_href(&i.flow));' 'let linked = Some(kernel_href(&i.flow));'
 mutate crates/view/src/screens/flows_web.rs 'let own = ledger.unread.iter().find(|u| is_run && u.instance == what);' 'let own = ledger.unread.iter().find(|u| u.instance == what);'
 mutate crates/mcp/src/flows_web.rs 'Work::Node { node, held: true, .. } => Some(node.as_str()),' 'Work::Node { node, .. } => Some(node.as_str()),'
+# Verified T3 destinations for ask filing, pre-signature visibility, and answer delivery (BRO-4229).
+mutate crates/hosts/src/t3.rs 'if !is_safe_t3_id(&session.id) {' 'if false {'
+mutate crates/hosts/src/t3.rs 'Some(local) => local != env,' 'Some(_) => false,'
+mutate crates/hosts/src/t3.rs 'if map.get("fenced").and_then(Value::as_bool).unwrap_or(false) {' 'if false {'
+mutate crates/hosts/src/t3.rs 'fenced_filter = " AND (fenced IS NULL OR fenced = 0)"' 'fenced_filter = ""'
+mutate crates/mcp/src/lib.rs '&& s.canonical(resolved.environment.as_deref()) != resolved' '&& false'
+mutate crates/mcp/src/lib.rs 'if session.surface != Surface::T3 {' 'if true {'
+mutate crates/mcp/src/lib.rs 'if hosts.t3().is_some() {' 'if false {'
+mutate crates/mcp/src/lib.rs 'if linked {' 'if true {'
+mutate crates/mcp/src/lib.rs 'Ok((canonical, Principal::Unverified, AskDestination::ResolvedLocal))' 'Ok((session, Principal::Unverified, AskDestination::ResolvedLocal))'
+mutate crates/mcp/src/answers.rs 'if !env_ok || !maestro_hosts::is_safe_t3_id(thread) {' 'if false {'
+mutate crates/mcp/src/answers.rs 'prior_notified(&w.owner_dir, id)' 'None::<(String, DeliveryStatus)>'
+mutate crates/mcp/src/answers.rs 'let reg = w.resolved_t3_registry();' 'let reg: Option<maestro_hosts::T3Registry> = None;'
+mutate crates/store/src/delivery.rs 'Some(DeliveryStatus::PrimaryNotified) if inferred == DeliveryStatus::PrimaryNotified => {' 'Some(DeliveryStatus::PrimaryNotified) => {'
+mutate crates/store/src/delivery.rs 'Some(w) if woke_is_fallback(w) => DeliveryStatus::FallbackNotified,' 'Some(_) if false => DeliveryStatus::FallbackNotified,'
+mutate crates/mcp/src/web.rs 'if !raw.starts_with("t3:") {' 'if true {'
+mutate crates/view/src/screens/decision.rs '@if state == AskState::Open {' '@if false {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

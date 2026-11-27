@@ -80,6 +80,10 @@ fn deliveries(cx: &Ctx) -> Markup {
                         @let matching: Vec<_> = cx.reads.asks.data.iter().flatten().filter(|lf| lf.file == row.intent.ledger).flat_map(|lf| lf.ledger.asks.iter().filter(|a| a.handle() == row.intent.handle).map(move |ask| (lf, ask))).collect();
                         @if matching.len() == 1 && !cx.reads.asks.errors.iter().any(|e| maestro_store::views::may_hide(&e.at, &row.intent.ledger)) { (decision_link(matching[0].0, matching[0].1, "View decision")) }
                         p { @if row.session_notified() { "Session notified" }
+                            @else if row.fallback_notified() {
+                                "Fallback notified"
+                                @if let Some(woke) = &row.woke { ": " (woke) }
+                            }
                             @else if let Some(woke) = &row.woke { "Recorded delivery result: " (woke) }
                             @else { "Session notification not recorded" }
                         }

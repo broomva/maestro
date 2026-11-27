@@ -239,6 +239,7 @@ async fn start_owner(
         checkout: dir.join("co"),
         owner_dir: owner_dir.clone(),
         t3: None,
+        t3_registry: None,
         fallback_thread: None,
         remote: false,
     };

@@ -244,3 +244,19 @@ fn delivery_error_display_is_bounded_even_for_large_malformed_records() {
     assert!(source.contains("message shortened"));
     assert!(!source.contains(&"x".repeat(300)));
 }
+
+#[test]
+fn fallback_notification_is_distinct_from_primary_session_notification_on_today() {
+    let m = machine();
+    let mut fb = delivery(
+        "fallbackreceipt1",
+        "written",
+        Some("T3 destination t3:local/60f14287 is unresolved on this host; routed to fallback T3 thread meta-orch"),
+    );
+    fb["delivery"] = json!("fallback_notified");
+    delivery_log(m.path(), &[fb]);
+    let html = render(m.path(), "today");
+    let activity = html.split("aria-label=\"Answer delivery\"").nth(1).unwrap();
+    assert!(activity.contains("Fallback notified"), "{activity}");
+    assert!(!activity.contains("Session notified"), "fallback must never render as primary Session notified");
+}

@@ -107,9 +107,16 @@ impl Owner {
             ),
         };
         let t3 = Some(t3);
+        let t3_registry = maestro_hosts::SurfaceRegistry::t3_root_from(
+            std::env::var("MAESTRO_T3_HOME").ok().as_deref(),
+            std::env::var("T3CODE_HOME").ok().as_deref(),
+            Some(home.as_path()).filter(|p| !p.as_os_str().is_empty()),
+        )
+        .map(|(root, _)| maestro_hosts::T3Registry::new(root));
         let remote = std::env::var("MAESTRO_ANSWERS_LOCAL").ok().as_deref() != Some("1");
         let fallback_thread = resolve_fallback_thread();
-        let writer = Writer { workspace, asks, checkout, owner_dir: dir.clone(), t3, fallback_thread, remote };
+        let writer =
+            Writer { workspace, asks, checkout, owner_dir: dir.clone(), t3, t3_registry, fallback_thread, remote };
         let owner = Self::claim(party, dir, writer)?;
         // Recorded for the MCP servers on this machine, which link open decisions here.
         let _ = std::fs::write(owner.dir.join("web-origin"), format!("{}\n", owner.party.origin));
@@ -363,6 +370,7 @@ impl Owner {
             applies_at_ms: now.as_millisecond() + answers::UNDO.as_millis() as i64,
             commit: None,
             woke: None,
+            delivery: None,
             landing: None,
             error: None,
         };
@@ -429,6 +437,7 @@ mod tests {
             checkout: dir.join("co"),
             owner_dir: dir.join("owner"),
             t3: None,
+            t3_registry: None,
             fallback_thread: None,
             remote: false,
         }
@@ -441,6 +450,7 @@ mod tests {
             checkout: dir.join("co"),
             owner_dir: dir.join("owner"),
             t3: None,
+            t3_registry: None,
             fallback_thread: None,
             remote: false,
         };
@@ -563,6 +573,7 @@ mod tests {
             applies_at_ms: i64::MAX,
             commit: None,
             woke: None,
+            delivery: None,
             landing: None,
             error: None,
         };
