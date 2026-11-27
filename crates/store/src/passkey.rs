@@ -88,6 +88,9 @@ pub struct Credential {
     pub enrolled_at: String,
     /// The relying party it was made for.
     pub rp_id: String,
+    /// WebAuthn authenticator transports reported at enrollment (for example `["internal"]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transports: Vec<String>,
 }
 
 /// The enrolled passkeys, as a file. A file that does not read is an error, never an empty list.
@@ -169,6 +172,8 @@ pub struct Registration {
     pub algorithm: i64,
     pub client_data: String,
     pub authenticator_data: String,
+    #[serde(default)]
+    pub transports: Vec<String>,
 }
 
 fn b64url(field: &str, v: &str) -> Result<Vec<u8>, String> {
@@ -230,11 +235,18 @@ pub fn register(party: &Party, challenge: &str, r: &Registration, at: &str) -> R
     let spki = b64url("public key", &r.public_key)?;
     VerifyingKey::from_public_key_der(&spki).map_err(|_| "the public key is not a P-256 key".to_string())?;
     b64url("credential", &r.credential)?;
+    let transports = r
+        .transports
+        .iter()
+        .filter(|t| matches!(t.as_str(), "internal" | "hybrid" | "usb" | "nfc" | "ble" | "smart-card"))
+        .cloned()
+        .collect();
     Ok(Credential {
         id: r.credential.clone(),
         public_key: STANDARD.encode(spki),
         enrolled_at: at.to_string(),
         rp_id: party.id.clone(),
+        transports,
     })
 }
 
@@ -374,6 +386,7 @@ pub(crate) mod tests {
                 public_key: STANDARD.encode(&spki),
                 enrolled_at: "t".into(),
                 rp_id: party().id,
+                transports: vec![],
             }],
         }
     }
@@ -524,6 +537,7 @@ pub(crate) mod tests {
             algorithm: ES256,
             client_data: client("webauthn.create", &c, &p.origin),
             authenticator_data: URL_SAFE_NO_PAD.encode(auth_data(&p, 0x45)),
+            transports: vec![],
         };
         let cred = register(&p, &c, &r, "t").unwrap();
         assert_eq!(cred.rp_id, p.id);

@@ -80,11 +80,21 @@ pub struct Tree {
     pub commit: Option<String>,
     /// Why a `GitRev` did not resolve. Every read then fails with it.
     pub unresolved: Option<String>,
+    /// True only when a clean batch ref scan confirmed this ref does not exist in the repo.
+    confirmed_absent: bool,
 }
 
 impl Tree {
     pub fn new(root: impl Into<PathBuf>, source: TreeSource) -> Self {
-        Self { root: root.into(), source, commit: None, unresolved: None }
+        Self { root: root.into(), source, commit: None, unresolved: None, confirmed_absent: false }
+    }
+
+    pub(crate) fn from_resolved(root: impl Into<PathBuf>, source: TreeSource, commit: String) -> Self {
+        Self { root: root.into(), source, commit: Some(commit), unresolved: None, confirmed_absent: false }
+    }
+
+    pub(crate) fn from_absent(root: impl Into<PathBuf>, source: TreeSource, reason: String) -> Self {
+        Self { root: root.into(), source, commit: None, unresolved: Some(reason), confirmed_absent: true }
     }
 
     /// Like [`Tree::new`], resolving a git revision to its commit once.
@@ -288,21 +298,49 @@ impl Tree {
     /// The committer date of the commit read, or `None` for the working tree.
     pub fn committed_at(&self) -> Result<Option<jiff::Timestamp>, TreeError> {
         let Some(commit) = self.commit_to_read()? else { return Ok(None) };
-        let out = self.git(&["show", "-s", "--format=%cI", commit])?;
-        out.trim().parse::<jiff::Timestamp>().map(Some).map_err(|e| TreeError::Git {
-            args: format!("show -s --format=%cI {commit}"),
-            stderr: format!("not a date: {e}"),
+        crate::cache::git_committed_at(&self.root, commit, || {
+            let out = self.git(&["show", "-s", "--format=%cI", commit]).map_err(|e| e.to_string())?;
+            out.trim().parse::<jiff::Timestamp>().map(Some).map_err(|e| format!("not a date: {e}"))
         })
+        .map_err(|stderr| TreeError::Git { args: format!("show -s --format=%cI {commit}"), stderr })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// Resolve a set of full ref names in one `git for-each-ref` call. Returns `None` on any git
+    /// error or stderr warning (such as a corrupt loose ref) so callers fall back to per-ref checks.
+    pub(crate) fn resolve_refs_batch(&self, refs: &[&str]) -> Option<std::collections::HashMap<String, String>> {
+        let mut cmd = git_command(&self.root);
+        cmd.args(["--no-pager", "for-each-ref", "--format=%(refname)%09%(objecttype)%09%(objectname)"]);
+        cmd.args(refs);
+        let output = cmd.output().ok()?;
+        if !output.status.success() || !output.stderr.is_empty() {
+            return None;
+        }
+        let stdout = String::from_utf8(output.stdout).ok()?;
+        let mut map = std::collections::HashMap::new();
+        for line in stdout.lines() {
+            let mut parts = line.split('\t');
+            let (Some(name), Some(kind), Some(oid)) = (parts.next(), parts.next(), parts.next()) else {
+                return None;
+            };
+            if kind != "commit" {
+                return None;
+            }
+            map.insert(name.to_string(), oid.to_string());
+        }
+        Some(map)
+    }
+
     /// Whether the repo holds the full ref `name`, by `show-ref --exists` (git >= 2.43): 2 is
     /// absent. Anything else is there, or an error: a broken ref (1), a git without the flag, no
     /// repo. A broken ref is never read as absent: it may stand over a packed one.
     pub fn has_ref(&self, name: &str) -> Result<bool, String> {
+        if self.confirmed_absent {
+            return Ok(false);
+        }
         let output =
             git_command(&self.root).args(["show-ref", "--exists", name]).output().map_err(|e| e.to_string())?;
         match output.status.code() {

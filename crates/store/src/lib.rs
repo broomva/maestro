@@ -9,6 +9,7 @@ compile_error!("maestro-store reads the Broomva path registry, whose reader is U
 
 pub mod answer;
 pub mod broomva_paths;
+pub(crate) mod cache;
 pub mod delivery;
 pub mod doctor;
 pub mod health;
@@ -158,16 +159,22 @@ impl Store {
                     .ok_or_else(|| format!("the registry put {name} at {}, outside {}", path.display(), root.display()))
             }
             // In neither, the registry's git reader has no answer: the name is unread at its new place.
-            Some(commit) => Ok(broomva_paths::tree_path(name, root, commit)
-                .map_err(|e| e.to_string())?
-                .unwrap_or_else(|| rels[0].clone())),
+            Some(commit) => Ok(cache::git_tree_path(root, commit, name, || {
+                broomva_paths::tree_path(name, root, commit).map_err(|e| e.to_string())
+            })?
+            .unwrap_or_else(|| rels[0].clone())),
         }
     }
 
     /// The registry's `shadowed`, on disk or at the commit read.
     fn read_layout(&self) -> Result<Layout, String> {
         let commit = self.tree.commit_to_read().map_err(|e| e.to_string())?.map(str::to_string);
-        let shadowed = broomva_paths::shadowed(self.tree.root(), commit.as_deref()).map_err(|e| e.to_string())?;
+        let shadowed = match commit.as_deref() {
+            Some(sha) => cache::git_layout(self.tree.root(), sha, || {
+                broomva_paths::shadowed(self.tree.root(), Some(sha)).map_err(|e| e.to_string())
+            })?,
+            None => broomva_paths::shadowed(self.tree.root(), None).map_err(|e| e.to_string())?,
+        };
         Ok(Layout { commit, shadowed })
     }
 
@@ -250,8 +257,15 @@ impl Store {
             return base;
         }
         // Legacy first, then the current ledger. For each branch the fetched origin ref wins.
+        let owned;
+        let branches: &[(&'static str, &'static str, Store)] = if self.cache_asks {
+            self.answer_branches()
+        } else {
+            owned = self.resolve_answer_branches();
+            &owned
+        };
         for index in [2, 3, 0, 1] {
-            let (name, label, branch) = &self.answer_branches()[index];
+            let (name, label, branch) = &branches[index];
             if branch.tree.commit.is_none() {
                 let existence = branch.tree.has_ref(name);
                 match existence {
@@ -295,20 +309,67 @@ impl Store {
     /// Ask ledgers at exactly the selected tree, without a branch overlay.
     pub fn asks_at_tree(&self) -> Section<Vec<LedgerFile>> {
         if self.cache_asks && !self.reads_worktree() {
-            return self.ask_tree.get_or_init(|| self.read_asks_at_tree()).clone();
+            return self.ask_tree.get_or_init(|| self.read_asks_at_tree_cached()).clone();
+        }
+        self.read_asks_at_tree_cached()
+    }
+
+    fn read_asks_at_tree_cached(&self) -> Section<Vec<LedgerFile>> {
+        if let (TreeSource::GitRev(rev), Some(commit)) = (&self.tree.source, self.tree.commit.as_deref()) {
+            return cache::git_asks(self.tree.root(), rev, commit, || self.read_asks_at_tree());
+        }
+        if self.reads_worktree()
+            && let Ok(dir) = self.rel(ASKS)
+        {
+            let full = self.tree.root().join(&dir);
+            let label = self.tree.label(&dir);
+            return cache::fs_asks(&full, &label, || self.read_asks_at_tree());
         }
         self.read_asks_at_tree()
     }
 
-    pub(crate) fn answer_branches(&self) -> &[(&'static str, &'static str, Store)] {
-        self.answer_branches.get_or_init(|| {
-            views::ANSWERS_REFS
+    fn resolve_answer_branches(&self) -> Vec<(&'static str, &'static str, Store)> {
+        let ref_names: Vec<&str> = views::ANSWERS_REFS.iter().map(|(n, _)| *n).collect();
+        if self.tree.commit.is_some()
+            && let Some(resolved) = self.tree.resolve_refs_batch(&ref_names)
+        {
+            let root = self.tree.root().to_path_buf();
+            return views::ANSWERS_REFS
                 .into_iter()
                 .map(|(name, label)| {
-                    (name, label, Store::new(self.paths.clone(), TreeSource::GitRev(name.into())).read_scope())
+                    let tree = match resolved.get(name) {
+                        Some(sha) => Tree::from_resolved(root.clone(), TreeSource::GitRev(name.into()), sha.clone()),
+                        None => Tree::from_absent(
+                            root.clone(),
+                            TreeSource::GitRev(name.into()),
+                            format!("no commit is named `{name}` in {}", root.display()),
+                        ),
+                    };
+                    (name, label, Store::from_tree(self.paths.clone(), tree, true))
                 })
-                .collect()
-        })
+                .collect();
+        }
+        views::ANSWERS_REFS
+            .into_iter()
+            .map(|(name, label)| {
+                (name, label, Store::new(self.paths.clone(), TreeSource::GitRev(name.into())).read_scope())
+            })
+            .collect()
+    }
+
+    pub(crate) fn answer_branches(&self) -> &[(&'static str, &'static str, Store)] {
+        self.answer_branches.get_or_init(|| self.resolve_answer_branches())
+    }
+
+    fn from_tree(paths: Paths, tree: Tree, cache_asks: bool) -> Self {
+        Self {
+            paths,
+            tree,
+            layout: OnceLock::new(),
+            cache_asks,
+            ask_tree: OnceLock::new(),
+            answer_branches: OnceLock::new(),
+        }
     }
 
     fn read_asks_at_tree(&self) -> Section<Vec<LedgerFile>> {
@@ -383,15 +444,20 @@ impl Store {
         if !main {
             return Ok(ledger);
         }
-        for (name, label) in
-            [views::ANSWERS_REFS[2], views::ANSWERS_REFS[3], views::ANSWERS_REFS[0], views::ANSWERS_REFS[1]]
-        {
-            let branch = Store::new(self.paths.clone(), TreeSource::GitRev(name.into()));
+        let owned;
+        let branches: &[(&'static str, &'static str, Store)] = if self.cache_asks {
+            self.answer_branches()
+        } else {
+            owned = self.resolve_answer_branches();
+            &owned
+        };
+        for index in [2, 3, 0, 1] {
+            let (name, label, branch) = &branches[index];
             if branch.tree.commit.is_none() {
                 match branch.tree.has_ref(name) {
                     Ok(false) => continue,
                     Ok(true) => {
-                        return Err(format!("{label}: {}", branch.tree.unresolved.unwrap_or_else(|| "unread".into())));
+                        return Err(format!("{label}: {}", branch.tree.unresolved.as_deref().unwrap_or("unread")));
                     }
                     Err(error) => return Err(format!("{label}: {error}")),
                 }
@@ -430,18 +496,30 @@ impl Store {
     }
 
     pub fn initiatives(&self) -> Section<Vec<Initiative>> {
+        if let (TreeSource::GitRev(rev), Some(commit)) = (&self.tree.source, self.tree.commit.as_deref()) {
+            return cache::git_initiatives(self.tree.root(), rev, commit, || self.yaml_dir(INITIATIVES));
+        }
         self.yaml_dir(INITIATIVES)
     }
 
     pub fn loops(&self) -> Section<Vec<LoopSpec>> {
+        if let (TreeSource::GitRev(rev), Some(commit)) = (&self.tree.source, self.tree.commit.as_deref()) {
+            return cache::git_loops(self.tree.root(), rev, commit, || self.yaml_dir(LOOPS));
+        }
         self.yaml_dir(LOOPS)
     }
 
     /// Plan graphs (`docs/plans/*.graph.yaml`) at the tree read, with their file names.
     pub fn plans(&self) -> Section<Vec<(String, PlanGraph)>> {
-        self.yaml_docs_with(PLANS, &[".graph.yaml"], |t| {
-            serde_yaml::from_str::<PlanGraph>(t).map(|g| (g, Vec::new())).map_err(|e| e.to_string())
-        })
+        let read = || {
+            self.yaml_docs_with(PLANS, &[".graph.yaml"], |t| {
+                serde_yaml::from_str::<PlanGraph>(t).map(|g| (g, Vec::new())).map_err(|e| e.to_string())
+            })
+        };
+        if let (TreeSource::GitRev(rev), Some(commit)) = (&self.tree.source, self.tree.commit.as_deref()) {
+            return cache::git_plans(self.tree.root(), rev, commit, read);
+        }
+        read()
     }
 
     /// The usage rows in the file [`Paths::usage`] names: a JSON list, as
@@ -486,22 +564,24 @@ impl Store {
     /// started before the tail is not read, as the plugin does not read it.
     pub fn ticks(&self) -> Section<TickTail> {
         let path = self.paths.ticks_ledger();
-        let label = format!("fs:{}", path.display());
-        let (text, from) = match read_tail(&path, STREAM_TAIL) {
-            Ok(t) => t,
-            Err(e) => return Section::unavailable(label, e.to_string()),
-        };
-        // Line numbers count from the tail's first line, whose byte offset the label says.
-        let label = if from == 0 { label } else { format!("{label} from byte {from}") };
-        let mut events = Vec::new();
-        let mut errors = Vec::new();
-        for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
-            match serde_json::from_str::<LedgerEvent>(line) {
-                Ok(e) => events.push(e),
-                Err(e) => errors.push(SourceError { at: format!("{label}:{}", n + 1), reason: e.to_string() }),
+        cache::fs_ticks(&path, || {
+            let label = format!("fs:{}", path.display());
+            let (text, from) = match read_tail(&path, STREAM_TAIL) {
+                Ok(t) => t,
+                Err(e) => return Section::unavailable(label, e.to_string()),
+            };
+            // Line numbers count from the tail's first line, whose byte offset the label says.
+            let label = if from == 0 { label } else { format!("{label} from byte {from}") };
+            let mut events = Vec::new();
+            let mut errors = Vec::new();
+            for (n, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+                match serde_json::from_str::<LedgerEvent>(line) {
+                    Ok(e) => events.push(e),
+                    Err(e) => errors.push(SourceError { at: format!("{label}:{}", n + 1), reason: e.to_string() }),
+                }
             }
-        }
-        Section::partial(label, TickTail { ticks: pair_ticks(&events), from }, errors)
+            Section::partial(label, TickTail { ticks: pair_ticks(&events), from }, errors)
+        })
     }
 
     /// The latest fleet-reconcile report per scope.

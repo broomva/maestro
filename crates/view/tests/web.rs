@@ -615,3 +615,61 @@ fn missing_provider_measurements_cannot_certify_fleet() {
         "readable complete scope must not always be incomplete"
     );
 }
+
+#[test]
+fn decisions_skips_in_flight_asks_and_page_includes_persistent_toast_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let asks = dir.path().join("workspace/.broomva/asks");
+    std::fs::create_dir_all(&asks).unwrap();
+    std::fs::write(
+        asks.join("demo.yaml"),
+        r#"ledger: demo
+asks:
+  - id: first
+    headline: First decision
+    ask: Should we do first?
+    blocking: true
+    class: authority
+    options:
+      - id: yes
+        label: Yes
+  - id: second
+    headline: Second decision
+    ask: Should we do second?
+    blocking: false
+    class: authority
+    options:
+      - id: ship
+        label: Ship it
+"#,
+    )
+    .unwrap();
+    let store = Store::new(Paths::under(dir.path()), TreeSource::WorkingTree);
+    let spec = json!({ "root": "page", "blocks": { "page": { "type": "decisions" } } });
+    let validated = maestro_view::catalog::validate(&spec).unwrap();
+    let mut pending = std::collections::BTreeSet::new();
+    pending.insert(("demo.yaml".to_string(), "first".to_string()));
+    let (rendered, shell) = maestro_view::render::render_web_with_pending(
+        &store,
+        &validated,
+        at(),
+        maestro_view::render::Owner::Ready,
+        pending,
+    );
+    assert!(
+        rendered.html.contains(r#"data-handle="second""#),
+        "decisions landing should advance past the in-flight first ask"
+    );
+    assert!(rendered.html.contains(r#"data-pending="true""#), "queue row for in-flight ask should be marked pending");
+    let doc = maestro_view::page::web(&rendered.html, "Decisions", "/decisions", &shell);
+    assert!(doc.contains(r#"class="mv-toasts" data-toasts="true""#), "web shell must carry persistent toast host");
+}
+
+#[test]
+fn owner_script_matches_flat_receipt_wire_contract() {
+    let js = maestro_view::page::OWNER_JS;
+    assert!(js.contains("done.id"), "owner.js must read flat done.id from /owner/answer/finish");
+    assert!(js.contains("receipt.landing"), "owner.js must read receipt.landing (not receipt.landed)");
+    assert!(!js.contains("done.receipt"), "owner.js must not expect nested done.receipt");
+    assert!(!js.contains("receipt.landed"), "owner.js must not reference nonexistent receipt.landed");
+}

@@ -53,6 +53,31 @@ impl Pending {
     }
 }
 
+/// Resolve the fallback T3 thread id (e.g. Meta Orchestrator) for answered asks whose origin
+/// session is missing or unreachable. Prefers `MAESTRO_FALLBACK_THREAD`, falling back to the
+/// thread segment of `MAESTRO_ANSWER_THREAD`. Set `MAESTRO_FALLBACK_THREAD=off` to disable.
+fn resolve_fallback_thread() -> Option<String> {
+    if let Ok(raw) = std::env::var("MAESTRO_FALLBACK_THREAD") {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("off") || trimmed.eq_ignore_ascii_case("none") {
+            return None;
+        }
+        return parse_thread_id(trimmed);
+    }
+    let raw = std::env::var(crate::web::ANSWER_THREAD_ENV).ok()?;
+    parse_thread_id(raw.trim())
+}
+
+fn parse_thread_id(raw: &str) -> Option<String> {
+    let thread = match raw.strip_prefix("t3:").unwrap_or(raw).split_once('/') {
+        Some((_, t)) => t,
+        None => raw,
+    };
+    let ok = !thread.is_empty()
+        && thread.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'));
+    ok.then(|| thread.to_string())
+}
+
 impl Owner {
     /// From the environment: `MAESTRO_WEB_ORIGIN` names the page's secure origin. Unset, the
     /// pages offer no answering, and say why.
@@ -80,7 +105,8 @@ impl Owner {
         };
         let t3 = Some(t3);
         let remote = std::env::var("MAESTRO_ANSWERS_LOCAL").ok().as_deref() != Some("1");
-        let writer = Writer { workspace, asks, checkout, owner_dir: dir.clone(), t3, remote };
+        let fallback_thread = resolve_fallback_thread();
+        let writer = Writer { workspace, asks, checkout, owner_dir: dir.clone(), t3, fallback_thread, remote };
         let owner = Self::claim(party, dir, writer)?;
         // Recorded for the MCP servers on this machine, which link open decisions here.
         let _ = std::fs::write(owner.dir.join("web-origin"), format!("{}\n", owner.party.origin));
@@ -194,6 +220,30 @@ impl Owner {
         }
     }
 
+    /// Cap pre-fetched challenges per ask so option switching keeps the pending table bounded
+    /// without invalidating a second tab's active challenge.
+    fn prune_answers(&self, ledger: &str, handle: &str) {
+        if let Ok(mut m) = self.pending.lock() {
+            m.retain(|_, v| v.at().elapsed() < CHALLENGE_TTL);
+            let mut same: Vec<(String, Instant)> = m
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    Pending::Answer { intent, at, .. } if intent.ledger == ledger && intent.handle == handle => {
+                        Some((k.clone(), *at))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if same.len() >= 4 {
+                same.sort_by_key(|(_, at)| *at);
+                let drop_count = same.len() - 3;
+                for (old_key, _) in same.into_iter().take(drop_count) {
+                    m.remove(&old_key);
+                }
+            }
+        }
+    }
+
     fn take(&self, nonce: &str) -> Option<Pending> {
         let mut m = self.pending.lock().ok()?;
         m.remove(nonce).filter(|p| p.at().elapsed() < CHALLENGE_TTL)
@@ -258,6 +308,7 @@ impl Owner {
         let nonce = passkey::nonce();
         let challenge = passkey::challenge(&intent.canonical(), &nonce);
         let session = ask.origin.as_ref().and_then(|o| o.session.clone());
+        self.prune_answers(&req.ledger, &req.handle);
         self.keep(
             &nonce,
             Pending::Answer {
@@ -268,9 +319,27 @@ impl Owner {
                 at: Instant::now(),
             },
         );
-        let ids: Vec<&str> =
-            keyring.credentials.iter().filter(|c| c.rp_id == self.party.id).map(|c| c.id.as_str()).collect();
-        Ok(serde_json::json!({ "nonce": nonce, "challenge": challenge, "rp_id": self.party.id, "credentials": ids }))
+        let matching: Vec<&passkey::Credential> =
+            keyring.credentials.iter().filter(|c| c.rp_id == self.party.id).collect();
+        let ids: Vec<&str> = matching.iter().map(|c| c.id.as_str()).collect();
+        let descriptors: Vec<serde_json::Value> = matching
+            .iter()
+            .map(|c| {
+                let transports: Vec<&str> = if c.transports.is_empty() {
+                    vec!["internal"]
+                } else {
+                    c.transports.iter().map(String::as_str).collect()
+                };
+                serde_json::json!({ "id": c.id, "transports": transports })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "nonce": nonce,
+            "challenge": challenge,
+            "rp_id": self.party.id,
+            "credentials": ids,
+            "credential_descriptors": descriptors,
+        }))
     }
 
     /// Finish an answer: the assertion must verify over the challenge. The answer is then held for
@@ -356,6 +425,7 @@ mod tests {
             checkout: dir.join("co"),
             owner_dir: dir.join("owner"),
             t3: None,
+            fallback_thread: None,
             remote: false,
         }
     }
@@ -367,6 +437,7 @@ mod tests {
             checkout: dir.join("co"),
             owner_dir: dir.join("owner"),
             t3: None,
+            fallback_thread: None,
             remote: false,
         };
         Owner::new(party(), dir.join("owner"), writer)
@@ -569,5 +640,44 @@ mod tests {
         assert!(constant_eq(b"ABCD", b"ABCD"));
         assert!(!constant_eq(b"ABCD", b"ABCE"));
         assert!(!constant_eq(b"ABC", b"ABCD"));
+    }
+
+    #[test]
+    fn answer_begin_emits_internal_transport_descriptors_and_caps_prefetch_challenges() {
+        let d = tempfile::tempdir().unwrap();
+        let o = owner(d.path());
+        keyring().save(&o.dir).unwrap();
+        let asks = o.writer.workspace.join(".broomva/asks");
+        std::fs::create_dir_all(&asks).unwrap();
+        std::fs::write(
+            asks.join("demo.yaml"),
+            "asks:\n  - id: q1\n    headline: Ship?\n    ask: Ship now?\n    options:\n      - id: go\n        label: Go\n",
+        )
+        .unwrap();
+        let mut paths = maestro_store::Paths::under(d.path());
+        paths.workspace = o.writer.workspace.clone();
+        let store = maestro_store::Store::new(paths, maestro_store::TreeSource::WorkingTree);
+        let ledger = store.ask_ledger("demo.yaml").unwrap().unwrap();
+        let ask = &ledger.asks[0];
+        let mut last = serde_json::Value::Null;
+        for _ in 0..6 {
+            last = o
+                .answer_begin(
+                    &store,
+                    &AnswerBegin {
+                        ledger: "demo.yaml".into(),
+                        handle: ask.handle().into(),
+                        hash: ask.hash().to_string(),
+                        option: "go".into(),
+                        note: String::new(),
+                    },
+                )
+                .unwrap();
+        }
+        let descs = last["credential_descriptors"].as_array().unwrap();
+        assert_eq!(descs.len(), 1);
+        assert_eq!(descs[0]["transports"], serde_json::json!(["internal"]));
+        let pending_count = o.pending.lock().unwrap().len();
+        assert!(pending_count <= 4, "pre-fetched challenges must be capped, got {pending_count}");
     }
 }

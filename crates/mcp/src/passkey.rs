@@ -48,6 +48,7 @@ pub(crate) mod tests {
                 public_key: STANDARD.encode(&spki),
                 enrolled_at: "t".into(),
                 rp_id: party().id,
+                transports: vec![],
             }],
         }
     }
@@ -130,6 +131,7 @@ pub(crate) mod tests {
             algorithm: ES256,
             client_data: client("webauthn.create", &c, &p.origin),
             authenticator_data: URL_SAFE_NO_PAD.encode(auth_data(&p, 0x45)),
+            transports: vec![],
         };
         let cred = register(&p, &c, &r, "t").unwrap();
         assert_eq!(cred.rp_id, p.id);

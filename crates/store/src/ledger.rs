@@ -257,7 +257,37 @@ pub fn land(w: &Writer) -> String {
     let merged = gh_command(dir).args(["pr", "merge", &number, "--auto", "--squash"]).output();
     match merged {
         Ok(o) if o.status.success() => format!("landing PR #{number}, set to merge when its checks pass"),
-        Ok(o) => format!("landing PR #{number}; auto-merge not set: {}", String::from_utf8_lossy(&o.stderr).trim()),
+        Ok(o) => format_auto_merge_error(&number, &String::from_utf8_lossy(&o.stderr)),
         Err(e) => format!("landing PR #{number}; auto-merge not set: {e}"),
+    }
+}
+
+fn format_auto_merge_error(number: &str, stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.contains("Auto merge is not allowed") || trimmed.contains("enablePullRequestAutoMerge") {
+        format!("landing PR #{number} open (auto-merge is disabled on this repository)")
+    } else if trimmed.is_empty() {
+        format!("landing PR #{number}; auto-merge not set")
+    } else {
+        format!("landing PR #{number}; auto-merge not set: {trimmed}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_auto_merge_formats_without_raw_graphql_noise() {
+        let raw = "GraphQL: Auto merge is not allowed for this repository (enablePullRequestAutoMerge)
+";
+        assert_eq!(
+            format_auto_merge_error("1460", raw),
+            "landing PR #1460 open (auto-merge is disabled on this repository)"
+        );
+        assert_eq!(
+            format_auto_merge_error("1460", "some other error"),
+            "landing PR #1460; auto-merge not set: some other error"
+        );
     }
 }

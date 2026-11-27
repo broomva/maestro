@@ -1059,6 +1059,7 @@ fn branch_answer_fixture(case: &str, branch: &str) -> (Fx, InstanceId) {
         ),
         enrolled_at: "t".into(),
         rp_id: party.id.clone(),
+        transports: vec![],
     };
     let ring =
         maestro_store::passkey::Keyring { credentials: if case == "unenrolled" { vec![] } else { vec![credential] } };

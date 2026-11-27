@@ -64,7 +64,11 @@ pub(crate) fn ago(from: jiff::Timestamp, at: jiff::Timestamp) -> Option<String> 
 pub(crate) fn decisions(cx: &Ctx, id: &str, p: &DecisionsProps) -> Markup {
     let groups = queue(cx, None);
     let ledgers = by_ledger(&groups);
-    let first = ledgers.iter().flat_map(|(_, v)| v).find(|e| e.keyed);
+    let first = ledgers
+        .iter()
+        .flat_map(|(_, v)| v)
+        .find(|e| e.keyed && !cx.is_in_flight(&e.lf.file, e.ask.handle()))
+        .or_else(|| ledgers.iter().flat_map(|(_, v)| v).find(|e| e.keyed));
     match first {
         Some(e) => {
             let handle = e.ask.handle();
@@ -173,7 +177,7 @@ fn column(cx: &Ctx, ledgers: &[(&str, Vec<&Entry>)], total: usize, current: Opti
                     p class="mv-qgroup-name bv-code" { bdi { (ledger.trim_end_matches(".yaml").trim_end_matches(".yml")) } " · " (entries.len()) }
                     ul class="mv-list" {
                         @for e in entries {
-                            li class="mv-qrow" data-blocking=(e.ask.blocking) data-landing=(match e.landing { Landing::Waiting => "waiting", Landing::NotSeen => "open", Landing::Unknown => "unknown" }) {
+                            li class="mv-qrow" data-blocking=(e.ask.blocking) data-landing=(match e.landing { Landing::Waiting => "waiting", Landing::NotSeen => "open", Landing::Unknown => "unknown" }) data-pending=[cx.is_in_flight(&e.lf.file, e.ask.handle()).then_some("true")] {
                                 @if e.keyed {
                                     // `true`, not `page`: the nav's Decisions tab already marks the page.
                                     a href=(href(e)) aria-current=[current.is_some_and(|c| std::ptr::eq(c, *e)).then_some("true")] { (qrow(cx, e, twin(e))) }

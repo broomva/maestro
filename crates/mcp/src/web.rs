@@ -196,8 +196,9 @@ async fn page_of(
         Ok(o) => o.state(),
         Err(e) => maestro_view::render::Owner::Off(e.clone()),
     };
+    let in_flight = web.owner.as_ref().map(|o| o.book.in_flight()).unwrap_or_default();
     let rendered = tokio::task::spawn_blocking(move || {
-        let store = server.store();
+        let store = server.store().read_scope();
         // A readable ledger with no such ask is no page; an unread one still renders as unavailable.
         if let Some((ledger, id)) = &ask
             && absent(&store, ledger, id)
@@ -205,7 +206,7 @@ async fn page_of(
             return None;
         }
         let at = maestro_store::views::now();
-        Some(maestro_view::render::render_web(&store, &validated, at, owner))
+        Some(maestro_view::render::render_web_with_pending(&store, &validated, at, owner, in_flight))
     })
     .await;
     match rendered {
