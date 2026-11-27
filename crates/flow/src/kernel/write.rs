@@ -774,6 +774,7 @@ pub fn claim_as(
         claim_inputs.insert("__map_child_instance".to_string(), cid);
     }
     let worker_pgid = session.worker_pgid();
+    let worker_cgroup = session.worker_cgroup().map(str::to_string);
     if started.parent_ref.is_some() {
         let Some(pgid) = worker_pgid.filter(|&p| p > 1) else {
             return Err(Refusal::ChildFenced {
@@ -807,6 +808,17 @@ pub fn claim_as(
             }
             .into());
         }
+        let Some(cg) = worker_cgroup.as_deref() else {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "missing_worker_cgroup",
+                detail: "child subflow claim requires host-attested OS cgroup containment (worker_cgroup); PGID alone cannot rule out setsid/setpgid escape".into(),
+            }
+            .into());
+        };
+        if let Err(detail) = super::subflow::verify_cgroup_live(cg) {
+            return Err(Refusal::ChildFenced { child: instance.to_string(), code: "dead_worker_cgroup", detail }.into());
+        }
     }
     let claimed = Claimed {
         node: node.to_string(),
@@ -821,6 +833,7 @@ pub fn claim_as(
         audit: session.audit().cloned(),
         owner_epoch: child_claim_epoch,
         worker_pgid,
+        worker_cgroup,
     };
     let appended = append_writable(&mut guard, instance, log.seq(), claimed.to_event()?)?;
     Ok(Claim {

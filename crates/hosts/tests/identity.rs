@@ -1674,6 +1674,13 @@ fn host_adapters_attest_real_worker_pgid_across_paseo_direct_and_t3() {
         fn pgid(&self, pid: u32) -> Result<u32, String> {
             self.stats.get(&pid).map(|&(_, pg)| pg).ok_or_else(|| format!("no pgid {pid}"))
         }
+        fn cgroup(&self, pid: u32) -> Result<String, String> {
+            if self.stats.contains_key(&pid) {
+                Ok(format!("/sys/fs/cgroup/maestro.slice/maestro-worker-{pid}.scope"))
+            } else {
+                Err(format!("no cgroup {pid}"))
+            }
+        }
     }
 
     let tmp = TempDir::new().unwrap();
@@ -1750,6 +1757,11 @@ fn host_adapters_attest_real_worker_pgid_across_paseo_direct_and_t3() {
         .verify_caller(&CallerClaim::paseo(Some("agent-p1"), Some(cwd.to_string_lossy().into_owned())))
         .unwrap();
     assert_eq!(p_sess.worker_pgid(), Some(9100), "Paseo adapter must attest agent.pid -> OS pgid");
+    assert_eq!(
+        p_sess.worker_cgroup(),
+        Some("/sys/fs/cgroup/maestro.slice/maestro-worker-4100.scope"),
+        "Paseo adapter must attest dedicated worker cgroup"
+    );
 
     let d_sess = registry
         .verify_caller(&CallerClaim::direct(
@@ -1759,10 +1771,20 @@ fn host_adapters_attest_real_worker_pgid_across_paseo_direct_and_t3() {
         ))
         .unwrap();
     assert_eq!(d_sess.worker_pgid(), Some(9200), "Direct adapter must attest session.pid -> OS pgid");
+    assert_eq!(
+        d_sess.worker_cgroup(),
+        Some("/sys/fs/cgroup/maestro.slice/maestro-worker-4200.scope"),
+        "Direct adapter must attest dedicated worker cgroup"
+    );
 
     let child_ref: SessionRef = "direct:-/direct-child".parse().unwrap();
     let perf = registry.performer(&d_sess, &child_ref).unwrap();
     assert_eq!(perf.worker_pgid(), Some(9201), "Direct performer must attest child pid -> OS pgid");
+    assert_eq!(
+        perf.worker_cgroup(),
+        Some("/sys/fs/cgroup/maestro.slice/maestro-worker-4201.scope"),
+        "Direct performer must attest dedicated worker cgroup"
+    );
 
     let peer_sess = registry
         .verify_caller(
@@ -1771,6 +1793,11 @@ fn host_adapters_attest_real_worker_pgid_across_paseo_direct_and_t3() {
         )
         .unwrap();
     assert_eq!(peer_sess.worker_pgid(), Some(9300), "PeerCredentials must attest peer.pid -> OS pgid");
+    assert_eq!(
+        peer_sess.worker_cgroup(),
+        Some("/sys/fs/cgroup/maestro.slice/maestro-worker-4300.scope"),
+        "PeerCredentials must attest dedicated worker cgroup"
+    );
 
     // Attributed CLI whose own pgid == pid walks to enclosing worker pgid 9400!
     assert_eq!(attest_caller_worker_pgid(procs.as_ref(), 5000), Some(9400));

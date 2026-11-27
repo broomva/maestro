@@ -1113,13 +1113,107 @@ pub fn reconcile_superseded_effect(
     Ok(())
 }
 
-/// Verifies that EVERY host-attested worker process group (`Claimed.worker_pgid`) ever recorded
-/// for this child has completely terminated (`kill(-pgid, 0) == ESRCH`). Never reads
-/// `Claimed.audit.process.pid` or caller-supplied `Started.params.worker_pgid`.
-/// Fails closed if ANY `Claimed` event lacks `worker_pgid > 1` or if ANY member of ANY recorded
-/// worker process group is still alive.
+fn validate_cgroup_dir(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || !trimmed.starts_with('/')
+        || trimmed == "/"
+        || trimmed == "/sys/fs/cgroup"
+        || trimmed == "/sys/fs/cgroup/"
+        || trimmed.contains("..")
+    {
+        return Err(format!("invalid or unconfined worker_cgroup path {raw:?}"));
+    }
+    let dir = PathBuf::from(trimmed);
+    let meta =
+        std::fs::symlink_metadata(&dir).map_err(|e| format!("worker_cgroup {} unreadable: {e}", dir.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!("worker_cgroup {} must be a non-symlink directory", dir.display()));
+    }
+    Ok(dir)
+}
+
+fn read_cgroup_regular_file(path: &Path) -> Result<String, String> {
+    let meta =
+        std::fs::symlink_metadata(path).map_err(|e| format!("cgroup file {} unreadable: {e}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(format!("cgroup file {} must be a regular non-symlink file", path.display()));
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))
+}
+
+fn parse_cgroup_populated(events_text: &str) -> Result<bool, String> {
+    for line in events_text.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() == Some("populated") {
+            match parts.next() {
+                Some("0") => return Ok(false),
+                Some("1") => return Ok(true),
+                other => return Err(format!("unexpected cgroup.events populated value {other:?}")),
+            }
+        }
+    }
+    Err("cgroup.events missing `populated` key".to_string())
+}
+
+/// Verifies at claim time that `worker_cgroup` is a real non-symlink cgroup v2 directory with at
+/// least one live numeric PID in `cgroup.procs` and `cgroup.events` reporting `populated 1`.
+pub(crate) fn verify_cgroup_live(raw: &str) -> Result<(), String> {
+    let dir = validate_cgroup_dir(raw)?;
+    let procs_text = read_cgroup_regular_file(&dir.join("cgroup.procs"))?;
+    let mut pid_count = 0usize;
+    for line in procs_text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let pid: u32 = line.parse().map_err(|_| format!("invalid PID {line:?} in cgroup.procs"))?;
+        if pid <= 1 {
+            return Err(format!("invalid PID {pid} in cgroup.procs"));
+        }
+        pid_count += 1;
+    }
+    if pid_count == 0 {
+        return Err(format!("worker_cgroup {} has zero live PIDs in cgroup.procs at claim time", dir.display()));
+    }
+    let events_text = read_cgroup_regular_file(&dir.join("cgroup.events"))?;
+    if !parse_cgroup_populated(&events_text)? {
+        return Err(format!("worker_cgroup {} reports populated 0 at claim time", dir.display()));
+    }
+    Ok(())
+}
+
+/// Verifies at quiescence/reconciliation time that `worker_cgroup` is completely empty: zero PIDs
+/// in `cgroup.procs` AND `cgroup.events` explicitly reports `populated 0`. A worker or descendant
+/// that called `setsid()` / `setpgid()` stays in its cgroup and keeps `populated 1`, so this check
+/// fails closed against process-group escape.
+pub(crate) fn verify_cgroup_empty(raw: &str) -> Result<(), String> {
+    let dir = validate_cgroup_dir(raw)?;
+    let procs_text = read_cgroup_regular_file(&dir.join("cgroup.procs"))?;
+    let live_pids: Vec<&str> = procs_text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if !live_pids.is_empty() {
+        return Err(format!(
+            "worker_cgroup_still_populated: {} still contains live PID(s) {:?} (escaped or unexited descendants)",
+            dir.display(),
+            live_pids
+        ));
+    }
+    let events_text = read_cgroup_regular_file(&dir.join("cgroup.events"))?;
+    if parse_cgroup_populated(&events_text)? {
+        return Err(format!(
+            "worker_cgroup_still_populated: {} reports populated 1 in cgroup.events (descendant cgroup still active)",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Verifies that EVERY host-attested worker process group (`Claimed.worker_pgid`) AND dedicated
+/// OS cgroup (`Claimed.worker_cgroup`) ever recorded for this child has completely terminated
+/// (`kill(-pgid, 0) == ESRCH` AND `cgroup.procs` empty + `cgroup.events` `populated 0`).
+/// Never reads `Claimed.audit.process.pid` or caller-supplied `Started.params.worker_pgid`.
+/// Fails closed if ANY `Claimed` event lacks `worker_pgid > 1` or `worker_cgroup`, if ANY member
+/// of ANY recorded process group is still alive, or if ANY descendant (including `setsid()`/`setpgid()`
+/// escaped processes) remains in any recorded worker cgroup.
 fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, SubflowError> {
     let mut recorded_pgids = BTreeSet::new();
+    let mut recorded_cgroups = BTreeSet::new();
     for ev in &child_log.events {
         if ev.kind == Claimed::KIND {
             let c =
@@ -1142,7 +1236,16 @@ fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, Subfl
                     ),
                 });
             }
+            let Some(cg) = c.worker_cgroup.filter(|s| !s.trim().is_empty()) else {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "Claimed event (node={}, attempt={}) in child {} is missing dedicated worker_cgroup containment; PGID death alone cannot rule out setsid/setpgid escape",
+                        c.node, c.attempt, child_log.instance
+                    ),
+                });
+            };
             recorded_pgids.insert(pgid);
+            recorded_cgroups.insert(cg);
         }
     }
     for &raw_pgid in &recorded_pgids {
@@ -1172,6 +1275,9 @@ fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, Subfl
                 });
             }
         }
+    }
+    for cg in &recorded_cgroups {
+        verify_cgroup_empty(cg).map_err(|detail| SubflowError::QuiescenceRefused { detail })?;
     }
     Ok(recorded_pgids)
 }

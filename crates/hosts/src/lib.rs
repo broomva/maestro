@@ -655,6 +655,9 @@ impl DirectRegistry {
         if let Some(pgid) = session.pid.and_then(|pid| attribution::attest_worker_pgid(reader, pid)) {
             verified = verified.with_worker_pgid(pgid);
         }
+        if let Some(cg) = session.pid.and_then(|pid| attribution::attest_worker_cgroup(reader, pid)) {
+            verified = verified.with_worker_cgroup(cg);
+        }
         Ok(verified)
     }
 
@@ -732,6 +735,9 @@ impl DirectRegistry {
         .with_owner_marker(owner_marker);
         if let Some(pgid) = session.pid.and_then(|pid| attribution::attest_worker_pgid(reader, pid)) {
             verified = verified.with_worker_pgid(pgid);
+        }
+        if let Some(cg) = session.pid.and_then(|pid| attribution::attest_worker_cgroup(reader, pid)) {
+            verified = verified.with_worker_cgroup(cg);
         }
         Ok(verified)
     }
@@ -1338,8 +1344,8 @@ impl SurfaceRegistry {
             .or_else(|| claim.node.clone())
             .or_else(|| self.expected_node.clone());
         let mut verified = verified.with_node_and_generation(node, current_gen);
+        let reader: &dyn ProcessReader = self.processes.as_deref().unwrap_or(&SystemProcesses);
         if verified.worker_pgid().is_none() {
-            let reader: &dyn ProcessReader = self.processes.as_deref().unwrap_or(&SystemProcesses);
             let attested_pgid =
                 claim.peer.and_then(|peer| attribution::attest_worker_pgid(reader, peer.pid)).or_else(|| {
                     (claim.surface == Surface::T3 && claim.attribution.is_some())
@@ -1348,6 +1354,17 @@ impl SurfaceRegistry {
                 });
             if let Some(pgid) = attested_pgid {
                 verified = verified.with_worker_pgid(pgid);
+            }
+        }
+        if verified.worker_cgroup().is_none() {
+            let attested_cg =
+                claim.peer.and_then(|peer| attribution::attest_worker_cgroup(reader, peer.pid)).or_else(|| {
+                    (claim.surface == Surface::T3 && claim.attribution.is_some())
+                        .then(|| attribution::attest_worker_cgroup(reader, std::process::id()))
+                        .flatten()
+                });
+            if let Some(cg) = attested_cg {
+                verified = verified.with_worker_cgroup(cg);
             }
         }
         Ok(verified)

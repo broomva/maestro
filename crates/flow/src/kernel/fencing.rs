@@ -154,6 +154,8 @@ impl FencingStore {
                  new_oid TEXT NOT NULL,
                  epoch INTEGER NOT NULL,
                  op_id TEXT NOT NULL,
+                 payload_digest TEXT NOT NULL DEFAULT '',
+                 state TEXT NOT NULL DEFAULT 'committed',
                  PRIMARY KEY (resource_id, ref_name)
              );
              COMMIT;",
@@ -411,10 +413,56 @@ impl FencingStore {
         Ok(row.map(|(v, ep, op)| (v, ep as u64, op)))
     }
 
-    /// Built-in kernel actuator 2: executes a direct `git update-ref` compare-and-swap under the
-    /// exclusive per-resource lock (`_rlock`), verifying `incoming_epoch` BEFORE touching git,
-    /// committing `written_epoch = incoming_epoch` + `fenced_git_refs` receipt in SQLite, and
-    /// rolling back the git ref if the SQLite commit fails (zero shell, zero external scripts).
+    /// Constructs a `git` command with ALL repository, global, and system hooks/fsmonitor/ext
+    /// execution disabled (`core.hooksPath=/dev/null`, `core.fsmonitor=false`, `GIT_CONFIG_NOSYSTEM=1`,
+    /// `GIT_CONFIG_GLOBAL=/dev/null`) so no repository-controlled code (such as `reference-transaction`)
+    /// can ever execute on the fenced actuator path.
+    fn safe_git_cmd(repo: &Path) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.env("PATH", maestro_store::tree::git_path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.pager=cat",
+                "-c",
+                "protocol.ext.allow=never",
+                "-c",
+                "gc.auto=0",
+            ])
+            .current_dir(repo);
+        cmd
+    }
+
+    fn read_git_ref_oid(repo: &Path, ref_name: &str) -> Result<Option<String>, FencingError> {
+        let out = Self::safe_git_cmd(repo)
+            .args(["rev-parse", "--verify", "--quiet", ref_name])
+            .output()
+            .map_err(|e| FencingError::Storage(format!("git rev-parse ref spawn: {e}")))?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
+    }
+
+    /// Built-in kernel actuator 2: crash-atomic, hook-disabled `git update-ref` compare-and-swap
+    /// under the exclusive per-resource lock (`_rlock`):
+    /// 1. Validates ref format and target commit OID with hooks/fsmonitor disabled (`safe_git_cmd`).
+    /// 2. **Write-ahead epoch consumption BEFORE touching git:** inside ONE SQLite `BEGIN IMMEDIATE`
+    ///    transaction, verifies no unresolved `'pending'` CAS exists for another op, checks
+    ///    `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`, consumes
+    ///    `written_epoch = incoming_epoch`, and records `fenced_git_refs(state = 'pending')`.
+    ///    It is therefore impossible for a crash to mutate a git ref without a consumed epoch.
+    /// 3. Executes `git -c core.hooksPath=/dev/null update-ref -- <ref_name> <new_oid> <expected_old_oid>`.
+    /// 4. Marks `fenced_git_refs.state = 'committed'` on success, or `'aborted'` on CAS failure
+    ///    (keeping `written_epoch` consumed so the single-use epoch can never be reused).
+    /// 5. If a crash occurs between step 2 and step 4, any other writer is refused fail-closed
+    ///    (`pending_git_ref_cas_recovery_required`) while retrying the exact `(op_id, payload_digest)`
+    ///    reconciles against `git rev-parse <ref_name>` to finish cleanly.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_atomic_git_ref_cas(
         &self,
@@ -429,148 +477,174 @@ impl FencingStore {
         expected_old_oid: &str,
         new_oid: &str,
     ) -> Result<FencedWriteOutcome, FencingError> {
-        // 1. Check idempotent replay first so a retried op_id+digest never re-runs update-ref.
-        struct EpochRow {
-            granted: i64,
-            written: i64,
-            last_op: Option<String>,
-            last_dig: Option<String>,
-            last_res: Option<String>,
-        }
-        {
-            let conn = self.connect()?;
-            let row = conn
-                .query_row(
-                    "SELECT granted_epoch, written_epoch, last_op_id, last_payload_digest, last_result_json
-                     FROM resource_epochs WHERE resource_id = ?1",
-                    params![resource_id],
-                    |r| {
-                        Ok(EpochRow {
-                            granted: r.get(0)?,
-                            written: r.get(1)?,
-                            last_op: r.get(2)?,
-                            last_dig: r.get(3)?,
-                            last_res: r.get(4)?,
-                        })
-                    },
-                )
-                .optional()
-                .map_err(|e| FencingError::Storage(format!("read epoch row: {e}")))?;
-            if let Some(EpochRow { granted, written, last_op, last_dig, last_res }) = row {
-                let granted = granted as u64;
-                let written = written as u64;
-                if incoming_epoch == written
-                    && last_op.as_deref() == Some(op_id)
-                    && last_dig.as_deref() == Some(payload_digest)
-                {
-                    return Ok(FencedWriteOutcome::IdempotentReplay {
-                        epoch: incoming_epoch,
-                        cached_result_json: last_res.unwrap_or_else(|| "null".to_string()),
-                    });
-                }
-                if incoming_epoch != granted {
-                    return Err(FencingError::StaleEpoch {
-                        resource_id: resource_id.to_string(),
-                        incoming: incoming_epoch,
-                        granted,
-                    });
-                }
-                if incoming_epoch <= written {
-                    return Err(FencingError::EpochAlreadyConsumed {
-                        resource_id: resource_id.to_string(),
-                        incoming: incoming_epoch,
-                        written,
-                    });
-                }
-            } else {
-                return Err(FencingError::StaleEpoch {
-                    resource_id: resource_id.to_string(),
-                    incoming: incoming_epoch,
-                    granted: 0,
-                });
-            }
+        struct PendingRefRow {
+            old_oid: String,
+            new_oid: String,
+            epoch: i64,
+            op_id: String,
+            payload_digest: String,
+            state: String,
         }
 
-        // 2. Validate ref format and commit existence directly via git (fixed trusted PATH, no shell).
-        let git_path = maestro_store::tree::git_path();
-        let chk = Command::new("git")
-            .env("PATH", git_path)
+        // 1. Validate ref format and target commit existence with hooks completely disabled.
+        let chk = Self::safe_git_cmd(repo)
             .args(["check-ref-format", ref_name])
-            .current_dir(repo)
             .output()
             .map_err(|e| FencingError::Storage(format!("git check-ref-format spawn: {e}")))?;
         if !chk.status.success() {
             return Err(FencingError::Storage(format!("invalid git ref format: {ref_name:?}")));
         }
-        let rev = Command::new("git")
-            .env("PATH", git_path)
+        let rev = Self::safe_git_cmd(repo)
             .args(["rev-parse", "--verify", "--quiet", &format!("{new_oid}^{{commit}}")])
-            .current_dir(repo)
             .output()
             .map_err(|e| FencingError::Storage(format!("git rev-parse spawn: {e}")))?;
         if !rev.status.success() {
             return Err(FencingError::Storage(format!("target commit {new_oid} does not exist in {}", repo.display())));
         }
 
-        // 3. Atomic compare-and-swap ref update in git (fails closed if current OID != expected_old_oid).
-        let upd = Command::new("git")
-            .env("PATH", git_path)
+        // 2. Check for an existing crash-pending op OR reserve (consume written_epoch + insert
+        //    state='pending') atomically in SQLite BEFORE touching git!
+        let mut recovering_same_pending = false;
+        {
+            let conn = self.connect()?;
+            let existing: Option<PendingRefRow> = conn
+                .query_row(
+                    "SELECT old_oid, new_oid, epoch, op_id, payload_digest, state
+                     FROM fenced_git_refs WHERE resource_id = ?1 AND ref_name = ?2",
+                    params![resource_id, ref_name],
+                    |r| {
+                        Ok(PendingRefRow {
+                            old_oid: r.get(0)?,
+                            new_oid: r.get(1)?,
+                            epoch: r.get(2)?,
+                            op_id: r.get(3)?,
+                            payload_digest: r.get(4)?,
+                            state: r.get(5)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|e| FencingError::Storage(format!("read fenced_git_refs: {e}")))?;
+            if let Some(row) = existing
+                && row.state == "pending"
+            {
+                if row.epoch as u64 == incoming_epoch
+                    && row.op_id == op_id
+                    && row.payload_digest == payload_digest
+                    && row.old_oid == expected_old_oid
+                    && row.new_oid == new_oid
+                {
+                    recovering_same_pending = true;
+                } else {
+                    return Err(FencingError::Storage(format!(
+                        "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS for ({resource_id}, {ref_name}) at epoch={} op_id={}",
+                        row.epoch, row.op_id
+                    )));
+                }
+            }
+        }
+
+        if recovering_same_pending {
+            let current_oid = Self::read_git_ref_oid(repo, ref_name)?;
+            let expected_is_zero = expected_old_oid.bytes().all(|b| b == b'0');
+            let already_applied = current_oid.as_deref() == Some(new_oid);
+            let still_at_old =
+                (expected_is_zero && current_oid.is_none()) || current_oid.as_deref() == Some(expected_old_oid);
+            if already_applied {
+                let conn = self.connect()?;
+                conn.execute(
+                    "UPDATE fenced_git_refs SET state = 'committed'
+                     WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
+                    params![resource_id, ref_name, incoming_epoch as i64, op_id],
+                )
+                .map_err(|e| FencingError::Storage(format!("commit recovered fenced_git_refs: {e}")))?;
+                return Ok(FencedWriteOutcome::IdempotentReplay {
+                    epoch: incoming_epoch,
+                    cached_result_json: result_json.to_string(),
+                });
+            }
+            if !still_at_old {
+                let conn = self.connect()?;
+                let _ = conn.execute(
+                    "UPDATE fenced_git_refs SET state = 'aborted'
+                     WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
+                    params![resource_id, ref_name, incoming_epoch as i64, op_id],
+                );
+                return Err(FencingError::Storage(format!(
+                    "git_ref_cas_diverged: pending recovery expected {expected_old_oid} or {new_oid}, found {current_oid:?}"
+                )));
+            }
+        } else {
+            let res_owned = resource_id.to_string();
+            let ref_owned = ref_name.to_string();
+            let old_owned = expected_old_oid.to_string();
+            let new_owned = new_oid.to_string();
+            let op_owned = op_id.to_string();
+            let dig_owned = payload_digest.to_string();
+            let reserved = self.commit_fenced_write_with_tx(
+                resource_id,
+                incoming_epoch,
+                op_id,
+                payload_digest,
+                result_json,
+                move |conn| {
+                    conn.execute(
+                        "INSERT INTO fenced_git_refs
+                           (resource_id, ref_name, old_oid, new_oid, epoch, op_id, payload_digest, state)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending')
+                         ON CONFLICT(resource_id, ref_name) DO UPDATE SET
+                           old_oid = excluded.old_oid,
+                           new_oid = excluded.new_oid,
+                           epoch = excluded.epoch,
+                           op_id = excluded.op_id,
+                           payload_digest = excluded.payload_digest,
+                           state = 'pending'",
+                        params![res_owned, ref_owned, old_owned, new_owned, incoming_epoch as i64, op_owned, dig_owned],
+                    )
+                    .map_err(|e| FencingError::Storage(format!("reserve fenced_git_refs failed: {e}")))?;
+                    Ok(())
+                },
+            )?;
+            if let FencedWriteOutcome::IdempotentReplay { .. } = reserved {
+                return Ok(reserved);
+            }
+        }
+
+        // 3. Atomic compare-and-swap ref update in git with ALL hooks disabled (written_epoch is
+        //    ALREADY durably consumed in SQLite before this line runs!).
+        let upd = Self::safe_git_cmd(repo)
             .args(["update-ref", "--", ref_name, new_oid, expected_old_oid])
-            .current_dir(repo)
             .output()
             .map_err(|e| FencingError::Storage(format!("git update-ref spawn: {e}")))?;
         if !upd.status.success() {
+            let conn = self.connect()?;
+            let _ = conn.execute(
+                "UPDATE fenced_git_refs SET state = 'aborted'
+                 WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
+                params![resource_id, ref_name, incoming_epoch as i64, op_id],
+            );
             return Err(FencingError::Storage(format!(
                 "git_ref_cas_failed: git update-ref {ref_name} {new_oid} {expected_old_oid} failed: {}",
                 String::from_utf8_lossy(&upd.stderr).trim()
             )));
         }
 
-        // 4. Commit written_epoch + durable receipt in SQLite; compensate git ref on failure.
-        let res_owned = resource_id.to_string();
-        let ref_owned = ref_name.to_string();
-        let old_owned = expected_old_oid.to_string();
-        let new_owned = new_oid.to_string();
-        let op_owned = op_id.to_string();
-        let commit_res = self.commit_fenced_write_with_tx(
-            resource_id,
-            incoming_epoch,
-            op_id,
-            payload_digest,
-            result_json,
-            move |conn| {
-                conn.execute(
-                    "INSERT INTO fenced_git_refs (resource_id, ref_name, old_oid, new_oid, epoch, op_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(resource_id, ref_name) DO UPDATE SET
-                       old_oid = excluded.old_oid,
-                       new_oid = excluded.new_oid,
-                       epoch = excluded.epoch,
-                       op_id = excluded.op_id",
-                    params![res_owned, ref_owned, old_owned, new_owned, incoming_epoch as i64, op_owned],
-                )
-                .map_err(|e| FencingError::Storage(format!("fenced_git_refs write failed: {e}")))?;
-                Ok(())
-            },
-        );
-        if let Err(err) = commit_res {
-            let is_zero = expected_old_oid.bytes().all(|b| b == b'0');
-            let _ = if is_zero {
-                Command::new("git")
-                    .env("PATH", git_path)
-                    .args(["update-ref", "-d", ref_name, new_oid])
-                    .current_dir(repo)
-                    .output()
-            } else {
-                Command::new("git")
-                    .env("PATH", git_path)
-                    .args(["update-ref", "--", ref_name, expected_old_oid, new_oid])
-                    .current_dir(repo)
-                    .output()
-            };
-            return Err(err);
+        // 4. Mark durable WAL intent committed.
+        let conn = self.connect()?;
+        conn.execute(
+            "UPDATE fenced_git_refs SET state = 'committed'
+             WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
+            params![resource_id, ref_name, incoming_epoch as i64, op_id],
+        )
+        .map_err(|e| FencingError::Storage(format!("finalize fenced_git_refs failed: {e}")))?;
+        if recovering_same_pending {
+            Ok(FencedWriteOutcome::IdempotentReplay {
+                epoch: incoming_epoch,
+                cached_result_json: result_json.to_string(),
+            })
+        } else {
+            Ok(FencedWriteOutcome::Committed { epoch: incoming_epoch })
         }
-        commit_res
     }
 
     /// Pre-mutation fencing check: verifies `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`

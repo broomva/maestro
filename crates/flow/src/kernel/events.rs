@@ -128,10 +128,14 @@ pub struct Claimed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_epoch: Option<u64>,
     /// Dedicated worker process group ID (`pgid > 1`) bound to an IR v10 child subflow claim so
-    /// quiescence/reconciliation verifies the entire worker process group exited (`kill(-pgid, 0) == ESRCH`),
+    /// quiescence/reconciliation verifies the worker process group exited (`kill(-pgid, 0) == ESRCH`),
     /// never relying on `audit.process.pid` (which identifies the CLI/MCP process).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_pgid: Option<u32>,
+    /// Dedicated OS cgroup v2 directory path (e.g. `/sys/fs/cgroup/.../maestro-worker-<id>`)
+    /// providing kernel-enforced process containment (`setsid`/`setpgid` cannot escape a cgroup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_cgroup: Option<String>,
 }
 
 /// The receipt: a node accepted in an iteration, with the verify the kernel ran.

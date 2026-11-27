@@ -557,6 +557,9 @@ impl PaseoRegistry {
         if let Some(pgid) = agent.pid.and_then(|pid| crate::attribution::attest_worker_pgid(reader, pid)) {
             verified = verified.with_worker_pgid(pgid);
         }
+        if let Some(cg) = agent.pid.and_then(|pid| crate::attribution::attest_worker_cgroup(reader, pid)) {
+            verified = verified.with_worker_cgroup(cg);
+        }
         Ok(verified)
     }
 

@@ -94,12 +94,31 @@ fn owner(id: &str) -> Owner {
     Owner { session: s, marker_sha256: marker_digest(id) }
 }
 
+fn make_test_cgroup(root: &std::path::Path, name: &str, pids: &[u32], populated: bool) -> PathBuf {
+    let cg = root.join(name);
+    std::fs::create_dir_all(&cg).unwrap();
+    let procs = pids.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    std::fs::write(cg.join("cgroup.procs"), if procs.is_empty() { String::new() } else { format!("{procs}\n") })
+        .unwrap();
+    let pop = if populated { 1 } else { 0 };
+    std::fs::write(cg.join("cgroup.events"), format!("populated {pop}\nfrozen 0\n")).unwrap();
+    cg
+}
+
+fn empty_test_cgroup(cg: &std::path::Path) {
+    std::fs::write(cg.join("cgroup.procs"), "").unwrap();
+    std::fs::write(cg.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+}
+
 fn verified_owner(id: &str) -> VerifiedSession {
     let s: SessionRef = format!("t3:local/{id}").parse().unwrap();
     let live_pgid = rustix::process::getpgrp().as_raw_nonzero().get() as u32;
+    let cg_root = std::env::temp_dir().join(format!("maestro-ir-v10-cg-{}", std::process::id()));
+    let cg = make_test_cgroup(&cg_root, &format!("maestro-worker-{id}"), &[std::process::id()], true);
     VerifiedSession::new(s, "/tmp", Some(Harness::Codex), None, vec![])
         .with_owner_marker(id)
         .with_worker_pgid(live_pgid)
+        .with_worker_cgroup(cg.to_string_lossy())
 }
 
 fn verified_owner_with_pgid(id: &str, pgid: u32) -> VerifiedSession {
@@ -534,8 +553,9 @@ nodes:
     expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), items_v1, BTreeMap::new(), &me).unwrap();
     let (child, ep) = claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", None, &me).unwrap();
 
-    // Record a real live worker process group + open EffectStarted on the child!
+    // Record a real live worker process group + cgroup + open EffectStarted on the child!
     let (mut live_worker, live_pgid) = spawn_worker_pgrp();
+    let cg_t7 = make_test_cgroup(_dir.path(), "cg-t7", &[live_pgid], true);
     let claimed_ev = Claimed {
         node: "work".into(),
         iteration: Iteration::new(),
@@ -547,6 +567,7 @@ nodes:
         performer: None,
         owner_epoch: Some(ep),
         worker_pgid: Some(live_pgid),
+        worker_cgroup: Some(cg_t7.to_string_lossy().to_string()),
         tool_use_id: None,
         audit: None,
     };
@@ -634,9 +655,10 @@ nodes:
     };
     assert!(!child_wt.join("reconcile_ran.txt").exists(), "reconcile command must not run while worker is alive");
 
-    // Kill and reap the original worker process group -> post-termination reconcile now executes!
+    // Kill and reap the original worker process group + empty cgroup -> post-termination reconcile now executes!
     let _ = live_worker.kill();
     let _ = live_worker.wait();
+    empty_test_cgroup(&cg_t7);
     reconcile_superseded_effect(
         &mut g,
         &parent,
@@ -1235,6 +1257,7 @@ fn t15_performer_union_includes_failed_attempt_when_retry_succeeds() {
             claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", Some(p_claude.clone()), &me)
                 .unwrap();
         let c1_seq = g.log(&cid1).unwrap().seq();
+        let cg_c1 = make_test_cgroup(dir.path(), "cg-t14-c1", &[], false);
         let c1_claim = Claimed {
             node: "work".into(),
             iteration: Iteration::new(),
@@ -1248,6 +1271,7 @@ fn t15_performer_union_includes_failed_attempt_when_retry_succeeds() {
             audit: None,
             owner_epoch: Some(0),
             worker_pgid: Some(spawn_dead_pgrp()),
+            worker_cgroup: Some(cg_c1.to_string_lossy().to_string()),
         };
         g.append(&cid1, c1_seq, c1_claim.to_event().unwrap()).unwrap();
         finalize_map_item(
@@ -1908,7 +1932,9 @@ fn t23_round5_quiescence_reconcile_fencing_and_worktree_hardening() {
         // Attempt 1: dead historical process group; Attempt 2: STILL-ALIVE worker process group!
         let dead_pgid = spawn_dead_pgrp();
         let (mut live_proc, live_pgid) = spawn_worker_pgrp();
-        for (attempt, pgid) in [(1u32, dead_pgid), (2u32, live_pgid)] {
+        let cg_dead = make_test_cgroup(dir.path(), "cg-t23-dead", &[], false);
+        let cg_live = make_test_cgroup(dir.path(), "cg-t23-live", &[live_pgid], true);
+        for (attempt, pgid, cg_path) in [(1u32, dead_pgid, &cg_dead), (2u32, live_pgid, &cg_live)] {
             let cev = Claimed {
                 node: "work".into(),
                 iteration: Iteration::new(),
@@ -1920,6 +1946,7 @@ fn t23_round5_quiescence_reconcile_fencing_and_worktree_hardening() {
                 performer: None,
                 owner_epoch: Some(ep),
                 worker_pgid: Some(pgid),
+                worker_cgroup: Some(cg_path.to_string_lossy().to_string()),
                 tool_use_id: None,
                 audit: None,
             };
@@ -1994,9 +2021,10 @@ fn t23_round5_quiescence_reconcile_fencing_and_worktree_hardening() {
             .code(),
             "quiescence_refused"
         );
-        // Kill & reap live_proc -> NOW quiescence succeeds!
+        // Kill & reap live_proc and drain its cgroup -> NOW quiescence succeeds!
         let _ = live_proc.kill();
         let _ = live_proc.wait();
+        empty_test_cgroup(&cg_live);
         quiesce_subflow(
             &mut g,
             &started.instance,
@@ -2148,6 +2176,7 @@ fn t24_round6_audit_prefencing_and_crash_recovery() {
             performer: None,
             owner_epoch: Some(ep),
             worker_pgid: Some(dead_pgid),
+            worker_cgroup: None,
             tool_use_id: None,
             audit: None,
         };
@@ -2162,6 +2191,7 @@ fn t24_round6_audit_prefencing_and_crash_recovery() {
             performer: None,
             owner_epoch: Some(ep),
             worker_pgid: None,
+            worker_cgroup: None,
             tool_use_id: None,
             audit: None,
         };
@@ -2455,6 +2485,7 @@ fn t25_round7_pgrp_termination_content_addressed_targets_and_staging_recovery() 
         let mut cli_proc = Command::new("true").spawn().unwrap();
         let dead_cli_pid = cli_proc.id();
         let _ = cli_proc.wait();
+        let cg_agent = make_test_cgroup(dir.path(), "cg-t25-agent", &[agent_pgid], true);
         let cev = Claimed {
             node: "work".into(),
             iteration: Iteration::new(),
@@ -2466,6 +2497,7 @@ fn t25_round7_pgrp_termination_content_addressed_targets_and_staging_recovery() 
             performer: None,
             owner_epoch: Some(ep),
             worker_pgid: Some(agent_pgid),
+            worker_cgroup: Some(cg_agent.to_string_lossy().to_string()),
             tool_use_id: None,
             audit: Some(Audit {
                 identity: IdentityFacts { mode: "cli".into(), variable: None, thread: None },
@@ -2536,9 +2568,10 @@ fn t25_round7_pgrp_termination_content_addressed_targets_and_staging_recovery() 
             .code(),
             "quiescence_refused"
         );
-        // Kill & reap agent_proc -> kill(-agent_pgid, 0) == ESRCH -> NOW succeeds!
+        // Kill & reap agent_proc + empty its cgroup -> NOW succeeds!
         let _ = agent_proc.kill();
         let _ = agent_proc.wait();
+        empty_test_cgroup(&cg_agent);
         quiesce_subflow(
             &mut g,
             &started.instance,
@@ -2773,5 +2806,269 @@ nodes:
         assert_eq!(recovered_cid, cid);
         assert!(!partial_staging.exists(), "stale partial staging dir must be cleaned up on recovery");
         assert!(wt_final.is_dir(), "atomic staged allocation must promote final child_worktree");
+    }
+}
+
+#[test]
+fn t26_cgroup_containment_git_hooks_disabled_and_wal_crash_atomic_cas() {
+    // 1. OS cgroup containment prevents setsid()/setpgid() escape:
+    //    - Claiming a child subflow without worker_cgroup -> refused (`missing_worker_cgroup`).
+    //    - Claiming with an empty/dead cgroup -> refused (`dead_worker_cgroup`).
+    //    - Even after worker_pgid exits (`kill(-pgid, 0) == ESRCH`), if `cgroup.procs` still lists
+    //      a detached descendant PID OR `cgroup.events` still reports `populated 1`, quiescence
+    //      MUST fail closed (`quiescence_refused`)! Only when BOTH pgid is dead AND cgroup is empty
+    //      (`populated 0`, 0 PIDs) does quiescence succeed.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let live_pgid = rustix::process::getpgrp().as_raw_nonzero().get() as u32;
+        let sess_no_cg = verified_owner_with_pgid("owner-cg", live_pgid);
+        let empty_cg = make_test_cgroup(dir.path(), "cg-empty", &[], false);
+        let sess_empty_cg =
+            verified_owner_with_pgid("owner-cg", live_pgid).with_worker_cgroup(empty_cg.to_string_lossy());
+        let sess = verified_owner("owner-cg");
+
+        let compiled = compile(&lead_v3_yaml()).unwrap();
+        let started =
+            start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2})).unwrap();
+        let cp = claim(&mut ledger, &sess, &started.instance, "plan_waves").unwrap();
+        complete(
+            &mut ledger,
+            &sess,
+            &cp.token,
+            json!({"lanes": [{"lane_id": "lane-a", "write_set": ["src/a/**"]}]}),
+            &Limits::default(),
+        )
+        .unwrap();
+        let cm = claim(&mut ledger, &sess, &started.instance, "execute_lanes").unwrap();
+        let cid = InstanceId::new(cm.inputs.get("__map_child_instance").unwrap()).unwrap();
+
+        assert_eq!(claim(&mut ledger, &sess_no_cg, &cid, "work").unwrap_err().code(), "missing_worker_cgroup");
+        assert_eq!(claim(&mut ledger, &sess_empty_cg, &cid, "work").unwrap_err().code(), "dead_worker_cgroup");
+
+        let (mut worker_proc, worker_pgid) = spawn_worker_pgrp();
+        let worker_cg = make_test_cgroup(dir.path(), "cg-live-worker", &[worker_pgid, 88888], true);
+        let sess_worker =
+            verified_owner_with_pgid("owner-cg", worker_pgid).with_worker_cgroup(worker_cg.to_string_lossy());
+        let _cw = claim(&mut ledger, &sess_worker, &cid, "work").unwrap();
+
+        let me = owner("owner-cg");
+        let mut g = ledger.lock().unwrap();
+        supersede_stale_items(
+            &mut g,
+            &started.instance,
+            "execute_lanes",
+            Iteration::new(),
+            vec![MapItemSpec {
+                key: "lane-a".into(),
+                input_digest: digest(&json!({"v": 2})),
+                input: json!({"lane_id": "lane-a"}),
+                write_set: vec!["src/a/**".into()],
+            }],
+            BTreeMap::new(),
+            &me,
+        )
+        .unwrap();
+
+        // Kill the primary worker process group so kill(-worker_pgid, 0) == ESRCH, AND remove the
+        // child worktree — simulating an escaped setsid() descendant (PID 88888) still inside worker_cg!
+        let _ = worker_proc.kill();
+        let _ = worker_proc.wait();
+        let _ = remove_child_worktree_receipt(&mut g, &cid);
+        std::fs::write(worker_cg.join("cgroup.procs"), "88888\n").unwrap();
+        let rcpt = format!("pgid:{worker_pgid}:exited");
+        assert_eq!(
+            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &rcpt, &me)
+                .unwrap_err()
+                .code(),
+            "quiescence_refused",
+            "escaped setsid() descendant still in cgroup.procs MUST block quiescence"
+        );
+        // Empty cgroup.procs but still populated 1 (child sub-cgroup active) -> STILL refused!
+        std::fs::write(worker_cg.join("cgroup.procs"), "").unwrap();
+        assert_eq!(
+            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &rcpt, &me)
+                .unwrap_err()
+                .code(),
+            "quiescence_refused",
+            "cgroup.events populated 1 MUST block quiescence"
+        );
+        // Both cgroup.procs empty AND populated 0 -> quiescence succeeds!
+        empty_test_cgroup(&worker_cg);
+        quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &rcpt, &me)
+            .unwrap();
+    }
+
+    // 2. Repository-controlled git hooks (`reference-transaction` in .git/hooks AND core.hooksPath)
+    //    MUST NEVER execute during `maestro:fenced-git-ref-cas`!
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        init_git_repo(&repo_dir);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-hooks");
+
+        let hook1_flag = dir.path().join("hook1_ran.txt");
+        let hook2_flag = dir.path().join("hook2_ran.txt");
+        let default_hook = repo_dir.join(".git/hooks/reference-transaction");
+        std::fs::write(&default_hook, format!("#!/bin/sh\necho pwned > {}\n", hook1_flag.display())).unwrap();
+        let evil_hooks_dir = dir.path().join("evil-hooks");
+        std::fs::create_dir_all(&evil_hooks_dir).unwrap();
+        let custom_hook = evil_hooks_dir.join("reference-transaction");
+        std::fs::write(&custom_hook, format!("#!/bin/sh\necho pwned > {}\n", hook2_flag.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&default_hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&custom_hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            Command::new("git")
+                .args(["config", "core.hooksPath", evil_hooks_dir.to_str().unwrap()])
+                .current_dir(&repo_dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let head_oid = String::from_utf8(
+            Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo_dir).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let zero_oid = "0".repeat(head_oid.len());
+        let flow_yaml = format!(
+            r#"
+flow: fenced_git_no_hooks
+version: 1
+params: [repo, fencing_resource]
+workdir: "{{{{params.repo}}}}"
+nodes:
+  ship:
+    class: effect
+    run: ["maestro:fenced-git-ref-cas", "refs/heads/no-hooks-ship", "{zero_oid}", "{head_oid}"]
+    reconcile: [sh, -c, "true"]
+"#
+        );
+        let compiled = compile(&flow_yaml).unwrap();
+        let s = start(
+            &mut ledger,
+            &sess,
+            &compiled,
+            json!({"repo": repo_dir.to_str().unwrap(), "fencing_resource": "git:no-hooks"}),
+        )
+        .unwrap();
+        let c = claim(&mut ledger, &sess, &s.instance, "ship").unwrap();
+        let comp = complete(&mut ledger, &sess, &c.token, json!({"ok": true}), &Limits::default()).unwrap();
+        assert!(matches!(comp, Completion::Completed { .. }), "hook-disabled git-ref CAS must complete: {comp:?}");
+        assert!(!hook1_flag.exists(), ".git/hooks/reference-transaction MUST NEVER execute on fenced path");
+        assert!(!hook2_flag.exists(), "core.hooksPath reference-transaction MUST NEVER execute on fenced path");
+    }
+
+    // 3. WAL-first crash-atomic git-ref CAS recovery:
+    //    Simulate a crash AFTER written_epoch=1 was consumed & git update-ref applied the ref,
+    //    leaving `fenced_git_refs.state = 'pending'`. A DIFFERENT writer MUST be blocked fail-closed
+    //    (`pending_git_ref_cas_recovery_required`), while retrying the exact same `(epoch=1, op_id,
+    //    payload_digest)` reconciles cleanly to `IdempotentReplay` and marks `state = 'committed'`.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        init_git_repo(&repo_dir);
+        let head_oid = String::from_utf8(
+            Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo_dir).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let zero_oid = "0".repeat(head_oid.len());
+        let db_path = dir.path().join("fencing_epochs.sqlite");
+        let fstore = FencingStore::open(&db_path).unwrap();
+        let rlock = fstore.acquire_resource_lock("git:crash-wal").unwrap();
+        let ep1 = fstore.grant_epoch_locked(&rlock, "git:crash-wal").unwrap();
+        assert_eq!(ep1, 1);
+
+        // Execute normally, then rewind `fenced_git_refs.state` back to `'pending'` to simulate a
+        // crash right after `git update-ref` succeeded and before the final `state = 'committed'`!
+        let out = fstore
+            .execute_atomic_git_ref_cas(
+                &rlock,
+                &repo_dir,
+                "git:crash-wal",
+                ep1,
+                "op-1",
+                "sha256:dig1",
+                "{}",
+                "refs/heads/wal-ship",
+                &zero_oid,
+                &head_oid,
+            )
+            .unwrap();
+        assert_eq!(out, FencedWriteOutcome::Committed { epoch: 1 });
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("UPDATE fenced_git_refs SET state = 'pending' WHERE resource_id = 'git:crash-wal'", []).unwrap();
+        drop(conn);
+
+        // A different writer (epoch 2, op-2) MUST be refused fail-closed while 'pending' is unresolved!
+        let ep2 = fstore.grant_epoch_locked(&rlock, "git:crash-wal").unwrap();
+        assert_eq!(ep2, 2);
+        let blocked = fstore
+            .execute_atomic_git_ref_cas(
+                &rlock,
+                &repo_dir,
+                "git:crash-wal",
+                ep2,
+                "op-2",
+                "sha256:dig2",
+                "{}",
+                "refs/heads/wal-ship",
+                &head_oid,
+                &head_oid,
+            )
+            .unwrap_err();
+        assert!(
+            blocked.to_string().contains("pending_git_ref_cas_recovery_required"),
+            "different writer must fail closed on pending crash-recovery row, got: {blocked}"
+        );
+
+        // Exact retry of `(ep1, op-1, sha256:dig1)` reconciles against git rev-parse -> committed!
+        let recovered = fstore
+            .execute_atomic_git_ref_cas(
+                &rlock,
+                &repo_dir,
+                "git:crash-wal",
+                ep1,
+                "op-1",
+                "sha256:dig1",
+                "{}",
+                "refs/heads/wal-ship",
+                &zero_oid,
+                &head_oid,
+            )
+            .unwrap();
+        assert!(matches!(recovered, FencedWriteOutcome::IdempotentReplay { epoch: 1, .. }));
+
+        // Once recovered to 'committed', ep2 can now proceed cleanly!
+        let out2 = fstore
+            .execute_atomic_git_ref_cas(
+                &rlock,
+                &repo_dir,
+                "git:crash-wal",
+                ep2,
+                "op-2",
+                "sha256:dig2",
+                "{}",
+                "refs/heads/wal-ship",
+                &head_oid,
+                &head_oid,
+            )
+            .unwrap();
+        assert_eq!(out2, FencedWriteOutcome::Committed { epoch: 2 });
     }
 }

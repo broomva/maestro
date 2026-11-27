@@ -242,6 +242,7 @@ fn claimed(attempt: u32, until: Timestamp, token: &str) -> NewEvent {
         audit: None,
         owner_epoch: None,
         worker_pgid: None,
+        worker_cgroup: None,
     };
     c.to_event().unwrap()
 }
