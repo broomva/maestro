@@ -1083,7 +1083,7 @@ mutate $fk/compile.rs '            unique("edge", edges.iter().map(|(e, _)| e.as
 mutate $fk/compile.rs '                unique("exit_map", codes.iter().map(String::as_str))?;' ''
 mutate $fk/compile.rs '    if def.uses.is_some() {' '    if false {'
 mutate $fk/compile.rs '    if def.templates.is_some() {' '    if false {'
-mutate $fk/compile.rs '.find(|(_, n)| n.uses.is_some())' '.find(|_| false)'
+mutate $fk/compile.rs '.find(|(_, n)| n.uses.is_some() && !matches!(n.class, ClassDef::Subflow | ClassDef::Map))' '.find(|_| false)'
 mutate $fk/compile.rs "    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {" '    if id.is_empty() {'
 mutate $fk/compile.rs '        plain("param", name)?;' ''
 mutate $fk/compile.rs '        if f.all.is_empty() {' '        if false {'
@@ -1304,14 +1304,16 @@ mutate $fk/write.rs '    let Some(owner) = &owners.owner else {' '    let Some(o
 mutate $fk/write.rs '    if !same_owner(owner, &me) {' '    if false {'
 mutate $fk/write.rs '    stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)' '    stored.marker_sha256 == me.marker_sha256'
 mutate $fk/write.rs '    stored.marker_sha256 == me.marker_sha256 && stored.session.canonical(host) == me.session.canonical(host)' '    stored.session.canonical(host) == me.session.canonical(host)'
-mutate $fk/write.rs '    } else {
+mutate $fk/write.rs '    } else if started.parent_ref.is_none() {
         check_owner(&log, &started, instance, session)?;
-    }
-    let now = wall(&log)?;' '    } else {
-    }
-    let now = wall(&log)?;'
-mutate $fk/write.rs '    let owners = check_owner(&log, &started, instance, session)?;
-    let claims = Claims::fold(&log)?;' '    let owners = super::adoption::owners(&log, &started)?;
+    } else {' '    } else if started.parent_ref.is_none() {
+    } else {'
+mutate $fk/write.rs '    } else {
+        Some(check_owner(&log, &started, instance, session)?)
+    };
+    let claims = Claims::fold(&log)?;' '    } else {
+        Some(super::adoption::owners(&log, &started)?)
+    };
     let claims = Claims::fold(&log)?;'
 # The clock (P20 round 2): every write reads the wall clock itself, under the lock, right before
 # its checks; a run is stamped with its start and judged after it at a fresh read. A clock ahead
@@ -1344,9 +1346,16 @@ mutate $fk/write.rs '    drop(guard);
     let ran_at = clock::now() + SignedDuration::from_secs(30);'
 mutate $fk/write.rs '    let after = wall(&log)?;' '    let after = wall(&log)? - SignedDuration::from_secs(30);'
 mutate $fk/write.rs '    let ran_at = clock::now();
-    let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
-        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &[] };
+    let (ran, fence_commit_err) = match effect_fence_cfg {
+        Some(cfg) => run_fenced_effect(&plan, limits, cfg, &outputs)?,
+        None => (
+            match &plan.snapshot {
+                Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
+                None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+            },
+            None,
+        ),
     };
     pause!("command_ran");
 
@@ -1355,9 +1364,16 @@ mutate $fk/write.rs '    let ran_at = clock::now();
     let log = guard.log(&instance)?;
     let after = wall(&log)?;' '    let ran_at = clock::now();
     let began = std::time::Instant::now();
-    let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
-        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &[] };
+    let (ran, fence_commit_err) = match effect_fence_cfg {
+        Some(cfg) => run_fenced_effect(&plan, limits, cfg, &outputs)?,
+        None => (
+            match &plan.snapshot {
+                Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
+                None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+            },
+            None,
+        ),
     };
     pause!("command_ran");
 
@@ -1419,12 +1435,12 @@ mutate $fk/write.rs '                    if let Some(rec) = claims.latest_mut(&(
                         rec.spent = true;' '                    if let Some(rec) = claims.latest_mut(&(c.node, c.iteration))
                         && rec.attempt == c.attempt
                     {'
-mutate $fk/write.rs '    if latest != Some(sha) || now >= rec.lease_until {' '    if now >= rec.lease_until {'
-mutate $fk/write.rs '    if latest != Some(sha) || now >= rec.lease_until {' '    if latest != Some(sha) || now > rec.lease_until {'
-mutate $fk/write.rs '    if latest != Some(sha) || now >= rec.lease_until {' '    if latest != Some(sha) {'
+mutate $fk/write.rs '    if (!is_map_node && latest != Some(sha)) || now >= rec.lease_until {' '    if now >= rec.lease_until {'
+mutate $fk/write.rs '    if (!is_map_node && latest != Some(sha)) || now >= rec.lease_until {' '    if (!is_map_node && latest != Some(sha)) || now > rec.lease_until {'
+mutate $fk/write.rs '    if (!is_map_node && latest != Some(sha)) || now >= rec.lease_until {' '    if !is_map_node && latest != Some(sha) {'
 mutate $fk/write.rs '    if *iteration != rec.iteration || state == Some(State::Exhausted) {' '    if state == Some(State::Exhausted) {'
 mutate $fk/write.rs '    if *iteration != rec.iteration || state == Some(State::Exhausted) {' '    if *iteration != rec.iteration {'
-mutate $fk/write.rs '    if *inputs != rec.inputs {' '    if false {'
+mutate $fk/write.rs '    if *inputs != rec_inputs_clean {' '    if false {'
 # Complete: limits and outputs bounded; enabled (fresh) before and after the run; the flows
 # lock released while the command runs; everything checked again after it at the clock read
 # again; only the command's own exit status makes a receipt.
@@ -1438,13 +1454,27 @@ mutate $fk/write.rs '    if depth >= MAX_NESTING {' '    if false {'
 mutate $fk/write.rs '    if !held.next.enabled.iter().any(|e| e.node == held.rec.node) {' '    if false {'
 mutate $fk/write.rs '    drop(guard);
     let ran_at = clock::now();
-    let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
-        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &[] };
+    let (ran, fence_commit_err) = match effect_fence_cfg {
+        Some(cfg) => run_fenced_effect(&plan, limits, cfg, &outputs)?,
+        None => (
+            match &plan.snapshot {
+                Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
+                None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+            },
+            None,
+        ),
     };' '    let ran_at = clock::now();
-    let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
-        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &[] };
+    let (ran, fence_commit_err) = match effect_fence_cfg {
+        Some(cfg) => run_fenced_effect(&plan, limits, cfg, &outputs)?,
+        None => (
+            match &plan.snapshot {
+                Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
+                None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+            },
+            None,
+        ),
     };
     drop(guard);'
 mutate $fk/write.rs '    let held = name(hold(log, session, &instance, &sha, after)?);' '    let _ = (log, after);
@@ -1501,7 +1531,7 @@ mutate $fk/replay.rs '        if !eval.settled(rid, i) {
 mutate $fk/replay.rs '                read.push((m, c));' ''
 mutate $fk/replay.rs '                read.push((b.as_str(), eval.node(b, j)));' ''
 mutate $fk/replay.rs '            EffectStarted::KIND,
-            AskPinned::KIND,' '            AskPinned::KIND,'
+            EffectReconciled::KIND,' '            EffectReconciled::KIND,'
 # Effects declare a command; the compiler refuses one without.
 mutate $fk/compile.rs '                Some(run) if !run.is_empty() => run,' '                Some(run) => run,
                 None => Vec::new(),'
@@ -1514,7 +1544,9 @@ mutate $fk/write.rs '    check_verb(&held, false)?;' ''
 mutate $fk/write.rs '    check_verb(&held, true)?;' ''
 mutate $fk/write.rs '        Class::Choice { edges, .. } => edges.get(edge).cloned(),' '        Class::Choice { edges, .. } => edges.values().next().cloned(),'
 mutate $fk/write.rs '    let held = hold(log, session, &instance, &sha, judged_at)?;
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, held.rec.owner_epoch, false)?;
     if let Err(unfit) = enabled(&held) {' '    let _ = (log, judged_at);
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, held.rec.owner_epoch, false)?;
     if let Err(unfit) = enabled(&held) {'
 mutate $fk/write.rs '    if let Err(unfit) = enabled(&held) {
         return reject(&mut guard, &held, unfit);
@@ -1566,9 +1598,9 @@ mutate $fk/write.rs '        if let Err(unfit) = prepare(&held, &outputs) {
         let guard_digest' '        let guard_digest'
 mutate $fk/write.rs '            Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
         };
-        let intent' '            Err(_) => None,
+        let fence_db' '            Err(_) => None,
         };
-        let intent'
+        let fence_db'
 mutate $fk/write.rs '        append_writable(&mut guard, &instance, held.log.seq(), intent.to_event()?)?;' ''
 mutate $fk/write.rs '                    claims.effects.insert((started.node, started.iteration, started.inputs), started.attempt);' ''
 mutate $fk/write.rs 'let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));' 'let effect_started = false;'
@@ -1586,9 +1618,9 @@ mutate $fk/write.rs '    let lease_until = capped(until(now, lease(held.node()?)
 mutate $fk/write.rs '    cancel_at.map_or(lease_until, |at| lease_until.min(at))' '    cancel_at.map_or(lease_until, |_| lease_until)'
 mutate $fk/write.rs '        cancel_at: cancel_at.map(|at| at.to_string()),' '        cancel_at: None,'
 mutate $fk/write.rs '                    let cancel_at = c.cancel_at.as_deref().map(|at| stamp(log, e.seq, at)).transpose()?;' '                    let cancel_at: Option<Timestamp> = None;'
-mutate $fk/write.rs 'rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at)' 'rec.cancel_at.filter(|_| false)'
-mutate $fk/write.rs 'rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at)' 'rec.cancel_at.filter(|at| latest == Some(sha) && now > *at)'
-mutate $fk/write.rs 'rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at)' 'rec.cancel_at.filter(|at| now >= *at)'
+mutate $fk/write.rs 'rec.cancel_at.filter(|at| (is_map_node || latest == Some(sha)) && now >= *at)' 'rec.cancel_at.filter(|_| false)'
+mutate $fk/write.rs 'rec.cancel_at.filter(|at| (is_map_node || latest == Some(sha)) && now >= *at)' 'rec.cancel_at.filter(|at| (is_map_node || latest == Some(sha)) && now > *at)'
+mutate $fk/write.rs 'rec.cancel_at.filter(|at| (is_map_node || latest == Some(sha)) && now >= *at)' 'rec.cancel_at.filter(|at| now >= *at)'
 # P20 round 1 (maestro#28). The guard host: a process that never called guard_entry evaluates
 # nothing; guard_entry registers it; the variable alone does not make a binary the evaluator; an
 # evaluator that crashes or exits non-zero is an error, never a verdict; the writers' default
@@ -2159,7 +2191,9 @@ mutate $adopt 'Some(r) if !r.ask.linked && r.ask.body_hash == l.body_hash => r.a
 # After `Adopted`: the claims taken before it are the former owner's; the current owner writes; a
 # log ending in `Retired` takes no write; status names the current owner; replay reads the kinds.
 mutate $adopt '                self.since = e.seq;' ''
-mutate $fk/write.rs '    if rec.seq < owners.since {' '    if false {'
+mutate $fk/write.rs '    if let Some(owners) = owners
+        && rec.seq < owners.since
+    {' '    if false {'
 mutate $fk/write.rs '    let Some(owner) = &owners.owner else {' '    let Some(owner) = &started.owner else {'
 mutate $fk/write.rs '    if owners.retired.is_some() {' '    if false {'
 mutate $replay 'owner: self.owners.owner.as_ref().map(|o| o.session.clone()),' 'owner: started.owner.as_ref().map(|o| o.session.clone()),'
@@ -2179,8 +2213,8 @@ mutate $fx '        let checked = std::fs::canonicalize(c)' '        let checked
 mutate $fx '            .and_then(|real| maestro_store::tree::check_root_owned(&real).map(|()| real));' '            .and_then(|real| Ok::<_, String>(real));'
 mutate $fx '            std::os::unix::process::CommandExt::arg0(&mut cmd, name);' ''
 mutate $fx '            cmd.env("PATH", maestro_store::tree::git_path());' '            cmd.env("PATH", std::env::var_os("PATH").unwrap_or_default());'
-mutate $fk/write.rs '    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref() };' '    let feed = Feed { search: Search::Caller, stdin: plan.stdin.as_deref() };'
-mutate $fk/snapshot.rs '&left(limits, deadline), Feed { search: Search::Caller, stdin });' '&left(limits, deadline), Feed { search: Search::Trusted, stdin });'
+mutate $fk/write.rs '    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &[] };' '    let feed = Feed { search: Search::Caller, stdin: plan.stdin.as_deref(), extra_env: &[] };'
+mutate $fk/snapshot.rs '&left(limits, deadline), Feed { search: Search::Caller, stdin, extra_env: &[] });' '&left(limits, deadline), Feed { search: Search::Trusted, stdin, extra_env: &[] });'
 # A work verify reads outputs on stdin; opt-in definitions also feed consumed receipts to verifies
 # and pure and observe runs. The file never blocks the kernel; `{{outputs.*}}` in any command, a
 # snapshot or the workdir is refused at compile time (an IR pinned before keeps its run-time
@@ -2196,7 +2230,7 @@ mutate $fk/write.rs 'Some(Class::Pure { .. } | Class::Observe { .. } | Class::Wo
 mutate $fk/write.rs 'snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref())' 'snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, None)'
 mutate $fk/write.rs '        let own = if judges { outputs.clone() } else { Value::Null };' '        let own = Value::Null;'
 mutate $fk/write.rs '        let own = if judges { outputs.clone() } else { Value::Null };' '        let own = outputs.clone();'
-mutate $fk/snapshot.rs 'Feed { search: Search::Caller, stdin }' 'Feed { search: Search::Caller, stdin: None }'
+mutate $fk/snapshot.rs 'Feed { search: Search::Caller, stdin, extra_env: &[] }' 'Feed { search: Search::Caller, stdin: None, extra_env: &[] }'
 mutate $fk/write.rs '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, false),' '        Some(Class::Pure { run }) | Some(Class::Observe { run, .. }) => (run, Step::Command, true),'
 mutate $fk/write.rs '        Some(Class::Work { verify, .. }) => (verify, Step::Command, true),' '        Some(Class::Work { verify, .. }) => (verify, Step::Command, false),'
 mutate $fk/compile.rs '    check_no_outputs_placeholders(&ir)?;' ''
@@ -2914,7 +2948,7 @@ mutate $hp '            Err(why) => unread.push(format!("{what} {why}")),' '    
 # BRO-3828: different_from is enforced against a performer the registry attests as the owner's
 # child. Compile: only declared params and needed work nodes; IR 9 only for a parsed route.
 mutate crates/flow/src/kernel/compile.rs '    let Some(rest) = provider.trim().strip_prefix("different_from(") else { return Ok(Vec::new()) };' '    let Some(rest) = provider.trim().strip_prefix("never(") else { return Ok(Vec::new()) };'
-mutate $fk/ir.rs '    if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| !l.different_from.is_empty())) {' '    if false {'
+mutate $fk/ir.rs '    } else if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| !l.different_from.is_empty())) {' '    } else if false {'
 mutate $fk/ir.rs $'                if !n.needs.contains(&Need::Node { node: m.clone() }) {\n                    return Err(CompileError::invalid(format!("node {id} differs from {m} without needing it")));' $'                if false {\n                    return Err(CompileError::invalid(format!("node {id} differs from {m} without needing it")));'
 # The route: a param names an allowed provider, a node its receipt's performer's; the performer's
 # provider is attested and differs from each; a claim checks it, and so does a completion.
@@ -2935,7 +2969,7 @@ mutate $fk/replay.rs '        if started.ir.ir_version >= 9 {' '        if start
 # P20 round 1: a routed node's receipt binds its performer, so a re-run by another provider with the
 # same outputs changes its consumers' inputs; a T3 child attests only the one provider it ran; a
 # routed node's driver skill says how to name its performer.
-mutate $fk/replay.rs '                if ir.ir_version >= 9' '                if ir.ir_version >= 10'
+mutate $fk/replay.rs '                } else if ir.ir_version >= 9' '                } else if ir.ir_version >= 10'
 mutate crates/flow/src/kernel/events.rs '    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer }))' '    digest(&serde_json::json!({ "outputs": outputs, "value": value, "performer": performer["harness"] }))'
 mutate $ht '        if !rows.iter().all(|p| p == first) {' '        if false {'
 mutate $ht '        if provider_column:' '        if False:'

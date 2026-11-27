@@ -1303,79 +1303,19 @@ pub fn complete_as(
     // A claim's cancel deadline ends its command too: the run is no longer than what is left.
     let limits = &cancel_capped(limits, held.rec.cancel_at);
     // Drop the ledger lock BEFORE acquiring the per-resource fencing lock (disjoint lock order:
-    // never nested, zero deadlock). While holding `_resource_lock`, NO other worker can grant a
-    // newer epoch on `fence_resource` or execute a concurrent mutation on it!
+    // never nested, zero deadlock).
     drop(guard);
-
-    let mut fence_commit_err: Option<(&'static str, String)> = None;
     let ran_at = clock::now();
-    let ran = if let Some((fence_resource, pinned_epoch, fence_db, op_id, require_target_atomic)) = effect_fence_cfg {
-        let fence_store = FencingStore::open(&fence_db)
-            .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
-        let rlock = fence_store
-            .acquire_resource_lock(&fence_resource)
-            .map_err(|e| KernelError::Encode(format!("fencing lock failed: {e}")))?;
-        let epoch = match pinned_epoch {
-            Some(ep) => {
-                if let Err(e) = fence_store.verify_epoch_current(&fence_resource, ep) {
-                    drop(rlock);
-                    let mut guard = ledger.lock()?;
-                    let log = guard.log(&instance)?;
-                    let after = wall(&log)?;
-                    let held = name(hold(log, session, &instance, &sha, after)?);
-                    return refuse(&mut guard, &held, ("stale_fencing_epoch", e.to_string()), &[]);
-                }
-                ep
-            }
-            None => fence_store
-                .grant_epoch_locked(&rlock, &fence_resource)
-                .map_err(|e| KernelError::Encode(format!("fencing grant failed: {e}")))?,
-        };
-        let epoch_s = epoch.to_string();
-        let db_s = fence_db.display().to_string();
-        let payload_digest = digest(&outputs);
-        let fence_env_refs: [(&str, &str); 5] = [
-            ("MAESTRO_FENCING_EPOCH", epoch_s.as_str()),
-            ("MAESTRO_FENCING_RESOURCE", fence_resource.as_str()),
-            ("MAESTRO_FENCING_DB", db_s.as_str()),
-            ("MAESTRO_FENCING_OP_ID", op_id.as_str()),
-            ("MAESTRO_FENCING_DIGEST", payload_digest.as_str()),
-        ];
-        let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &fence_env_refs };
-        let ran = match &plan.snapshot {
-            Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
-            None => exec::run(&plan.argv, &plan.cwd, limits, feed),
-        };
-        if matches!(ran, Ran::Exited { code: Some(0), .. }) {
-            if require_target_atomic {
-                // Target-side atomic fencing: the target itself MUST have atomically verified
-                // `granted_epoch == epoch && written_epoch < epoch` and committed
-                // `written_epoch = epoch` in the SAME transaction as its mutation!
-                if let Err(e) = fence_store.verify_target_consumed(&fence_resource, epoch, &op_id, &payload_digest) {
-                    let code = match e {
-                        super::fencing::FencingError::StaleEpoch { .. }
-                        | super::fencing::FencingError::EpochAlreadyConsumed { .. } => "stale_fencing_epoch",
-                        super::fencing::FencingError::Storage(_) => "target_did_not_consume_epoch",
-                    };
-                    fence_commit_err = Some((code, e.to_string()));
-                }
-            } else {
-                let res_json = serde_json::to_string(&outputs).unwrap_or_else(|_| "null".to_string());
-                if let Err(e) =
-                    fence_store.commit_fenced_write(&fence_resource, epoch, &op_id, &payload_digest, &res_json)
-                {
-                    fence_commit_err = Some(("stale_fencing_epoch", e.to_string()));
-                }
-            }
-        }
-        drop(rlock);
-        ran
-    } else {
-        let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &[] };
-        match &plan.snapshot {
-            Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
-            None => exec::run(&plan.argv, &plan.cwd, limits, feed),
-        }
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &[] };
+    let (ran, fence_commit_err) = match effect_fence_cfg {
+        Some(cfg) => run_fenced_effect(&plan, limits, cfg, &outputs)?,
+        None => (
+            match &plan.snapshot {
+                Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
+                None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+            },
+            None,
+        ),
     };
     pause!("command_ran");
 
@@ -1611,6 +1551,69 @@ fn extract_map_items(doc: &Value, over_expr: &str, item_key_expr: &str) -> Resul
         });
     }
     Ok(specs)
+}
+
+/// Executes a fenced `Class::Effect` command under the per-resource lock, verifying/granting the
+/// epoch before execution and confirming target-side atomic consumption (or committing the epoch)
+/// before releasing the resource lock.
+fn run_fenced_effect(
+    plan: &Plan,
+    limits: &Limits,
+    (fence_resource, pinned_epoch, fence_db, op_id, require_target_atomic): (String, Option<u64>, PathBuf, String, bool),
+    outputs: &Value,
+) -> Result<(Ran, Option<(&'static str, String)>), KernelError> {
+    let fence_store = FencingStore::open(&fence_db)
+        .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
+    let rlock = fence_store
+        .acquire_resource_lock(&fence_resource)
+        .map_err(|e| KernelError::Encode(format!("fencing lock failed: {e}")))?;
+    let epoch = match pinned_epoch {
+        Some(ep) => {
+            if let Err(e) = fence_store.verify_epoch_current(&fence_resource, ep) {
+                drop(rlock);
+                return Ok((
+                    Ran::Failed { code: "stale_fencing_epoch", detail: e.to_string(), stderr: Vec::new() },
+                    None,
+                ));
+            }
+            ep
+        }
+        None => fence_store
+            .grant_epoch_locked(&rlock, &fence_resource)
+            .map_err(|e| KernelError::Encode(format!("fencing grant failed: {e}")))?,
+    };
+    let epoch_s = epoch.to_string();
+    let db_s = fence_db.display().to_string();
+    let payload_digest = digest(outputs);
+    let fence_env_refs: [(&str, &str); 5] = [
+        ("MAESTRO_FENCING_EPOCH", epoch_s.as_str()),
+        ("MAESTRO_FENCING_RESOURCE", fence_resource.as_str()),
+        ("MAESTRO_FENCING_DB", db_s.as_str()),
+        ("MAESTRO_FENCING_OP_ID", op_id.as_str()),
+        ("MAESTRO_FENCING_DIGEST", payload_digest.as_str()),
+    ];
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &fence_env_refs };
+    let ran = exec::run(&plan.argv, &plan.cwd, limits, feed);
+    let mut fence_commit_err: Option<(&'static str, String)> = None;
+    if matches!(ran, Ran::Exited { code: Some(0), .. }) {
+        if require_target_atomic {
+            if let Err(e) = fence_store.verify_target_consumed(&fence_resource, epoch, &op_id, &payload_digest) {
+                let code = match e {
+                    super::fencing::FencingError::StaleEpoch { .. }
+                    | super::fencing::FencingError::EpochAlreadyConsumed { .. } => "stale_fencing_epoch",
+                    super::fencing::FencingError::Storage(_) => "target_did_not_consume_epoch",
+                };
+                fence_commit_err = Some((code, e.to_string()));
+            }
+        } else {
+            let res_json = serde_json::to_string(outputs).unwrap_or_else(|_| "null".to_string());
+            if let Err(e) = fence_store.commit_fenced_write(&fence_resource, epoch, &op_id, &payload_digest, &res_json) {
+                fence_commit_err = Some(("stale_fencing_epoch", e.to_string()));
+            }
+        }
+    }
+    drop(rlock);
+    Ok((ran, fence_commit_err))
 }
 
 /// Computes the resource key fenced by `FencingStore` for a `Class::Effect` node.
