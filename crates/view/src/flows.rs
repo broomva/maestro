@@ -633,8 +633,8 @@ impl Layout {
     }
 }
 
-/// The edges a shape draws: each need (a repeat's need from each of its body's nodes) and each
-/// switch's subject when the node does not already need it.
+/// The edges a shape draws: each need (a repeat's need from where its body ends) and each switch's
+/// subject when the node does not already need it.
 pub fn edges(shape: &Shape) -> Vec<Edge> {
     let known: BTreeSet<&str> = shape.nodes.iter().map(|n| n.id.as_str()).collect();
     let mut out = BTreeSet::new();
@@ -651,7 +651,21 @@ pub fn edges(shape: &Shape) -> Vec<Edge> {
                     let kind = if need.kind == NeedKind::Repeat { EdgeKind::Repeat } else { EdgeKind::Exhausted };
                     let body =
                         shape.repeats.iter().find(|r| r.id == need.on).map(|r| r.body.clone()).unwrap_or_default();
-                    for b in body.iter().filter(|b| known.contains(b.as_str()) && **b != n.id) {
+                    // The route leaves the repeat where its body ends: from each body node no other body
+                    // node needs, not from every node of the body.
+                    // A body node another body node needs, or switches on, is not where the body ends.
+                    let needed_in_body = |b: &str| {
+                        shape.nodes.iter().any(|m| {
+                            body.contains(&m.id)
+                                && (m.needs.iter().any(|x| x.kind == NeedKind::Node && x.on == b)
+                                    || m.switch.as_ref().is_some_and(|(on, _)| on == b))
+                        })
+                    };
+                    let ends: Vec<&String> = body
+                        .iter()
+                        .filter(|b| known.contains(b.as_str()) && **b != n.id && !needed_in_body(b))
+                        .collect();
+                    for b in ends {
                         let label =
                             Some(if kind == EdgeKind::Repeat { "until".to_string() } else { "exhausted".into() });
                         out.insert(Edge { from: b.clone(), to: n.id.clone(), kind, label });
@@ -812,6 +826,51 @@ mod tests {
 
         let cyclic = Shape { nodes: vec![node("x", "pure", &["y"]), node("y", "pure", &["x"])], ..Shape::default() };
         assert_eq!(layout(&cyclic).columns.iter().map(Vec::len).sum::<usize>(), 2, "every node is placed");
+    }
+
+    /// Found dogfooding purple-team: a route out of a repeat was drawn from every node of its body,
+    /// three lines through the boxes between them.
+    #[test]
+    fn a_route_out_of_a_repeat_leaves_from_where_its_body_ends() {
+        let mut residual = node("residual", "human", &[]);
+        residual.needs = vec![Need { on: "rounds".into(), kind: NeedKind::Exhausted }];
+        let shape = Shape {
+            nodes: vec![
+                node("red", "work", &[]),
+                node("blue", "work", &["red"]),
+                node("reattack", "work", &["blue"]),
+                residual,
+            ],
+            repeats: vec![Repeat {
+                id: "rounds".into(),
+                body: vec!["red".into(), "blue".into(), "reattack".into()],
+                max: 3,
+                on_exhausted: Some("residual".into()),
+                ..Repeat::default()
+            }],
+            ..Shape::default()
+        };
+        let out: Vec<_> = edges(&shape).into_iter().filter(|e| e.kind == EdgeKind::Exhausted).map(|e| e.from).collect();
+        assert_eq!(out, ["reattack"]);
+
+        // A body node only switched on, with no need on it, still does not end the body.
+        let mut act = node("act", "work", &[]);
+        act.switch = Some(("choose".into(), "go".into()));
+        let mut after = node("after", "human", &[]);
+        after.needs = vec![Need { on: "r".into(), kind: NeedKind::Exhausted }];
+        let switched = Shape {
+            nodes: vec![node("choose", "choice", &[]), act, after],
+            repeats: vec![Repeat {
+                id: "r".into(),
+                body: vec!["choose".into(), "act".into()],
+                max: 2,
+                ..Repeat::default()
+            }],
+            ..Shape::default()
+        };
+        let out: Vec<_> =
+            edges(&switched).into_iter().filter(|e| e.kind == EdgeKind::Exhausted).map(|e| e.from).collect();
+        assert_eq!(out, ["act"]);
     }
 
     #[test]
