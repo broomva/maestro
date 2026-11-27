@@ -319,3 +319,29 @@ fn invalid_ledger_name_is_refused_before_a_checkout_or_lock_is_created() {
     assert!(!paths.owner_dir.exists());
     assert!(!paths.ledger_checkout.exists());
 }
+
+#[test]
+fn a_dangling_symbolic_answer_ref_is_unread_not_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".broomva/asks")).unwrap();
+    std::fs::write(
+        ws.join(".broomva/asks/ledger.yaml"),
+        "asks:\n  - id: a\n    ask: Go?\n    options:\n      - id: yes\n        label: Yes\n",
+    )
+    .unwrap();
+    git(&ws, &["init", "-qb", "main"]);
+    git(&ws, &["config", "user.email", "test@example.com"]);
+    git(&ws, &["config", "user.name", "Test"]);
+    git(&ws, &["add", "."]);
+    git(&ws, &["commit", "-qm", "init"]);
+    git(&ws, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let sym = ws.join(".git/refs/heads/maestro/answers");
+    std::fs::create_dir_all(sym.parent().unwrap()).unwrap();
+    std::fs::write(&sym, "ref: refs/heads/no-such-branch\n").unwrap();
+    let store =
+        maestro_store::Store::new(Paths::under(dir.path()), maestro_store::TreeSource::GitRev("origin/main".into()))
+            .read_scope();
+    let asks = store.asks();
+    assert!(asks.data.is_none(), "dangling symbolic answer ref must make asks unread, not silently absent");
+}

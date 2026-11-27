@@ -21,13 +21,30 @@
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const askKey = (ledger, handle) => `${ledger}\u0000${handle}`;
+  const decisionUrl = (ledger, handle) => `/decisions/${encodeURIComponent(ledger)}/${encodeURIComponent(handle)}`;
 
   // ---- Persistent Toast Stack ----
   const STORE_KEY = "maestro:toasts:v1";
   const toastHost = document.querySelector("[data-toasts]");
-  const activeToasts = new Map(); // id -> { el, meta, dismissed }
+  const activeToasts = new Map(); // id -> { el, meta, settled, dismissed }
   const inFlightKeys = new Set(); // askKey -> currently signed/applying
   const writtenKeys = new Set(); // askKey -> written in this session (avoid badge bounce before next fetch)
+
+  let toastAnnouncer = null;
+  if (toastHost) {
+    toastHost.removeAttribute("aria-live");
+    toastAnnouncer = document.createElement("p");
+    toastAnnouncer.className = "mv-navigation-status";
+    toastAnnouncer.setAttribute("role", "status");
+    toastAnnouncer.setAttribute("aria-live", "polite");
+    toastAnnouncer.setAttribute("aria-atomic", "true");
+    toastHost.append(toastAnnouncer);
+  }
+  const announceToast = (msg) => {
+    if (!toastAnnouncer || !msg) return;
+    toastAnnouncer.textContent = "";
+    toastAnnouncer.textContent = msg;
+  };
 
   const loadStored = () => {
     try {
@@ -51,15 +68,28 @@
     }
   };
 
+  const hrefToAskKey = (href) => {
+    const m = href.match(/^\/decisions\/([^/?#]+)\/([^/?#]+)/);
+    if (!m) return null;
+    try {
+      return askKey(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
+    } catch {
+      return null;
+    }
+  };
+
   const syncPendingUi = () => {
     const rows = document.querySelectorAll(".mv-queue .mv-qrow");
     for (const row of rows) {
       const link = row.querySelector("a[href]");
       if (!link) continue;
       const key = hrefToAskKey(link.getAttribute("href") || "");
-      if (key && inFlightKeys.has(key)) row.dataset.pending = "true";
-      else if (row.dataset.pending === "true" && (!key || !inFlightKeys.has(key))) {
-        // Leave server-rendered pending state alone if we don't own it, otherwise clear.
+      if (key && inFlightKeys.has(key)) {
+        row.dataset.pending = "true";
+        row.dataset.clientPending = "true";
+      } else if (row.dataset.clientPending === "true") {
+        delete row.dataset.pending;
+        delete row.dataset.clientPending;
       }
     }
     const navCount = document.querySelector(".mv-web-nav .mv-nav-count");
@@ -83,16 +113,6 @@
     }
   };
 
-  const hrefToAskKey = (href) => {
-    const m = href.match(/^\/decisions\/([^/?#]+)\/([^/?#]+)/);
-    if (!m) return null;
-    try {
-      return askKey(decodeURIComponent(m[1]), decodeURIComponent(m[2]));
-    } catch {
-      return null;
-    }
-  };
-
   const summarizeOutcome = (receipt) => {
     const parts = [];
     let warn = false;
@@ -110,7 +130,8 @@
     if (receipt.landing) {
       const l = receipt.landing;
       const pr = l.match(/landing PR #(\d+)/);
-      if (pr && l.includes("set to merge")) parts.push(`PR #${pr[1]} queued`);
+      if (l === "local only (not pushed)") parts.push("Saved locally");
+      else if (pr && l.includes("set to merge")) parts.push(`PR #${pr[1]} queued`);
       else if (pr && l.includes("auto-merge is disabled")) parts.push(`PR #${pr[1]} open`);
       else if (pr) {
         warn = true;
@@ -127,7 +148,6 @@
     if (!toastHost) return null;
     const el = document.createElement("div");
     el.className = "mv-toast";
-    el.setAttribute("role", "status");
     el.dataset.tone = "pending";
 
     const head = document.createElement("div");
@@ -139,7 +159,8 @@
     title.textContent = `Answered · ${meta.optionLabel || meta.option || "saved"}`;
     const sub = document.createElement("p");
     sub.className = "mv-toast-sub";
-    sub.textContent = "Saving in 8s…";
+    sub.setAttribute("aria-live", "off");
+    sub.textContent = "Saving in 8s...";
     copy.append(title, sub);
 
     const close = document.createElement("button");
@@ -164,6 +185,7 @@
 
     el.append(head, actions, bar);
     toastHost.append(el);
+    announceToast(`Answered ${meta.optionLabel || meta.option || ""}. Saving in 8 seconds. Undo is available.`);
 
     const state = { el, meta, settled: false, dismissed: false };
     activeToasts.set(meta.id, state);
@@ -178,6 +200,7 @@
       activeToasts.delete(meta.id);
       saveStored();
       el.remove();
+      syncPendingUi();
     };
     close.addEventListener("click", dismiss);
 
@@ -195,7 +218,7 @@
 
     undo.addEventListener("click", async () => {
       undo.disabled = true;
-      sub.textContent = "Undoing…";
+      sub.textContent = "Undoing...";
       try {
         await post("/owner/answer/undo", { id: meta.id });
         state.settled = true;
@@ -204,6 +227,7 @@
         el.dataset.tone = "warn";
         title.textContent = "Answer undone";
         sub.textContent = "Nothing was written to the ledger.";
+        announceToast("Answer undone. Nothing was written to the ledger.");
         addOpenLink("Return to decision");
         window.__maestroInvalidate?.();
         syncPendingUi();
@@ -220,7 +244,7 @@
         if (receipt.stage === "signed") {
           const leftMs = Math.max(0, receipt.applies_at_ms - (Date.now() + (meta.offset || 0)));
           const leftSec = Math.ceil(leftMs / 1000);
-          sub.textContent = leftSec > 0 ? `Saving in ${leftSec}s · ${meta.title || meta.handle}` : "Writing to ledger…";
+          sub.textContent = leftSec > 0 ? `Saving in ${leftSec}s · ${meta.title || meta.handle}` : "Writing to ledger...";
           bar.style.transform = `scaleX(${Math.max(0, Math.min(1, leftMs / windowMs))})`;
           if (leftSec === 0) {
             undo.remove();
@@ -228,7 +252,7 @@
         } else if (receipt.stage === "applying") {
           el.dataset.tone = "pending";
           actions.replaceChildren();
-          sub.textContent = `Writing to ledger… ${meta.title || ""}`.trim();
+          sub.textContent = `Writing to ledger... ${meta.title || ""}`.trim();
           bar.style.transform = "scaleX(0.12)";
         } else if (receipt.stage === "written") {
           const done = Boolean(receipt.woke && receipt.landing);
@@ -237,7 +261,7 @@
           title.textContent = `Saved · ${meta.optionLabel || receipt.label || "answered"}`;
           sub.textContent = done
             ? (text || "Written to maestro/ledger.")
-            : (text ? `${text} · finishing…` : "Written to ledger · waking agent…");
+            : (text ? `${text} · finishing...` : "Written to ledger · waking agent...");
           actions.replaceChildren();
           if (done) {
             state.settled = true;
@@ -249,6 +273,7 @@
             saveStored();
             window.__maestroInvalidate?.();
             syncPendingUi();
+            announceToast(`Saved ${meta.optionLabel || receipt.label || "answer"}. ${text || ""}`.trim());
             if (!warn) setTimeout(() => { if (!state.dismissed) dismiss(); }, 6000);
             return;
           }
@@ -259,6 +284,7 @@
           el.dataset.tone = "warn";
           title.textContent = "Answer undone";
           sub.textContent = "Nothing was written to the ledger.";
+          announceToast("Answer undone. Nothing was written to the ledger.");
           addOpenLink("Return to decision");
           window.__maestroInvalidate?.();
           syncPendingUi();
@@ -270,6 +296,7 @@
           el.dataset.tone = "fail";
           title.textContent = "Could not write answer";
           sub.textContent = receipt.error || "Write failed.";
+          announceToast(`Could not write answer: ${receipt.error || "Write failed."}`);
           addOpenLink("Review decision");
           window.__maestroInvalidate?.();
           syncPendingUi();
@@ -364,6 +391,7 @@
     const ledger = article.dataset.ledger;
     const handle = article.dataset.handle;
     const hash = article.dataset.hash;
+    const askUrl = decisionUrl(ledger, handle);
     const askTitle = article.querySelector(".mv-dtitle")?.textContent?.trim() || handle;
 
     const go = bar.querySelector("[data-answer=go]");
@@ -381,7 +409,7 @@
     };
 
     // Zero-RTT passkey challenge pre-fetch so clicking Answer calls credentials.get() synchronously
-    // inside the user gesture (avoiding iOS Safari's intermediate "Use passkey?" prompt).
+    // inside the user gesture. Capped at 60s reuse so 60s + 120s timeout stays inside server 180s TTL.
     let prepared = null;
     let prepareTimer = null;
     let prepareSeq = 0;
@@ -395,7 +423,7 @@
       const c = chosen();
       if (!c || !window.PublicKeyCredential) return;
       const key = intentKey();
-      if (prepared && prepared.key === key && Date.now() - prepared.at < 120000) return;
+      if (prepared && prepared.key === key && Date.now() - prepared.at < 50000) return;
       const seq = ++prepareSeq;
       post("/owner/answer/begin", { ledger, handle, hash, option: c.value, note: note.value }, signal)
         .then((begin) => {
@@ -477,7 +505,7 @@
         title: askTitle,
         option: c.value,
         optionLabel: c.dataset.label,
-        url: location.pathname,
+        url: askUrl,
         applies_at_ms: done.applies_at_ms,
         signed_local_ms: Date.now(),
         offset,
@@ -485,13 +513,16 @@
 
       window.__maestroInvalidate?.();
 
+      // If the owner already navigated away mid-ceremony, leave them on their new page.
+      if (signal.aborted) return;
+
       const nextUrl = findNextDecisionUrl(ledger, handle);
       if (nextUrl && typeof window.__maestroNavigate === "function") {
         window.__maestroNavigate(nextUrl);
       } else if (nextUrl) {
         location.assign(nextUrl);
       } else {
-        say(`Answered: ${c.dataset.label}. Saving in background — you can undo from the notification.`, "ok");
+        say(`Answered: ${c.dataset.label}. Saving in background. You can undo from the notification.`, "success");
       }
     };
 
@@ -499,33 +530,34 @@
       const c = chosen();
       if (!c) return;
       if (!window.PublicKeyCredential || !navigator.credentials?.get) {
-        say("This browser cannot sign with a passkey.", "error");
+        say("This browser cannot sign with a passkey.", "danger");
         return;
       }
       const key = intentKey();
-      const ready = prepared && prepared.key === key && Date.now() - prepared.at < 150000 ? prepared.begin : null;
+      const ready = prepared && prepared.key === key && Date.now() - prepared.at < 60000 ? prepared.begin : null;
       prepared = null;
 
       lock(true);
       say("Confirm with Touch ID or Face ID.", "info");
 
       const handleErr = (e) => {
+        if (signal.aborted || e?.name === "AbortError") return;
         lock(false);
-        say(e?.name === "NotAllowedError" ? "Cancelled. Nothing was written." : (e?.message || "Could not sign."), "error");
+        say(e?.name === "NotAllowedError" ? "Cancelled. Nothing was written." : (e?.message || "Could not sign."), "danger");
         schedulePrefetch(0);
       };
 
       if (ready) {
         // Synchronous call inside the click handler keeps WebKit transient user activation intact.
-        navigator.credentials.get({ publicKey: buildPublicKeyOptions(ready) })
+        navigator.credentials.get({ publicKey: buildPublicKeyOptions(ready), signal })
           .then((cred) => {
             if (!cred) throw new Error("passkey returned no assertion");
             return completeWithAssertion(ready, cred, c);
           })
           .catch(handleErr);
       } else {
-        post("/owner/answer/begin", { ledger, handle, hash, option: c.value, note: note.value })
-          .then((begin) => navigator.credentials.get({ publicKey: buildPublicKeyOptions(begin) })
+        post("/owner/answer/begin", { ledger, handle, hash, option: c.value, note: note.value }, signal)
+          .then((begin) => navigator.credentials.get({ publicKey: buildPublicKeyOptions(begin), signal })
             .then((cred) => {
               if (!cred) throw new Error("passkey returned no assertion");
               return completeWithAssertion(begin, cred, c);
@@ -550,7 +582,7 @@
     };
     enroll.addEventListener("click", async () => {
       if (!code.value.trim()) {
-        say("Enter the setup code Maestro printed when it started.", "error");
+        say("Enter the setup code Maestro printed when it started.", "danger");
         code.focus();
         return;
       }
@@ -565,7 +597,6 @@
             user: { id: unb64u(begin.user_id), name: "owner", displayName: "Maestro owner" },
             pubKeyCredParams: [{ type: "public-key", alg: -7 }],
             authenticatorSelection: {
-              authenticatorAttachment: "platform",
               userVerification: "required",
               residentKey: "preferred",
             },
@@ -591,7 +622,7 @@
         location.reload();
       } catch (e) {
         enroll.disabled = false;
-        say(e.name === "NotAllowedError" ? "Cancelled. Nothing was saved." : e.message, "error");
+        say(e.name === "NotAllowedError" ? "Cancelled. Nothing was saved." : e.message, "danger");
       }
     });
   }

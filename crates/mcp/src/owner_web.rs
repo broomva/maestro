@@ -74,6 +74,7 @@ fn parse_thread_id(raw: &str) -> Option<String> {
         None => raw,
     };
     let ok = !thread.is_empty()
+        && !thread.starts_with('-')
         && thread.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'));
     ok.then(|| thread.to_string())
 }
@@ -220,9 +221,8 @@ impl Owner {
         }
     }
 
-    /// Cap pre-fetched challenges per ask so option switching keeps the pending table bounded
-    /// without invalidating a second tab's active challenge.
-    fn prune_answers(&self, ledger: &str, handle: &str) {
+    /// Atomically prune expired/excess pre-fetched challenges for an ask and insert the new one.
+    fn keep_answer(&self, nonce: &str, ledger: &str, handle: &str, p: Pending) {
         if let Ok(mut m) = self.pending.lock() {
             m.retain(|_, v| v.at().elapsed() < CHALLENGE_TTL);
             let mut same: Vec<(String, Instant)> = m
@@ -241,6 +241,7 @@ impl Owner {
                     m.remove(&old_key);
                 }
             }
+            m.insert(nonce.to_string(), p);
         }
     }
 
@@ -308,9 +309,10 @@ impl Owner {
         let nonce = passkey::nonce();
         let challenge = passkey::challenge(&intent.canonical(), &nonce);
         let session = ask.origin.as_ref().and_then(|o| o.session.clone());
-        self.prune_answers(&req.ledger, &req.handle);
-        self.keep(
+        self.keep_answer(
             &nonce,
+            &req.ledger,
+            &req.handle,
             Pending::Answer {
                 intent,
                 label: option.label.clone(),
@@ -679,5 +681,15 @@ mod tests {
         assert_eq!(descs[0]["transports"], serde_json::json!(["internal"]));
         let pending_count = o.pending.lock().unwrap().len();
         assert!(pending_count <= 4, "pre-fetched challenges must be capped, got {pending_count}");
+    }
+
+    #[test]
+    fn parse_thread_id_accepts_t3_ids_and_rejects_option_flags() {
+        assert_eq!(parse_thread_id("env/a6ede81a-0170"), Some("a6ede81a-0170".into()));
+        assert_eq!(parse_thread_id("t3:env/mcp:abc-1"), Some("mcp:abc-1".into()));
+        assert_eq!(parse_thread_id("a6ede81a"), Some("a6ede81a".into()));
+        assert_eq!(parse_thread_id("--help"), None);
+        assert_eq!(parse_thread_id("env/-flag"), None);
+        assert_eq!(parse_thread_id(""), None);
     }
 }

@@ -339,7 +339,7 @@ impl Store {
                 .map(|(name, label)| {
                     let tree = match resolved.get(name) {
                         Some(sha) => Tree::from_resolved(root.clone(), TreeSource::GitRev(name.into()), sha.clone()),
-                        None => Tree::from_absent(
+                        None => Tree::from_unresolved(
                             root.clone(),
                             TreeSource::GitRev(name.into()),
                             format!("no commit is named `{name}` in {}", root.display()),

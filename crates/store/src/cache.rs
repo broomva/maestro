@@ -2,8 +2,9 @@
 //!
 //! Git tree entries are keyed by `(repo_root, source_rev, commit_sha)` so a moving ref or a
 //! different ref spelling never collides, and immutable commit contents are never re-parsed.
-//! Filesystem entries are keyed by full metadata fingerprints (size, mtime, ctime, inode), so
-//! any edit invalidates the entry on the very next read.
+//! Filesystem entries are keyed by full metadata fingerprints (device, inode, size, mtime, ctime),
+//! so any edit invalidates the entry on the next read. Transient errors and partial reads are
+//! never cached so a momentary failure never pins in a long-lived daemon.
 
 use crate::{LedgerFile, TickTail};
 use maestro_core::Section;
@@ -27,7 +28,7 @@ impl<K: PartialEq, V: Clone> RingCache<K, V> {
         Self { entries: Mutex::new(VecDeque::with_capacity(MAX_ENTRIES)) }
     }
 
-    fn get_or_insert_with(&self, key: K, compute: impl FnOnce() -> V) -> V {
+    fn get_or_insert_if(&self, key: K, compute: impl FnOnce() -> V, should_cache: impl FnOnce(&V) -> bool) -> V {
         if let Ok(mut guard) = self.entries.lock()
             && let Some(pos) = guard.iter().position(|(k, _)| k == &key)
             && let Some(entry) = guard.remove(pos)
@@ -37,7 +38,9 @@ impl<K: PartialEq, V: Clone> RingCache<K, V> {
             return val;
         }
         let val = compute();
-        if let Ok(mut guard) = self.entries.lock() {
+        if should_cache(&val)
+            && let Ok(mut guard) = self.entries.lock()
+        {
             if let Some(pos) = guard.iter().position(|(k, _)| k == &key) {
                 guard.remove(pos);
             } else if guard.len() >= MAX_ENTRIES {
@@ -49,35 +52,42 @@ impl<K: PartialEq, V: Clone> RingCache<K, V> {
     }
 }
 
+fn section_clean<T>(s: &Section<T>) -> bool {
+    s.data.is_some() && s.errors.is_empty()
+}
+
 type GitTreeKey = (PathBuf, String, String);
 type GitCommitKey = (PathBuf, String);
 type GitPathKey = (PathBuf, String, String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileStamp {
+    dev: u64,
+    ino: u64,
     len: u64,
     mtime: i64,
     mtime_nsec: i64,
     ctime: i64,
     ctime_nsec: i64,
-    ino: u64,
 }
 
 impl FileStamp {
     pub(crate) fn of(meta: &std::fs::Metadata) -> Self {
         Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
             len: meta.len(),
             mtime: meta.mtime(),
             mtime_nsec: meta.mtime_nsec(),
             ctime: meta.ctime(),
             ctime_nsec: meta.ctime_nsec(),
-            ino: meta.ino(),
         }
     }
 }
 
 type TickKey = (PathBuf, FileStamp);
 type DirAsksKey = (PathBuf, String, Vec<(OsString, FileStamp)>);
+type PlansSection = Section<Vec<(String, PlanGraph)>>;
 
 static GIT_LAYOUT: LazyLock<RingCache<GitCommitKey, Result<Vec<String>, String>>> = LazyLock::new(RingCache::new);
 static GIT_TREE_PATH: LazyLock<RingCache<GitPathKey, Result<Option<String>, String>>> = LazyLock::new(RingCache::new);
@@ -86,7 +96,6 @@ static GIT_COMMITTED_AT: LazyLock<RingCache<GitCommitKey, Result<Option<jiff::Ti
 static GIT_ASKS: LazyLock<RingCache<GitTreeKey, Section<Vec<LedgerFile>>>> = LazyLock::new(RingCache::new);
 static GIT_LOOPS: LazyLock<RingCache<GitTreeKey, Section<Vec<LoopSpec>>>> = LazyLock::new(RingCache::new);
 static GIT_INITIATIVES: LazyLock<RingCache<GitTreeKey, Section<Vec<Initiative>>>> = LazyLock::new(RingCache::new);
-type PlansSection = Section<Vec<(String, PlanGraph)>>;
 static GIT_PLANS: LazyLock<RingCache<GitTreeKey, PlansSection>> = LazyLock::new(RingCache::new);
 static FS_TICKS: LazyLock<RingCache<TickKey, Section<TickTail>>> = LazyLock::new(RingCache::new);
 static FS_ASKS: LazyLock<RingCache<DirAsksKey, Section<Vec<LedgerFile>>>> = LazyLock::new(RingCache::new);
@@ -96,7 +105,7 @@ pub(crate) fn git_layout(
     commit: &str,
     compute: impl FnOnce() -> Result<Vec<String>, String>,
 ) -> Result<Vec<String>, String> {
-    GIT_LAYOUT.get_or_insert_with((root.to_path_buf(), commit.to_string()), compute)
+    GIT_LAYOUT.get_or_insert_if((root.to_path_buf(), commit.to_string()), compute, Result::is_ok)
 }
 
 pub(crate) fn git_tree_path(
@@ -105,7 +114,7 @@ pub(crate) fn git_tree_path(
     name: &str,
     compute: impl FnOnce() -> Result<Option<String>, String>,
 ) -> Result<Option<String>, String> {
-    GIT_TREE_PATH.get_or_insert_with((root.to_path_buf(), commit.to_string(), name.to_string()), compute)
+    GIT_TREE_PATH.get_or_insert_if((root.to_path_buf(), commit.to_string(), name.to_string()), compute, Result::is_ok)
 }
 
 pub(crate) fn git_committed_at(
@@ -113,7 +122,7 @@ pub(crate) fn git_committed_at(
     commit: &str,
     compute: impl FnOnce() -> Result<Option<jiff::Timestamp>, String>,
 ) -> Result<Option<jiff::Timestamp>, String> {
-    GIT_COMMITTED_AT.get_or_insert_with((root.to_path_buf(), commit.to_string()), compute)
+    GIT_COMMITTED_AT.get_or_insert_if((root.to_path_buf(), commit.to_string()), compute, Result::is_ok)
 }
 
 pub(crate) fn git_asks(
@@ -122,7 +131,7 @@ pub(crate) fn git_asks(
     commit: &str,
     compute: impl FnOnce() -> Section<Vec<LedgerFile>>,
 ) -> Section<Vec<LedgerFile>> {
-    GIT_ASKS.get_or_insert_with((root.to_path_buf(), source.to_string(), commit.to_string()), compute)
+    GIT_ASKS.get_or_insert_if((root.to_path_buf(), source.to_string(), commit.to_string()), compute, section_clean)
 }
 
 pub(crate) fn git_loops(
@@ -131,7 +140,7 @@ pub(crate) fn git_loops(
     commit: &str,
     compute: impl FnOnce() -> Section<Vec<LoopSpec>>,
 ) -> Section<Vec<LoopSpec>> {
-    GIT_LOOPS.get_or_insert_with((root.to_path_buf(), source.to_string(), commit.to_string()), compute)
+    GIT_LOOPS.get_or_insert_if((root.to_path_buf(), source.to_string(), commit.to_string()), compute, section_clean)
 }
 
 pub(crate) fn git_initiatives(
@@ -140,7 +149,11 @@ pub(crate) fn git_initiatives(
     commit: &str,
     compute: impl FnOnce() -> Section<Vec<Initiative>>,
 ) -> Section<Vec<Initiative>> {
-    GIT_INITIATIVES.get_or_insert_with((root.to_path_buf(), source.to_string(), commit.to_string()), compute)
+    GIT_INITIATIVES.get_or_insert_if(
+        (root.to_path_buf(), source.to_string(), commit.to_string()),
+        compute,
+        section_clean,
+    )
 }
 
 pub(crate) fn git_plans(
@@ -149,7 +162,7 @@ pub(crate) fn git_plans(
     commit: &str,
     compute: impl FnOnce() -> Section<Vec<(String, PlanGraph)>>,
 ) -> Section<Vec<(String, PlanGraph)>> {
-    GIT_PLANS.get_or_insert_with((root.to_path_buf(), source.to_string(), commit.to_string()), compute)
+    GIT_PLANS.get_or_insert_if((root.to_path_buf(), source.to_string(), commit.to_string()), compute, section_clean)
 }
 
 pub(crate) fn fs_ticks(path: &Path, compute: impl FnOnce() -> Section<TickTail>) -> Section<TickTail> {
@@ -159,7 +172,7 @@ pub(crate) fn fs_ticks(path: &Path, compute: impl FnOnce() -> Section<TickTail>)
     if !meta.file_type().is_file() {
         return compute();
     }
-    FS_TICKS.get_or_insert_with((path.to_path_buf(), FileStamp::of(&meta)), compute)
+    FS_TICKS.get_or_insert_if((path.to_path_buf(), FileStamp::of(&meta)), compute, section_clean)
 }
 
 /// Fingerprint a working-tree asks directory when every matching entry is a regular file.
@@ -195,7 +208,7 @@ pub(crate) fn fs_asks(
     let Some(fp) = fingerprint_asks_dir(dir) else {
         return compute();
     };
-    FS_ASKS.get_or_insert_with((dir.to_path_buf(), label.to_string(), fp), compute)
+    FS_ASKS.get_or_insert_if((dir.to_path_buf(), label.to_string(), fp), compute, section_clean)
 }
 
 #[cfg(test)]
@@ -207,14 +220,37 @@ mod tests {
     fn ring_cache_hits_and_evicts_oldest() {
         let cache = RingCache::new();
         let calls = AtomicUsize::new(0);
-        let a = cache.get_or_insert_with(1usize, || calls.fetch_add(1, Ordering::SeqCst) + 1);
-        let b = cache.get_or_insert_with(1usize, || calls.fetch_add(1, Ordering::SeqCst) + 1);
+        let a = cache.get_or_insert_if(1usize, || calls.fetch_add(1, Ordering::SeqCst) + 1, |_| true);
+        let b = cache.get_or_insert_if(1usize, || calls.fetch_add(1, Ordering::SeqCst) + 1, |_| true);
         assert_eq!((a, b, calls.load(Ordering::SeqCst)), (1, 1, 1));
         for i in 2..=(MAX_ENTRIES + 2) {
-            cache.get_or_insert_with(i, || i);
+            cache.get_or_insert_if(i, || i, |_| true);
         }
-        let c = cache.get_or_insert_with(1usize, || calls.fetch_add(1, Ordering::SeqCst) + 1);
+        let c = cache.get_or_insert_if(1usize, || calls.fetch_add(1, Ordering::SeqCst) + 1, |_| true);
         assert_eq!(c, 2, "entry 1 should have been evicted after MAX_ENTRIES inserts");
+    }
+
+    #[test]
+    fn transient_errors_and_unavailable_sections_are_never_cached() {
+        let res_cache: RingCache<usize, Result<usize, String>> = RingCache::new();
+        let calls = AtomicUsize::new(0);
+        let first = res_cache.get_or_insert_if(
+            1,
+            || {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 { Err("transient".into()) } else { Ok(42) }
+            },
+            Result::is_ok,
+        );
+        assert!(first.is_err());
+        let second = res_cache.get_or_insert_if(1, || Ok(42), Result::is_ok);
+        assert_eq!(second, Ok(42), "transient Err must not pin in cache");
+
+        let sec_cache: RingCache<usize, Section<usize>> = RingCache::new();
+        let unavail = sec_cache.get_or_insert_if(1, || Section::unavailable("s", "boom"), section_clean);
+        assert!(unavail.data.is_none());
+        let recovered = sec_cache.get_or_insert_if(1, || Section::ok("s", 7), section_clean);
+        assert_eq!(recovered.data, Some(7), "unavailable Section must not pin in cache");
     }
 
     #[test]

@@ -80,21 +80,19 @@ pub struct Tree {
     pub commit: Option<String>,
     /// Why a `GitRev` did not resolve. Every read then fails with it.
     pub unresolved: Option<String>,
-    /// True only when a clean batch ref scan confirmed this ref does not exist in the repo.
-    confirmed_absent: bool,
 }
 
 impl Tree {
     pub fn new(root: impl Into<PathBuf>, source: TreeSource) -> Self {
-        Self { root: root.into(), source, commit: None, unresolved: None, confirmed_absent: false }
+        Self { root: root.into(), source, commit: None, unresolved: None }
     }
 
     pub(crate) fn from_resolved(root: impl Into<PathBuf>, source: TreeSource, commit: String) -> Self {
-        Self { root: root.into(), source, commit: Some(commit), unresolved: None, confirmed_absent: false }
+        Self { root: root.into(), source, commit: Some(commit), unresolved: None }
     }
 
-    pub(crate) fn from_absent(root: impl Into<PathBuf>, source: TreeSource, reason: String) -> Self {
-        Self { root: root.into(), source, commit: None, unresolved: Some(reason), confirmed_absent: true }
+    pub(crate) fn from_unresolved(root: impl Into<PathBuf>, source: TreeSource, reason: String) -> Self {
+        Self { root: root.into(), source, commit: None, unresolved: Some(reason) }
     }
 
     /// Like [`Tree::new`], resolving a git revision to its commit once.
@@ -338,9 +336,6 @@ impl Tree {
     /// absent. Anything else is there, or an error: a broken ref (1), a git without the flag, no
     /// repo. A broken ref is never read as absent: it may stand over a packed one.
     pub fn has_ref(&self, name: &str) -> Result<bool, String> {
-        if self.confirmed_absent {
-            return Ok(false);
-        }
         let output =
             git_command(&self.root).args(["show-ref", "--exists", name]).output().map_err(|e| e.to_string())?;
         match output.status.code() {

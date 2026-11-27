@@ -235,12 +235,13 @@ pub fn register(party: &Party, challenge: &str, r: &Registration, at: &str) -> R
     let spki = b64url("public key", &r.public_key)?;
     VerifyingKey::from_public_key_der(&spki).map_err(|_| "the public key is not a P-256 key".to_string())?;
     b64url("credential", &r.credential)?;
-    let transports = r
-        .transports
-        .iter()
-        .filter(|t| matches!(t.as_str(), "internal" | "hybrid" | "usb" | "nfc" | "ble" | "smart-card"))
-        .cloned()
-        .collect();
+    let mut transports = Vec::new();
+    for t in &r.transports {
+        if matches!(t.as_str(), "internal" | "hybrid" | "usb" | "nfc" | "ble" | "smart-card") && !transports.contains(t)
+        {
+            transports.push(t.clone());
+        }
+    }
     Ok(Credential {
         id: r.credential.clone(),
         public_key: STANDARD.encode(spki),

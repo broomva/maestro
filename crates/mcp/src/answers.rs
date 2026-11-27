@@ -131,8 +131,11 @@ pub enum T3 {
 }
 
 fn version_cli(home: &Path, version: &str) -> Option<PathBuf> {
-    let ok =
-        !version.is_empty() && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    let ok = !version.is_empty()
+        && version != "."
+        && version != ".."
+        && !version.starts_with('-')
+        && version.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
     if !ok {
         return None;
     }
@@ -456,38 +459,47 @@ pub fn fallback_wake_message(r: &Receipt, commit: &str, origin_session: Option<&
         "[maestro] Fallback triage: the owner answered {}#{}: {} (option `{}`).{note}\n\
          They signed it with their passkey and Maestro wrote it to `{BRANCH}` at {commit}, so it is in effect now. \
          Original session (`{origin}`) could not be woken ({reason}).\n\
-         Inspect the ask, linked PR/ticket, and current fleet state to determine whether it still makes sense to carry          this decision forward (route or dispatch work) or disregard it as already resolved/superseded, and record why.\n\
+         Inspect the ask, linked PR/ticket, and current fleet state to determine whether it still makes sense to carry this decision forward (route or dispatch work) or disregard it as already resolved/superseded, and record why.\n\
          Answer id {}: if you already triaged this id, this is a repeat after a restart; ignore it.",
         r.intent.ledger, r.intent.handle, r.label, r.intent.option, r.id
     )
 }
 
 fn t3_thread_of(session: &str) -> Option<&str> {
-    session.strip_prefix("t3:").and_then(|s| s.split_once('/')).map(|(_, t)| t).filter(|t| !t.is_empty())
+    session
+        .strip_prefix("t3:")
+        .and_then(|s| s.split_once('/'))
+        .map(|(_, t)| t)
+        .filter(|t| !t.is_empty() && !t.starts_with('-'))
 }
 
 /// Wake the session an ask names (`t3:<environment>/<thread>`), as its next turn.
 pub fn wake(t3: Option<&Path>, session: Option<&str>, message: &str) -> String {
-    let Some(session) = session else { return "no session is named on the ask".into() };
+    wake_once(t3, session, message).0
+}
+
+fn wake_once(t3: Option<&Path>, session: Option<&str>, message: &str) -> (String, bool) {
+    let Some(session) = session else { return ("no session is named on the ask".into(), false) };
     let Some(thread) = t3_thread_of(session) else {
-        return format!("{session} is not a T3 session");
+        return (format!("{session} is not a T3 session"), false);
     };
-    let Some(t3) = t3 else { return "no T3 CLI is configured".into() };
+    let Some(t3) = t3 else { return ("no T3 CLI is configured".into(), false) };
     match Command::new(t3).args(["thread", "send", thread, message]).output() {
-        Ok(o) if o.status.success() => format!("told T3 thread {thread}"),
+        Ok(o) if o.status.success() => (format!("told T3 thread {thread}"), false),
         Ok(o) => {
-            // The CLI may say why on either stream; the last line is the reason.
+            // Check full output for database-owner mismatch before summarizing to one line.
             let said = format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            let db_mismatch = said.contains("ServerOwnsDatabaseError");
             let why = said
                 .lines()
                 .map(str::trim)
                 .filter(|l| !l.is_empty())
-                .find(|l| l.contains("Error") || l.contains("error"))
+                .find(|l| l.contains("ServerOwnsDatabaseError") || l.contains("Error") || l.contains("error"))
                 .or_else(|| said.lines().map(str::trim).rfind(|l| !l.is_empty()))
                 .unwrap_or("no output");
-            format!("T3 did not take it (exit {:?}): {why}", o.status.code())
+            (format!("T3 did not take it (exit {:?}): {why}", o.status.code()), db_mismatch)
         }
-        Err(e) => format!("T3 did not run: {e}"),
+        Err(e) => (format!("T3 did not run: {e}"), false),
     }
 }
 
@@ -499,8 +511,8 @@ pub fn wake_candidates(candidates: &[PathBuf], session: Option<&str>, message: &
     }
     let mut last = String::new();
     for cli in candidates {
-        let out = wake(Some(cli.as_path()), session, message);
-        if !out.contains("ServerOwnsDatabaseError") {
+        let (out, db_mismatch) = wake_once(Some(cli.as_path()), session, message);
+        if !db_mismatch {
             return out;
         }
         last = out;
@@ -555,10 +567,8 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
             let candidates = w.t3.as_ref().map(T3::candidates).unwrap_or_default();
             r.woke = Some(wake_with_fallback(&candidates, session, w.fallback_thread.as_deref(), &r, &commit));
             book.put(r.clone());
-            if w.remote {
-                r.landing = Some(land(w));
-                book.put(r.clone());
-            }
+            r.landing = Some(if w.remote { land(w) } else { "local only (not pushed)".into() });
+            book.put(r.clone());
             // Settled last, and only once the final receipt is on disk: a crash before this resumes
             // the answer, which is found written by its id, and the wake and the landing are tried again.
             if log(&w.owner_dir, &r).is_ok() {
@@ -860,7 +870,7 @@ mod tests {
         std::fs::write(
             &bad,
             "#!/bin/sh
-echo 'ERROR: ServerOwnsDatabaseError: mismatch' >&2
+echo 'Error: failed to send' >&2\necho '  Caused by: ServerOwnsDatabaseError: mismatch' >&2
 exit 1
 ",
         )

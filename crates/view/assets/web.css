@@ -365,8 +365,8 @@ body.mv-web { padding: 0; min-height: 100vh; }
 .mv-toast-btn:focus-visible { outline: 2px solid var(--mv-tide); outline-offset: 2px; }
 .mv-toast-close {
   flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   border-radius: 999px;
   border: 0;
   background: transparent;
@@ -419,5 +419,6 @@ body.mv-web { padding: 0; min-height: 100vh; }
     right: var(--bv-space-3);
     width: auto;
   }
+  .mv-toast-close { width: 44px; height: 44px; margin: -6px -6px -6px 0; }
 }
 .mv-owner-keys { margin: 0; padding: 0; list-style: none; font-size: 13px; color: var(--mv-ink3); }

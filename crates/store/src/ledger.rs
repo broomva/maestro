@@ -264,7 +264,7 @@ pub fn land(w: &Writer) -> String {
 
 fn format_auto_merge_error(number: &str, stderr: &str) -> String {
     let trimmed = stderr.trim();
-    if trimmed.contains("Auto merge is not allowed") || trimmed.contains("enablePullRequestAutoMerge") {
+    if trimmed.contains("Auto merge is not allowed") {
         format!("landing PR #{number} open (auto-merge is disabled on this repository)")
     } else if trimmed.is_empty() {
         format!("landing PR #{number}; auto-merge not set")
@@ -286,8 +286,8 @@ mod tests {
             "landing PR #1460 open (auto-merge is disabled on this repository)"
         );
         assert_eq!(
-            format_auto_merge_error("1460", "some other error"),
-            "landing PR #1460; auto-merge not set: some other error"
+            format_auto_merge_error("1460", "GraphQL: Pull request is in clean status (enablePullRequestAutoMerge)"),
+            "landing PR #1460; auto-merge not set: GraphQL: Pull request is in clean status (enablePullRequestAutoMerge)"
         );
     }
 }
