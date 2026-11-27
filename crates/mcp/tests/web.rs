@@ -234,6 +234,7 @@ async fn start_owner(
         checkout: dir.join("co"),
         owner_dir: owner_dir.clone(),
         t3: None,
+        fallback_thread: None,
         remote: false,
     };
     let party = maestro_mcp::passkey::Party::parse(origin).unwrap();

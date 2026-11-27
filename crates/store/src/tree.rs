@@ -87,6 +87,14 @@ impl Tree {
         Self { root: root.into(), source, commit: None, unresolved: None }
     }
 
+    pub(crate) fn from_resolved(root: impl Into<PathBuf>, source: TreeSource, commit: String) -> Self {
+        Self { root: root.into(), source, commit: Some(commit), unresolved: None }
+    }
+
+    pub(crate) fn from_unresolved(root: impl Into<PathBuf>, source: TreeSource, reason: String) -> Self {
+        Self { root: root.into(), source, commit: None, unresolved: Some(reason) }
+    }
+
     /// Like [`Tree::new`], resolving a git revision to its commit once.
     pub fn resolved(root: impl Into<PathBuf>, source: TreeSource) -> Self {
         let mut tree = Self::new(root, source);
@@ -288,15 +296,40 @@ impl Tree {
     /// The committer date of the commit read, or `None` for the working tree.
     pub fn committed_at(&self) -> Result<Option<jiff::Timestamp>, TreeError> {
         let Some(commit) = self.commit_to_read()? else { return Ok(None) };
-        let out = self.git(&["show", "-s", "--format=%cI", commit])?;
-        out.trim().parse::<jiff::Timestamp>().map(Some).map_err(|e| TreeError::Git {
-            args: format!("show -s --format=%cI {commit}"),
-            stderr: format!("not a date: {e}"),
+        crate::cache::git_committed_at(&self.root, commit, || {
+            let out = self.git(&["show", "-s", "--format=%cI", commit]).map_err(|e| e.to_string())?;
+            out.trim().parse::<jiff::Timestamp>().map(Some).map_err(|e| format!("not a date: {e}"))
         })
+        .map_err(|stderr| TreeError::Git { args: format!("show -s --format=%cI {commit}"), stderr })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Resolve a set of full ref names in one `git for-each-ref` call. Returns `None` on any git
+    /// error or stderr warning (such as a corrupt loose ref) so callers fall back to per-ref checks.
+    pub(crate) fn resolve_refs_batch(&self, refs: &[&str]) -> Option<std::collections::HashMap<String, String>> {
+        let mut cmd = git_command(&self.root);
+        cmd.args(["--no-pager", "for-each-ref", "--format=%(refname)%09%(objecttype)%09%(objectname)"]);
+        cmd.args(refs);
+        let output = cmd.output().ok()?;
+        if !output.status.success() || !output.stderr.is_empty() {
+            return None;
+        }
+        let stdout = String::from_utf8(output.stdout).ok()?;
+        let mut map = std::collections::HashMap::new();
+        for line in stdout.lines() {
+            let mut parts = line.split('\t');
+            let (Some(name), Some(kind), Some(oid)) = (parts.next(), parts.next(), parts.next()) else {
+                return None;
+            };
+            if kind != "commit" {
+                return None;
+            }
+            map.insert(name.to_string(), oid.to_string());
+        }
+        Some(map)
     }
 
     /// Whether the repo holds the full ref `name`, by `show-ref --exists` (git >= 2.43): 2 is
