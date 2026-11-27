@@ -714,7 +714,7 @@ pub fn claim_as(
         let perf = who.clone().unwrap_or_else(|| performer(session));
         let mut last_err: Option<super::subflow::SubflowError> = None;
         for k in st.items.keys() {
-            if st.completed.contains_key(k) {
+            if st.completed.contains_key(k) || st.in_flight.contains_key(k) {
                 continue;
             }
             let fails = st.failed_attempts.get(k).map_or(0, Vec::len) as u32;
@@ -850,10 +850,15 @@ fn hold(
     }
     let key = (rec.node.clone(), rec.iteration.clone());
     let latest = claims.latest.get(&key).map(String::as_str);
-    if let Some(cancel_at) = rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at) {
+    let is_map_node = started
+        .ir
+        .nodes
+        .get(&rec.node)
+        .is_some_and(|n| matches!(n.class, Class::Map { .. }));
+    if let Some(cancel_at) = rec.cancel_at.filter(|at| (is_map_node || latest == Some(sha)) && now >= *at) {
         return Err(Refusal::Cancelled { node: rec.node, cancel_at: cancel_at.to_string() }.into());
     }
-    if latest != Some(sha) || now >= rec.lease_until {
+    if (!is_map_node && latest != Some(sha)) || now >= rec.lease_until {
         return Err(Refusal::LeaseExpired { node: rec.node, lease_until: rec.lease_until.to_string() }.into());
     }
     let next = next_of(&log, &started, now)?;
@@ -1244,7 +1249,7 @@ pub fn complete_as(
     if let Err(unfit) = check_receipt(&held, session, &outputs, &plan.argv) {
         return refuse(&mut guard, &held, unfit, &[]);
     }
-    let mut granted_fence: Option<(String, u64, PathBuf)> = None;
+    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String)> = None;
     if let Step::Effect { preconditions } = &plan.step {
         // The preconditions run with the lock released; then everything again under it.
         let input = guard_input(&held.log, &held.started, &held.rec.node)?;
@@ -1268,22 +1273,11 @@ pub fn complete_as(
             Ok(digest) => digest,
             Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
         };
-        // Grant-time barrier: allocate monotonic resource fencing epoch BEFORE EffectStarted and
-        // before running the external effect command so stale workers are invalidated immediately.
         let fence_db = fence_db_path.clone();
         let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
-        let fence_store = FencingStore::open(&fence_db)
-            .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
-        // If the caller bound an explicit pre-granted epoch via `params.fencing_epoch`, verify it
-        // rather than minting a new one; otherwise mint a fresh monotonic epoch now.
-        let epoch = if let Some(pinned_epoch) = held.started.params.get("fencing_epoch").and_then(Value::as_u64) {
-            pinned_epoch
-        } else {
-            fence_store
-                .grant_epoch(&fence_resource)
-                .map_err(|e| KernelError::Encode(format!("fencing grant failed: {e}")))?
-        };
-        granted_fence = Some((fence_resource, epoch, fence_db));
+        let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
+        let op_id = format!("{}:{}:{}", instance.as_str(), held.rec.node, held.rec.attempt);
+        effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id));
         let intent = EffectStarted {
             node: held.rec.node.clone(),
             iteration: held.rec.iteration.clone(),
@@ -1295,45 +1289,62 @@ pub fn complete_as(
     }
     // A claim's cancel deadline ends its command too: the run is no longer than what is left.
     let limits = &cancel_capped(limits, held.rec.cancel_at);
-    // The command runs with the flows lock released, so other writers and readers go on.
-    // Every command but the project's own in a snapshot searches the system's PATH (`exec`).
-    let fence_env_owned: Vec<(&'static str, String)> = match &granted_fence {
-        Some((res, epoch, db)) => vec![
-            ("MAESTRO_FENCING_EPOCH", epoch.to_string()),
-            ("MAESTRO_FENCING_RESOURCE", res.clone()),
-            ("MAESTRO_FENCING_DB", db.display().to_string()),
-        ],
-        None => Vec::new(),
-    };
-    let fence_env_refs: Vec<(&str, &str)> = fence_env_owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &fence_env_refs };
+    // Drop the ledger lock BEFORE acquiring the per-resource fencing lock (disjoint lock order:
+    // never nested, zero deadlock). While holding `_resource_lock`, NO other worker can grant a
+    // newer epoch on `fence_resource` or execute a concurrent mutation on it!
     drop(guard);
 
-    // For `Class::Effect`, acquire exclusive per-resource OS `flock(LOCK_EX)` AND verify the epoch
-    // is STILL current BEFORE spawning the external command! Stale workers are rejected BEFORE
-    // any target mutation executes, and concurrent writers on the same resource are serialized.
-    let _resource_lock = if let Some((fence_resource, epoch, fence_db)) = &granted_fence {
-        let fence_store = FencingStore::open(fence_db)
+    let mut fence_commit_err: Option<String> = None;
+    let ran_at = clock::now();
+    let ran = if let Some((fence_resource, pinned_epoch, fence_db, op_id)) = effect_fence_cfg {
+        let fence_store = FencingStore::open(&fence_db)
             .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
         let rlock = fence_store
-            .acquire_resource_lock(fence_resource)
+            .acquire_resource_lock(&fence_resource)
             .map_err(|e| KernelError::Encode(format!("fencing lock failed: {e}")))?;
-        if let Err(e) = fence_store.verify_epoch_current(fence_resource, *epoch) {
-            let mut guard = ledger.lock()?;
-            let log = guard.log(&instance)?;
-            let after = wall(&log)?;
-            let held = name(hold(log, session, &instance, &sha, after)?);
-            return refuse(&mut guard, &held, ("stale_fencing_epoch", e.to_string()), &[]);
+        let epoch = match pinned_epoch {
+            Some(ep) => {
+                if let Err(e) = fence_store.verify_epoch_current(&fence_resource, ep) {
+                    drop(rlock);
+                    let mut guard = ledger.lock()?;
+                    let log = guard.log(&instance)?;
+                    let after = wall(&log)?;
+                    let held = name(hold(log, session, &instance, &sha, after)?);
+                    return refuse(&mut guard, &held, ("stale_fencing_epoch", e.to_string()), &[]);
+                }
+                ep
+            }
+            None => fence_store
+                .grant_epoch_locked(&rlock, &fence_resource)
+                .map_err(|e| KernelError::Encode(format!("fencing grant failed: {e}")))?,
+        };
+        let epoch_s = epoch.to_string();
+        let db_s = fence_db.display().to_string();
+        let fence_env_refs: [(&str, &str); 3] = [
+            ("MAESTRO_FENCING_EPOCH", epoch_s.as_str()),
+            ("MAESTRO_FENCING_RESOURCE", fence_resource.as_str()),
+            ("MAESTRO_FENCING_DB", db_s.as_str()),
+        ];
+        let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &fence_env_refs };
+        let ran = match &plan.snapshot {
+            Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
+            None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+        };
+        if matches!(ran, Ran::Exited { code: Some(0), .. }) {
+            let payload_digest = digest(&outputs);
+            let res_json = serde_json::to_string(&outputs).unwrap_or_else(|_| "null".to_string());
+            if let Err(e) = fence_store.commit_fenced_write(&fence_resource, epoch, &op_id, &payload_digest, &res_json) {
+                fence_commit_err = Some(e.to_string());
+            }
         }
-        Some(rlock)
+        drop(rlock);
+        ran
     } else {
-        None
-    };
-
-    let ran_at = clock::now();
-    let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
-        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+        let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &[] };
+        match &plan.snapshot {
+            Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
+            None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+        }
     };
     pause!("command_ran");
 
@@ -1376,16 +1387,8 @@ pub fn complete_as(
     if let Some(unfit) = unfit {
         return refuse(&mut guard, &held, unfit, &stderr);
     }
-    // Write-time atomic fencing commit for Class::Effect (still holding `_resource_lock`!):
-    if let Some((fence_resource, epoch, fence_db)) = &granted_fence {
-        let fence_store = FencingStore::open(fence_db)
-            .map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
-        let op_id = format!("{}:{}:{}", instance.as_str(), held.rec.node, held.rec.attempt);
-        let payload_digest = digest(&outputs);
-        let res_json = serde_json::to_string(&outputs).unwrap_or_else(|_| "null".to_string());
-        if let Err(e) = fence_store.commit_fenced_write(fence_resource, *epoch, &op_id, &payload_digest, &res_json) {
-            return refuse(&mut guard, &held, ("stale_fencing_epoch", e.to_string()), &stderr);
-        }
+    if let Some(err) = fence_commit_err {
+        return refuse(&mut guard, &held, ("stale_fencing_epoch", err), &stderr);
     }
     // Fail-closed 6-surface post-write isolation check for child subflow Work/Effect nodes:
     // NEVER skips when disjoint_writes or non-empty write_set applies!

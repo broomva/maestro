@@ -79,9 +79,21 @@ impl FencingStore {
         Ok(conn)
     }
 
-    /// Grant-time barrier: atomically advances `granted_epoch` on `resource_id` BEFORE returning
-    /// the strictly greater epoch `E` to the caller.
+    /// Grant-time barrier (standalone): acquires the exclusive per-resource OS `flock(LOCK_EX)`
+    /// and atomically advances `granted_epoch` on `resource_id` BEFORE returning the strictly
+    /// greater epoch `E` to the caller. Because `write.rs` holds the same resource lock across
+    /// `(grant/verify -> external command -> commit_fenced_write)`, no newer epoch can be granted
+    /// while an active effect command is executing.
     pub fn grant_epoch(&self, resource_id: &str) -> Result<u64, FencingError> {
+        if resource_id.is_empty() {
+            return Err(FencingError::Storage("resource_id must be non-empty".into()));
+        }
+        let lock = self.acquire_resource_lock(resource_id)?;
+        self.grant_epoch_locked(&lock, resource_id)
+    }
+
+    /// Grant-time barrier when the caller already holds [`ResourceLockGuard`] for `resource_id`.
+    pub fn grant_epoch_locked(&self, _lock: &ResourceLockGuard, resource_id: &str) -> Result<u64, FencingError> {
         if resource_id.is_empty() {
             return Err(FencingError::Storage("resource_id must be non-empty".into()));
         }

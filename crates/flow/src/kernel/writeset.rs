@@ -23,31 +23,133 @@ impl WriteVerification {
     }
 }
 
-/// Full Unicode Case Folding (Unicode CaseFolding.txt C + F mappings) so filesystem-equivalent
-/// names such as `Ä`/`ä`, `ß`/`ss`, `ẞ`/`SS`, `ﬁ`/`fi`, and `Σ`/`ς` always collide.
+/// Complete Unicode Case Folding (Unicode CaseFolding.txt `C + F` mappings across all 0..=0x10FFFF
+/// scalar values). Every code point where official Unicode default full case folding differs from
+/// `char::to_lowercase()` is listed explicitly below (including `ß`/`ẞ` -> `ss`, `ϐ` -> `β`,
+/// `ς` -> `σ`, Cherokee, Greek extended, ligatures, and standard `İ` -> `i\u{0307}` via `to_lowercase`).
 fn unicode_case_fold(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
-            '\u{00DF}' | '\u{1E9E}' => out.push_str("ss"),     // ß, ẞ -> ss
-            '\u{0130}' | '\u{0131}' => out.push('i'),          // İ, ı -> i
-            '\u{0149}' => out.push_str("\u{02BC}n"),           // ŉ -> ʼn
-            '\u{01F0}' => out.push_str("j\u{030C}"),           // ǰ -> ǰ
+            '\u{00B5}' => out.push('\u{03BC}'),
+            '\u{00DF}' => out.push_str("\u{0073}\u{0073}"),
+            '\u{0149}' => out.push_str("\u{02BC}\u{006E}"),
+            '\u{017F}' => out.push('\u{0073}'),
+            '\u{01F0}' => out.push_str("\u{006A}\u{030C}"),
+            '\u{0345}' => out.push('\u{03B9}'),
             '\u{0390}' => out.push_str("\u{03B9}\u{0308}\u{0301}"),
             '\u{03B0}' => out.push_str("\u{03C5}\u{0308}\u{0301}"),
-            '\u{03C2}' | '\u{03A3}' => out.push('\u{03C3}'),   // ς, Σ -> σ
-            '\u{0587}' => out.push_str("\u{0565}\u{0582}"),    // և -> եւ
-            '\u{1E96}' => out.push_str("h\u{0331}"),
-            '\u{1E97}' => out.push_str("t\u{0308}"),
-            '\u{1E98}' => out.push_str("w\u{030A}"),
-            '\u{1E99}' => out.push_str("y\u{030A}"),
-            '\u{1E9A}' => out.push_str("a\u{02BE}"),
+            '\u{03C2}' => out.push('\u{03C3}'),
+            '\u{03D0}' => out.push('\u{03B2}'),
+            '\u{03D1}' => out.push('\u{03B8}'),
+            '\u{03D5}' => out.push('\u{03C6}'),
+            '\u{03D6}' => out.push('\u{03C0}'),
+            '\u{03F0}' => out.push('\u{03BA}'),
+            '\u{03F1}' => out.push('\u{03C1}'),
+            '\u{03F5}' => out.push('\u{03B5}'),
+            '\u{0587}' => out.push_str("\u{0565}\u{0582}"),
+            '\u{13A0}'..='\u{13F5}' => out.push(ch),
+            '\u{13F8}'..='\u{13FD}' => {
+                if let Some(c) = char::from_u32(ch as u32 - 8) {
+                    out.push(c);
+                }
+            }
+            '\u{1C80}' => out.push('\u{0432}'),
+            '\u{1C81}' => out.push('\u{0434}'),
+            '\u{1C82}' => out.push('\u{043E}'),
+            '\u{1C83}' => out.push('\u{0441}'),
+            '\u{1C84}' | '\u{1C85}' => out.push('\u{0442}'),
+            '\u{1C86}' => out.push('\u{044A}'),
+            '\u{1C87}' => out.push('\u{0463}'),
+            '\u{1C88}' => out.push('\u{A64B}'),
+            '\u{1E96}' => out.push_str("\u{0068}\u{0331}"),
+            '\u{1E97}' => out.push_str("\u{0074}\u{0308}"),
+            '\u{1E98}' => out.push_str("\u{0077}\u{030A}"),
+            '\u{1E99}' => out.push_str("\u{0079}\u{030A}"),
+            '\u{1E9A}' => out.push_str("\u{0061}\u{02BE}"),
+            '\u{1E9B}' => out.push('\u{1E61}'),
+            '\u{1E9E}' => out.push_str("\u{0073}\u{0073}"),
+            '\u{1F50}' => out.push_str("\u{03C5}\u{0313}"),
+            '\u{1F52}' => out.push_str("\u{03C5}\u{0313}\u{0300}"),
+            '\u{1F54}' => out.push_str("\u{03C5}\u{0313}\u{0301}"),
+            '\u{1F56}' => out.push_str("\u{03C5}\u{0313}\u{0342}"),
+            '\u{1F80}'..='\u{1F87}' => {
+                if let Some(c) = char::from_u32(0x1F00 + (ch as u32 - 0x1F80)) {
+                    out.push(c);
+                }
+                out.push('\u{03B9}');
+            }
+            '\u{1F88}'..='\u{1F8F}' => {
+                if let Some(c) = char::from_u32(0x1F00 + (ch as u32 - 0x1F88)) {
+                    out.push(c);
+                }
+                out.push('\u{03B9}');
+            }
+            '\u{1F90}'..='\u{1F97}' => {
+                if let Some(c) = char::from_u32(0x1F20 + (ch as u32 - 0x1F90)) {
+                    out.push(c);
+                }
+                out.push('\u{03B9}');
+            }
+            '\u{1F98}'..='\u{1F9F}' => {
+                if let Some(c) = char::from_u32(0x1F20 + (ch as u32 - 0x1F98)) {
+                    out.push(c);
+                }
+                out.push('\u{03B9}');
+            }
+            '\u{1FA0}'..='\u{1FA7}' => {
+                if let Some(c) = char::from_u32(0x1F60 + (ch as u32 - 0x1FA0)) {
+                    out.push(c);
+                }
+                out.push('\u{03B9}');
+            }
+            '\u{1FA8}'..='\u{1FAF}' => {
+                if let Some(c) = char::from_u32(0x1F60 + (ch as u32 - 0x1FA8)) {
+                    out.push(c);
+                }
+                out.push('\u{03B9}');
+            }
+            '\u{1FB2}' => out.push_str("\u{1F70}\u{03B9}"),
+            '\u{1FB3}' | '\u{1FBC}' => out.push_str("\u{03B1}\u{03B9}"),
+            '\u{1FB4}' => out.push_str("\u{03AC}\u{03B9}"),
+            '\u{1FB6}' => out.push_str("\u{03B1}\u{0342}"),
+            '\u{1FB7}' => out.push_str("\u{03B1}\u{0342}\u{03B9}"),
+            '\u{1FBE}' => out.push('\u{03B9}'),
+            '\u{1FC2}' => out.push_str("\u{1F74}\u{03B9}"),
+            '\u{1FC3}' | '\u{1FCC}' => out.push_str("\u{03B7}\u{03B9}"),
+            '\u{1FC4}' => out.push_str("\u{03AE}\u{03B9}"),
+            '\u{1FC6}' => out.push_str("\u{03B7}\u{0342}"),
+            '\u{1FC7}' => out.push_str("\u{03B7}\u{0342}\u{03B9}"),
+            '\u{1FD2}' => out.push_str("\u{03B9}\u{0308}\u{0300}"),
+            '\u{1FD3}' => out.push_str("\u{03B9}\u{0308}\u{0301}"),
+            '\u{1FD6}' => out.push_str("\u{03B9}\u{0342}"),
+            '\u{1FD7}' => out.push_str("\u{03B9}\u{0308}\u{0342}"),
+            '\u{1FE2}' => out.push_str("\u{03C5}\u{0308}\u{0300}"),
+            '\u{1FE3}' => out.push_str("\u{03C5}\u{0308}\u{0301}"),
+            '\u{1FE4}' => out.push_str("\u{03C1}\u{0313}"),
+            '\u{1FE6}' => out.push_str("\u{03C5}\u{0342}"),
+            '\u{1FE7}' => out.push_str("\u{03C5}\u{0308}\u{0342}"),
+            '\u{1FF2}' => out.push_str("\u{1F7C}\u{03B9}"),
+            '\u{1FF3}' | '\u{1FFC}' => out.push_str("\u{03C9}\u{03B9}"),
+            '\u{1FF4}' => out.push_str("\u{03CE}\u{03B9}"),
+            '\u{1FF6}' => out.push_str("\u{03C9}\u{0342}"),
+            '\u{1FF7}' => out.push_str("\u{03C9}\u{0342}\u{03B9}"),
+            '\u{AB70}'..='\u{ABBF}' => {
+                if let Some(c) = char::from_u32(ch as u32 - 0x97D0) {
+                    out.push(c);
+                }
+            }
             '\u{FB00}' => out.push_str("ff"),
             '\u{FB01}' => out.push_str("fi"),
             '\u{FB02}' => out.push_str("fl"),
             '\u{FB03}' => out.push_str("ffi"),
             '\u{FB04}' => out.push_str("ffl"),
             '\u{FB05}' | '\u{FB06}' => out.push_str("st"),
+            '\u{FB13}' => out.push_str("\u{0574}\u{0576}"),
+            '\u{FB14}' => out.push_str("\u{0574}\u{0565}"),
+            '\u{FB15}' => out.push_str("\u{0574}\u{056B}"),
+            '\u{FB16}' => out.push_str("\u{057E}\u{0576}"),
+            '\u{FB17}' => out.push_str("\u{0574}\u{056D}"),
             _ => {
                 for lc in ch.to_lowercase() {
                     out.push(lc);

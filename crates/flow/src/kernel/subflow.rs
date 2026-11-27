@@ -658,11 +658,10 @@ pub fn claim_map_item(
                 child_params.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
-        // Pin initial git HEAD into `base_sha` when spawning a child in a git worktree so
-        // 6-surface post-write verification can never lose committed changes.
-        if !child_params.contains_key("base_sha")
-            && let Some(raw_wd) = child_ir.workdir.as_deref()
-        {
+        // Always strip caller-supplied `base_sha` and pin the real initial git HEAD at spawn time
+        // so a caller can NEVER smuggle a future SHA to hide commits from 6-surface verification.
+        child_params.remove("base_sha");
+        if let Some(raw_wd) = child_ir.workdir.as_deref() {
             let wd_val = Value::Object(child_params.clone());
             let wd = PathBuf::from(resolve_simple_workdir(raw_wd, &wd_val));
             if wd.is_dir() && wd.join(".git").exists()
@@ -880,10 +879,87 @@ pub fn reconcile_superseded_effect(
     Ok(())
 }
 
+/// Verifies a structured `termination_receipt` against live OS/filesystem state (never trusts
+/// arbitrary caller strings):
+/// - `pid:<u32>:exited` or `pid:<u32>:reaped`: probes `kill(pid, 0)` and requires `ESRCH` (process dead).
+/// - `worktree_removed:<abs_path>`: requires an absolute path that no longer exists on disk.
+/// - `worktree_readonly:<abs_path>`: requires an existing directory with zero write bits (`mode & 0o222 == 0`).
+fn verify_termination_receipt(receipt: &str) -> Result<(), SubflowError> {
+    let r = receipt.trim();
+    if let Some(rest) = r.strip_prefix("pid:") {
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() == 2 && matches!(parts[1], "exited" | "reaped")
+            && let Ok(raw_pid) = parts[0].parse::<i32>()
+            && raw_pid > 0
+            && let Some(pid) = rustix::process::Pid::from_raw(raw_pid)
+        {
+            return match rustix::process::test_kill_process(pid) {
+                Err(rustix::io::Errno::SRCH) => Ok(()),
+                Ok(()) => Err(SubflowError::QuiescenceRefused {
+                    detail: format!("worker pid {raw_pid} is still alive; cannot mark child quiescent"),
+                }),
+                Err(err) => Err(SubflowError::QuiescenceRefused {
+                    detail: format!("worker pid {raw_pid} liveness check failed ({err}); refusing quiescence"),
+                }),
+            };
+        }
+        return Err(SubflowError::QuiescenceRefused {
+            detail: format!("malformed pid termination_receipt {r:?} (expected pid:<positive_int>:exited|reaped)"),
+        });
+    }
+    if let Some(path_str) = r.strip_prefix("worktree_removed:") {
+        let p = std::path::Path::new(path_str);
+        if !p.is_absolute() {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("worktree_removed path must be absolute: {path_str:?}"),
+            });
+        }
+        if p.exists() {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("worktree still exists on disk: {path_str:?}"),
+            });
+        }
+        return Ok(());
+    }
+    if let Some(path_str) = r.strip_prefix("worktree_readonly:") {
+        let p = std::path::Path::new(path_str);
+        if !p.is_absolute() || !p.is_dir() {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("worktree_readonly path must be an existing absolute directory: {path_str:?}"),
+            });
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(p)
+                .map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?
+                .permissions()
+                .mode();
+            if (mode & 0o222) != 0 {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!("worktree {path_str:?} is still writable (mode {:o})", mode & 0o777),
+                });
+            }
+            return Ok(());
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: "worktree_readonly verification unsupported on non-unix".into(),
+            });
+        }
+    }
+    Err(SubflowError::QuiescenceRefused {
+        detail: format!(
+            "unverifiable termination_receipt {r:?}; expected pid:<pid>:exited|reaped, worktree_removed:<abs_path>, or worktree_readonly:<abs_path>"
+        ),
+    })
+}
+
 /// Records `SubflowQuiesced` on a `Superseded` or `SubflowFailed` child, releasing its `write_set`
 /// and retry reservations.
-/// NEVER infers quiescence from wall-clock lease expiry alone: requires BOTH a non-empty confirmed
-/// worker `termination_receipt` AND zero open `EffectStarted` entries in the child log!
+/// NEVER infers quiescence from wall-clock lease expiry or arbitrary strings: verifies live OS/FS
+/// termination proof (`verify_termination_receipt`) AND zero open `EffectStarted` entries!
 #[allow(clippy::too_many_arguments)]
 pub fn quiesce_subflow(
     guard: &mut WriteGuard,
@@ -895,11 +971,7 @@ pub fn quiesce_subflow(
     termination_receipt: &str,
     caller_owner: &Owner,
 ) -> Result<(), SubflowError> {
-    if termination_receipt.trim().is_empty() {
-        return Err(SubflowError::QuiescenceRefused {
-            detail: "confirmed worker termination_receipt is required (lease expiry alone never establishes quiescence)".into(),
-        });
-    }
+    verify_termination_receipt(termination_receipt)?;
     let parent_log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
     if parent_current_owner(&parent_log).as_ref() != Some(caller_owner) {
         return Err(SubflowError::NotOwner);

@@ -140,6 +140,13 @@ fn complete_lane_child(
     g.append(cid, cseq2, verify_done.to_event().unwrap()).unwrap();
 }
 
+fn dead_pid_receipt() -> String {
+    let mut child = Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    let _ = child.wait();
+    format!("pid:{pid}:exited")
+}
+
 fn init_git_repo(wt: &std::path::Path) {
     std::fs::create_dir_all(wt.join("src/a")).unwrap();
     let git = |args: &[&str]| {
@@ -569,7 +576,8 @@ nodes:
     );
 
     // Now confirmed worker termination + zero open effects -> SubflowQuiesced succeeds!
-    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, "pid:999:exited", &me)
+    let dead_rcpt = dead_pid_receipt();
+    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, &dead_rcpt, &me)
         .unwrap();
     let st = fold_map_state(&g.log(&parent).unwrap(), "execute_lanes", &Iteration::new());
     assert!(st.superseded_unquiesced.is_empty());
@@ -633,7 +641,8 @@ fn t08_disjoint_writes_case_folded_conflict_and_unquiesced_superseded_hold() {
     assert_eq!(still_blocked.code(), "write_set_conflict");
 
     // Once lane-upper is quiesced, lane-lower unlocks immediately!
-    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-upper", &child_upper, "pid:10:reaped", &me)
+    let dead_rcpt = dead_pid_receipt();
+    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-upper", &child_upper, &dead_rcpt, &me)
         .unwrap();
     assert!(claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-lower", None, &me).is_ok());
 }
@@ -1103,7 +1112,8 @@ fn t15_performer_union_includes_failed_attempt_when_retry_succeeds() {
             "quiescence_refused"
         );
         // Once failed child is confirmed quiescent, retry succeeds!
-        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid1, "pid:111:exited", &me)
+        let dead_rcpt = dead_pid_receipt();
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid1, &dead_rcpt, &me)
             .unwrap();
 
         // Attempt 2 (retry): Codex runs and succeeds!
@@ -1372,4 +1382,216 @@ fn t19_adoption_does_not_strand_child_and_worktree_verification_fails_closed() {
         complete(&mut ledger, &new_sess, &c_new.token, json!({"ok": true}), &Limits::default()).unwrap()
     };
     assert!(matches!(verify_claim, Completion::Completed { .. }), "new owner after adoption must NOT be stranded on existing child");
+}
+
+#[test]
+fn t20_grant_epoch_blocks_while_effect_holds_resource_lock() {
+    use std::sync::{Arc, Barrier};
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("flows");
+    let workdir = dir.path().join("work");
+    std::fs::create_dir_all(&workdir).unwrap();
+    let host = HostId::new("test-host").unwrap();
+    let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+    let sess = verified_owner("owner-serial");
+    let db_path = root.join("fencing_epochs.sqlite");
+    let started_flag = workdir.join("effect_running.txt");
+
+    // Effect command signals it started, then sleeps 200ms before finishing.
+    let yaml = format!(
+        r#"
+flow: serialized_effect
+version: 1
+params: [repo, fencing_resource]
+workdir: "{{{{params.repo}}}}"
+nodes:
+  ship:
+    class: effect
+    run: [sh, -c, 'printf started > "{}" && sleep 0.2']
+    reconcile: [sh, -c, "true"]
+"#,
+        started_flag.display()
+    );
+    let compiled = compile(&yaml).unwrap();
+    let s = start(
+        &mut ledger,
+        &sess,
+        &compiled,
+        json!({"repo": workdir.to_str().unwrap(), "fencing_resource": "branch:serialized"}),
+    )
+    .unwrap();
+    let c = claim(&mut ledger, &sess, &s.instance, "ship").unwrap();
+
+    // Concurrent worker thread waits until effect is running, then attempts grant_epoch("branch:serialized").
+    // Because grant_epoch acquires the same ResourceLockGuard, it MUST block until the effect finishes!
+    let db_clone = db_path.clone();
+    let flag_clone = started_flag.clone();
+    let bar = Arc::new(Barrier::new(2));
+    let bar_t = bar.clone();
+    let handle = std::thread::spawn(move || {
+        bar_t.wait();
+        while !flag_clone.exists() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let t0 = Instant::now();
+        let fstore = FencingStore::open(&db_clone).unwrap();
+        let e2 = fstore.grant_epoch("branch:serialized").unwrap();
+        (e2, t0.elapsed())
+    });
+
+    bar.wait();
+    let comp = complete(&mut ledger, &sess, &c.token, json!({"ok": true}), &Limits::default()).unwrap();
+    assert!(matches!(comp, Completion::Completed { .. }), "effect must complete cleanly without mid-flight grant override: {comp:?}");
+    let (e2, waited) = handle.join().unwrap();
+    assert_eq!(e2, 2, "second worker receives epoch 2 ONLY after first worker finishes & commits epoch 1");
+    assert!(waited >= Duration::from_millis(80), "grant_epoch must block while active effect holds resource lock (waited {waited:?})");
+}
+
+#[test]
+fn t21_quiescence_verifies_real_os_and_fs_and_base_sha_cannot_be_spoofed() {
+    let (dir, mut ledger, parent, me) = setup_parent(&lead_v3_yaml(), json!({"repo": "/tmp", "max_parallel": 2}));
+    let wt = dir.path().join("repo");
+
+    // 1. Even if caller passes a bogus/future `base_sha` in parent params, claim_map_item MUST strip
+    //    it and pin the REAL initial git rev-parse HEAD!
+    let real_head = String::from_utf8(
+        Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&wt).output().unwrap().stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let (_d2, mut ledger2, parent2, me2) = setup_parent(
+        &lead_v3_yaml(),
+        json!({"repo": wt.to_str().unwrap(), "base_sha": "deadbeef00000000000000000000000000000000", "max_parallel": 2}),
+    );
+    {
+        let mut g2 = ledger2.lock().unwrap();
+        expand_map(
+            &mut g2,
+            &parent2,
+            "execute_lanes",
+            Iteration::new(),
+            vec![MapItemSpec {
+                key: "lane-a".into(),
+                input_digest: digest(&json!(1)),
+                input: json!({"lane_id": "lane-a"}),
+                write_set: vec!["src/a/**".into()],
+            }],
+            BTreeMap::new(),
+            &me2,
+        )
+        .unwrap();
+        let (cid, _) = claim_map_item(&mut g2, &parent2, "execute_lanes", Iteration::new(), "lane-a", None, &me2).unwrap();
+        let clog = g2.log(&cid).unwrap();
+        let cstart: Started = serde_json::from_value(clog.events[0].body.clone()).unwrap();
+        assert_eq!(
+            cstart.params.get("base_sha").and_then(|v| v.as_str()),
+            Some(real_head.as_str()),
+            "caller-supplied base_sha must be overwritten with real initial git HEAD"
+        );
+    }
+
+    // 2. Quiescence MUST reject arbitrary strings ("anything"), live PIDs, and existing worktrees;
+    //    and accept dead PIDs or actually removed / read-only worktrees!
+    let mut g = ledger.lock().unwrap();
+    expand_map(
+        &mut g,
+        &parent,
+        "execute_lanes",
+        Iteration::new(),
+        vec![MapItemSpec {
+            key: "lane-a".into(),
+            input_digest: digest(&json!(1)),
+            input: json!({"lane_id": "lane-a"}),
+            write_set: vec!["src/a/**".into()],
+        }],
+        BTreeMap::new(),
+        &me,
+    )
+    .unwrap();
+    let (cid, _) = claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", None, &me).unwrap();
+    finalize_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, Some("boom"), BTreeMap::new(), &me)
+        .unwrap();
+
+    // Arbitrary string -> REFUSED!
+    assert_eq!(
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, "anything", &me)
+            .unwrap_err()
+            .code(),
+        "quiescence_refused"
+    );
+    // Live PID (our own process!) -> REFUSED!
+    let live_rcpt = format!("pid:{}:exited", std::process::id());
+    assert_eq!(
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &live_rcpt, &me)
+            .unwrap_err()
+            .code(),
+        "quiescence_refused"
+    );
+    // worktree_removed on a dir that still exists -> REFUSED!
+    let existing_rcpt = format!("worktree_removed:{}", wt.display());
+    assert_eq!(
+        quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &existing_rcpt, &me)
+            .unwrap_err()
+            .code(),
+        "quiescence_refused"
+    );
+    // worktree_removed on a genuinely absent path -> ACCEPTED!
+    let gone_rcpt = format!("worktree_removed:{}", dir.path().join("removed_wt").display());
+    quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &cid, &gone_rcpt, &me).unwrap();
+}
+
+#[test]
+fn t22_concurrent_normal_map_claims_dispatch_distinct_items_and_complete_unicode_fold() {
+    // 1. Complete Unicode CaseFolding.txt C+F checks (including ϐ -> β and official İ -> i\u{0307}!).
+    assert!(patterns_intersect("ϐ.txt", "β.txt").unwrap(), "Greek curled beta U+03D0 must fold to beta U+03B2");
+    assert!(patterns_intersect("İ.txt", "i\u{0307}.txt").unwrap(), "U+0130 must follow official full CaseFolding to i + U+0307");
+    assert!(!patterns_intersect("ı.txt", "i.txt").unwrap(), "Turkish dotless U+0131 stays distinct under default Unicode CaseFolding");
+
+    // 2. Concurrent normal kernel claim() on a 2-item disjoint map dispatches TWO DISTINCT children!
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().join("repo");
+    init_git_repo(&wt);
+    let root = dir.path().join("flows");
+    let host = HostId::new("test-host").unwrap();
+    let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+    let sess = verified_owner("owner-conc");
+    let compiled = compile(&lead_v3_yaml()).unwrap();
+    let started = start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2})).unwrap();
+
+    let c_pw = claim(&mut ledger, &sess, &started.instance, "plan_waves").unwrap();
+    complete(
+        &mut ledger,
+        &sess,
+        &c_pw.token,
+        json!({"lanes": [
+            {"lane_id": "lane-a", "write_set": ["src/a/**"]},
+            {"lane_id": "lane-b", "write_set": ["src/b/**"]}
+        ]}),
+        &Limits::default(),
+    )
+    .unwrap();
+
+    // First normal claim -> lane-a; second concurrent normal claim (before lane-a finishes!) -> lane-b!
+    let cm1 = claim(&mut ledger, &sess, &started.instance, "execute_lanes").unwrap();
+    let cm2 = claim(&mut ledger, &sess, &started.instance, "execute_lanes").unwrap();
+    let ik1 = cm1.inputs.get("__map_item_key").unwrap();
+    let ik2 = cm2.inputs.get("__map_item_key").unwrap();
+    let cid1 = InstanceId::new(cm1.inputs.get("__map_child_instance").unwrap()).unwrap();
+    let cid2 = InstanceId::new(cm2.inputs.get("__map_child_instance").unwrap()).unwrap();
+    assert_eq!(ik1, "lane-a");
+    assert_eq!(ik2, "lane-b");
+    assert_ne!(cid1, cid2, "concurrent normal map claims must dispatch distinct children");
+
+    // Both children complete independently and both parent map tokens complete cleanly!
+    for cid in [&cid1, &cid2] {
+        let cw = claim(&mut ledger, &sess, cid, "work").unwrap();
+        assert!(matches!(complete(&mut ledger, &sess, &cw.token, json!({"ok": true}), &Limits::default()).unwrap(), Completion::Completed { .. }));
+        let cv = claim(&mut ledger, &sess, cid, "verify_lane").unwrap();
+        assert!(matches!(complete(&mut ledger, &sess, &cv.token, json!({"ok": true}), &Limits::default()).unwrap(), Completion::Completed { .. }));
+    }
+    assert!(matches!(complete(&mut ledger, &sess, &cm1.token, json!({}), &Limits::default()).unwrap(), Completion::Completed { .. }));
+    assert!(matches!(complete(&mut ledger, &sess, &cm2.token, json!({}), &Limits::default()).unwrap(), Completion::Completed { .. }));
 }
