@@ -123,8 +123,9 @@ fn owner_verbs_are_unknown_tools() {
         assert!(err.message.contains("unknown tool"), "{name}: {}", err.message);
     }
     // A request cannot smuggle an owner's answer into a ledger.
-    let err = call(
+    let err = maestro_mcp::call_with_hosts(
         &store,
+        &maestro_hosts::SurfaceRegistry::default(),
         "maestro_ask_file",
         json!({ "session": "t3:-/x", "ledger": "a.yaml", "ask": { "id": "x", "answer": "yes" } }),
     )
@@ -645,9 +646,14 @@ fn a_filed_ask_with_a_busy_journal_lock_has_no_busy_flag() {
     let mut ask: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fixtures.join("ask.json")).unwrap()).unwrap();
     ask["id"] = json!("mcp-busy-journal-1");
-    let error =
-        call(&store, "maestro_ask_file", json!({ "session": "t3:local/test", "ledger": "ledger.yaml", "ask": ask }))
-            .unwrap_err();
+    let hosts = maestro_hosts::SurfaceRegistry::default();
+    let error = maestro_mcp::call_with_hosts(
+        &store,
+        &hosts,
+        "maestro_ask_file",
+        json!({ "session": "t3:local/test", "ledger": "ledger.yaml", "ask": ask }),
+    )
+    .unwrap_err();
     assert!(
         error.message.contains("filed `mcp-busy-journal-1`") && error.message.contains("journal line was not written"),
         "{}",
@@ -665,9 +671,13 @@ fn a_filed_ask_with_a_busy_journal_lock_has_no_busy_flag() {
     let mut ask: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fixtures.join("ask.json")).unwrap()).unwrap();
     ask["id"] = json!("mcp-filed");
-    let result =
-        call(&store, "maestro_ask_file", json!({ "session": "t3:local/test", "ledger": "ledger.yaml", "ask": ask }))
-            .unwrap();
+    let result = maestro_mcp::call_with_hosts(
+        &store,
+        &hosts,
+        "maestro_ask_file",
+        json!({ "session": "t3:local/test", "ledger": "ledger.yaml", "ask": ask }),
+    )
+    .unwrap();
     assert_eq!(result["request"]["result"]["id"], "mcp-filed");
     let section = store.asks();
     assert!(section.data.unwrap().iter().flat_map(|l| &l.ledger.asks).any(|a| a.id == "mcp-filed"));

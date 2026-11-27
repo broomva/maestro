@@ -152,11 +152,18 @@
   const summarizeOutcome = (receipt) => {
     const parts = [];
     let warn = false;
-    if (receipt.woke) {
+    if (receipt.delivery === "primary_notified") {
+      parts.push("Agent woken");
+    } else if (receipt.delivery === "fallback_notified") {
+      warn = true;
+      parts.push("Routed to fallback orchestrator");
+    } else if (receipt.woke) {
       const w = receipt.woke;
       if (w.startsWith("told T3 thread")) parts.push("Agent woken");
-      else if (w.includes("routed to fallback T3 thread")) parts.push("Routed to orchestrator");
-      else if (w === "no session is named on the ask") {
+      else if (w.includes("routed to fallback T3 thread")) {
+        warn = true;
+        parts.push("Routed to fallback orchestrator");
+      } else if (w === "no session is named on the ask") {
         // Omit noise when no session was attached.
       } else {
         warn = true;

@@ -223,6 +223,70 @@ async fn flow_run(State(web): State<Web>, uri: Uri, headers: HeaderMap, Path(id)
     flows_page(&web, &uri, &headers, maestro_view::FlowsPage::Run(id)).await
 }
 
+/// Pre-signature destination preview for an open ask's `origin.session`, using the exact same
+/// `T3Registry::resolve_destination` check that `answers::wake_with_registry` enforces on wake
+/// (BRO-4229).
+pub fn route_for_origin(
+    t3: Option<&maestro_hosts::T3Registry>,
+    fallback: Option<&str>,
+    origin_session: Option<&str>,
+) -> maestro_view::render::AnswerRoute {
+    use maestro_view::render::AnswerRoute;
+    let fallback = fallback.map(str::to_string);
+    let Some(raw) = origin_session.map(str::trim).filter(|s| !s.is_empty()) else {
+        return AnswerRoute::NonT3OrMissing { origin: None, fallback };
+    };
+    if !raw.starts_with("t3:") {
+        return AnswerRoute::NonT3OrMissing { origin: Some(raw.to_string()), fallback };
+    }
+    let Some(target) = crate::answers::t3_target_of(raw) else {
+        return AnswerRoute::UnresolvedT3 {
+            session: raw.to_string(),
+            reason: "malformed T3 destination".into(),
+            fallback,
+        };
+    };
+    let Some(reg) = t3 else {
+        return AnswerRoute::T3RegistryUnavailable {
+            session: raw.to_string(),
+            reason: "no T3 registry is found on this host".into(),
+            fallback,
+        };
+    };
+    let sref = maestro_core::session::SessionRef {
+        surface: maestro_core::session::Surface::T3,
+        environment: target.environment.map(str::to_string),
+        id: target.thread.to_string(),
+    };
+    match reg.resolve_destination(&sref) {
+        maestro_hosts::T3Destination::Local { session, environment_id, thread_id } => {
+            AnswerRoute::DirectLocal { session: session.to_string(), environment: environment_id, thread: thread_id }
+        }
+        maestro_hosts::T3Destination::Remote { session, environment_id, thread_id, linked: true } => {
+            AnswerRoute::RemoteLinkedUnsupported {
+                session: session.to_string(),
+                environment: environment_id,
+                thread: thread_id,
+                fallback,
+            }
+        }
+        maestro_hosts::T3Destination::Remote { session, environment_id, thread_id, linked: false } => {
+            AnswerRoute::RemoteUnlinked {
+                session: session.to_string(),
+                environment: environment_id,
+                thread: thread_id,
+                fallback,
+            }
+        }
+        maestro_hosts::T3Destination::Unresolved { reason } => {
+            AnswerRoute::UnresolvedT3 { session: raw.to_string(), reason, fallback }
+        }
+        maestro_hosts::T3Destination::Unavailable { reason } => {
+            AnswerRoute::T3RegistryUnavailable { session: raw.to_string(), reason, fallback }
+        }
+    }
+}
+
 /// Render one block as a page, read from a store resolved for this request.
 async fn page_of(
     web: &Web,
@@ -244,6 +308,9 @@ async fn page_of(
     let server = web.server.clone();
     let owner = owner_of(web, headers);
     let in_flight = web.owner.as_ref().map(|o| o.book.in_flight()).unwrap_or_default();
+    let t3_reg =
+        web.owner.as_ref().ok().and_then(|o| o.writer.resolved_t3_registry()).or_else(|| server.hosts().t3().cloned());
+    let fallback_thread = web.owner.as_ref().ok().and_then(|o| o.writer.fallback_thread.clone());
     let rendered = tokio::task::spawn_blocking(move || {
         let store = server.store().read_scope();
         // A readable ledger with no such ask is no page; an unread one still renders as unavailable.
@@ -253,7 +320,8 @@ async fn page_of(
             return None;
         }
         let at = maestro_store::views::now();
-        Some(maestro_view::render::render_web_with_pending(&store, &validated, at, owner, in_flight))
+        let resolve = |origin: Option<&str>| route_for_origin(t3_reg.as_ref(), fallback_thread.as_deref(), origin);
+        Some(maestro_view::render::render_web_with_route(&store, &validated, at, owner, in_flight, Some(&resolve)))
     })
     .await;
     match rendered {

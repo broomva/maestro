@@ -44,6 +44,28 @@ pub enum Owner {
     Elsewhere(String),
 }
 
+/// Pre-signature destination check for an open decision (BRO-4229): what Maestro knows right now
+/// about where a signed answer will be delivered, checked against this host's T3 registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerRoute {
+    /// Exact open thread on this host's local T3 environment; direct T3 wake is supported.
+    DirectLocal { session: String, environment: Option<String>, thread: String },
+    /// Names a linked remote T3 environment; the local T3 CLI transport cannot route it directly.
+    RemoteLinkedUnsupported { session: String, environment: String, thread: String, fallback: Option<String> },
+    /// Names a remote T3 environment that is not linked on this host (never routed locally).
+    RemoteUnlinked { session: String, environment: String, thread: String, fallback: Option<String> },
+    /// Origin names a T3 session that does not resolve to an open local thread (e.g. shortened
+    /// UUID, worktree label, archived/deleted thread, or unknown id).
+    UnresolvedT3 { session: String, reason: String, fallback: Option<String> },
+    /// Origin names a T3 session, but this host's T3 registry is absent or unreadable.
+    T3RegistryUnavailable { session: String, reason: String, fallback: Option<String> },
+    /// Origin is absent or names a non-T3 surface (e.g. Paseo or Direct).
+    NonT3OrMissing { origin: Option<String>, fallback: Option<String> },
+}
+
+/// Resolves an ask's `origin.session` to its pre-signature [`AnswerRoute`] (BRO-4229).
+pub type RouteResolver<'a> = &'a dyn Fn(Option<&str>) -> AnswerRoute;
+
 pub(crate) struct Ctx<'a> {
     pub(crate) store: &'a Store,
     pub(crate) reads: Reads,
@@ -58,6 +80,8 @@ pub(crate) struct Ctx<'a> {
     /// Where the owner answers (BRO-4042): the secure web page's origin. Outside the web pages
     /// (the MCP App, the snapshot), an open decision links there to be signed with the passkey.
     pub(crate) answer_origin: Option<String>,
+    /// Optional pre-signature destination resolver for an ask's `origin.session` (BRO-4229).
+    route_resolver: Option<RouteResolver<'a>>,
     /// `(ledger, handle)` pairs currently in the daemon's undo/write window, so `/decisions`
     /// advances past just-signed answers immediately.
     pub(crate) in_flight: std::collections::BTreeSet<(String, String)>,
@@ -75,6 +99,12 @@ pub(crate) struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Resolve the pre-signature answer delivery route for an ask's `origin.session`, when the
+    /// web host supplied a route resolver.
+    pub(crate) fn route_for(&self, origin_session: Option<&str>) -> Option<AnswerRoute> {
+        self.route_resolver.map(|f| f(origin_session))
+    }
+
     /// Whether an ask is currently in the daemon's undo or write window.
     pub(crate) fn is_in_flight(&self, ledger: &str, handle: &str) -> bool {
         self.in_flight.contains(&(ledger.to_string(), handle.to_string()))
@@ -177,9 +207,23 @@ pub fn render_web_with_pending(
     owner: Owner,
     in_flight: std::collections::BTreeSet<(String, String)>,
 ) -> (Rendered, crate::page::Shell) {
+    render_web_with_route(store, v, at, owner, in_flight, None)
+}
+
+/// Like [`render_web_with_pending`], with a pre-signature destination resolver for open asks
+/// (BRO-4229).
+pub fn render_web_with_route(
+    store: &Store,
+    v: &Validated,
+    at: jiff::Timestamp,
+    owner: Owner,
+    in_flight: std::collections::BTreeSet<(String, String)>,
+    route_resolver: Option<RouteResolver<'_>>,
+) -> (Rendered, crate::page::Shell) {
     let store = store.read_scope();
     let mut cx = Ctx::new(&store, at, None, Some(owner), None);
     cx.in_flight = in_flight;
+    cx.route_resolver = route_resolver;
     let screen = match &v.root.block {
         Block::Today(_) => crate::screens::web_today::today(&cx, &v.root.id),
         Block::Decisions(p) if p.project.is_none() => crate::screens::web::decisions(&cx, &v.root.id, p),
@@ -218,6 +262,7 @@ impl<'a> Ctx<'a> {
             answer_thread: answer_thread.cloned(),
             web,
             answer_origin,
+            route_resolver: None,
             in_flight: std::collections::BTreeSet::new(),
             unlanded: std::cell::OnceCell::from(waiting),
             main_asks: std::cell::OnceCell::new(),

@@ -502,16 +502,17 @@ enum AsksCommand {
 
 #[derive(clap::Args)]
 struct SessionArg {
-    /// This session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`.
+    /// This session as `surface:environment/id` with the full thread or session id.
     #[arg(long, env = "MAESTRO_SESSION")]
     session: String,
 }
 
-/// A flow verb's session: optional (BRO-3846). Omitted in a T3 thread, the verb acts for the thread
-/// the process's own thread variable names (`T3CODE_THREAD_ID`, or a Codex shell's `CODEX_THREAD_ID`).
+/// An optional session argument (BRO-3846, BRO-4229). Omitted in a T3 thread, Maestro resolves
+/// the thread the process's own thread variable names (`T3CODE_THREAD_ID`, or a Codex shell's
+/// `CODEX_THREAD_ID`).
 #[derive(clap::Args)]
 struct FlowSessionArg {
-    /// This session as `surface:environment/id`, e.g. `t3:local/6ff25f7c`. Optional in a T3 thread.
+    /// This session as `surface:environment/id` with the full thread id. Optional in a T3 thread.
     #[arg(long, env = "MAESTRO_SESSION")]
     session: Option<String>,
 }
@@ -521,7 +522,7 @@ enum AskCommand {
     /// File one ask into a ledger through ask_ledger.py, under the ledger's lock.
     File {
         #[command(flatten)]
-        session: SessionArg,
+        session: FlowSessionArg,
         /// Ledger file name in the asks folder (it must exist).
         #[arg(long)]
         ledger: String,
@@ -777,12 +778,13 @@ fn run(cli: &Cli) -> Result<()> {
                 ask.clone()
             };
             let ask: Value = serde_json::from_str(&text).context("--ask must be a JSON object")?;
-            request(
-                cli,
-                &store,
-                "maestro_ask_file",
-                json!({ "session": session.session, "ledger": ledger, "ask": ask }),
-            )?
+            let mut args = serde_json::Map::new();
+            if let Some(s) = &session.session {
+                args.insert("session".into(), Value::String(s.clone()));
+            }
+            args.insert("ledger".into(), Value::String(ledger.clone()));
+            args.insert("ask".into(), ask);
+            request(cli, &store, "maestro_ask_file", Value::Object(args))?
         }
         Command::Queue { session, title, brief, project, initiative } => request(
             cli,

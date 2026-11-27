@@ -426,6 +426,23 @@ pub enum Resolution {
     Unresolved(String),
 }
 
+/// Where a T3 destination (`t3:<env>/<id>`) resolves against this host's T3 registry (BRO-4229).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum T3Destination {
+    /// Exact open thread on this host's local T3 environment, canonicalized to this host's
+    /// authoritative environment id when known.
+    Local { session: SessionRef, environment_id: Option<String>, thread_id: String },
+    /// Names another T3 environment (not this host's local environment). Never matched against
+    /// local threads and never routed locally. `linked` reports whether that environment appears
+    /// in this host's active `peer_environment_links`.
+    Remote { session: SessionRef, environment_id: String, thread_id: String, linked: bool },
+    /// Does not resolve to an exact open thread in this host's T3 registry (e.g. a shortened UUID,
+    /// worktree label, archived/deleted thread, unknown thread id, or malformed id).
+    Unresolved { reason: String },
+    /// No T3 registry is present on this host, or the registry could not be read.
+    Unavailable { reason: String },
+}
+
 /// T3 thread registry reader (`statev2.sqlite` or JSON snapshot).
 #[derive(Debug, Clone)]
 pub struct T3Registry {
@@ -639,6 +656,21 @@ def main():
                 unreadable(r["thread_id"], "has a malformed nativeThreadRef")
             if ref["nativeId"] == target_id and r["thread_id"] not in out:
                 out.append(r["thread_id"])
+        print(json.dumps(out))
+        sys.exit(0)
+
+    if mode == "linked":
+        out = []
+        if "peer_environment_links" in tables:
+            lcols = {r["name"] for r in conn.execute("PRAGMA table_info(peer_environment_links)")}
+            fenced_filter = " AND (fenced IS NULL OR fenced = 0)" if "fenced" in lcols else ""
+            for row in conn.execute(
+                f"SELECT environment_id FROM peer_environment_links "
+                f"WHERE environment_id IS NOT NULL AND environment_id != ''{fenced_filter}"
+            ):
+                eid = row["environment_id"]
+                if isinstance(eid, str) and eid and eid not in out:
+                    out.append(eid)
         print(json.dumps(out))
         sys.exit(0)
 
@@ -1081,6 +1113,165 @@ impl T3Registry {
             }
             Some(t) => Resolution::Thread(Box::new(t)),
         })
+    }
+
+    /// Active (non-fenced) remote T3 environment ids linked to this host (`peer_environment_links`
+    /// in SQLite, or a sibling `linked-environments.json` beside a JSON snapshot).
+    pub fn linked_environments(&self) -> Result<Vec<String>, IdentityRefusal> {
+        let unreadable = |msg: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, msg);
+        if self.disconnected {
+            return Err(unreadable("T3 registry is disconnected.".into()));
+        }
+        let located = match self.locate() {
+            Read::Present(p) => p,
+            Read::Absent => {
+                return Err(unreadable(format!("No T3 registry database or snapshot at {}.", self.root.display())));
+            }
+            Read::Unreadable(why) => return Err(unreadable(format!("T3 registry is unreadable: {why}."))),
+        };
+        match located {
+            Located::Json(path) => {
+                let Some(parent) = path.parent() else { return Ok(Vec::new()) };
+                let links_path = parent.join("linked-environments.json");
+                let text = match read::read_text(&links_path) {
+                    Read::Absent => return Ok(Vec::new()),
+                    Read::Unreadable(why) => {
+                        return Err(unreadable(format!(
+                            "T3 linked environments file {} is unreadable: {why}.",
+                            links_path.display()
+                        )));
+                    }
+                    Read::Present(text) => text,
+                };
+                let val: Value = serde_json::from_str(&text)
+                    .map_err(|e| unreadable(format!("T3 linked environments file is not valid JSON: {e}.")))?;
+                let arr = val
+                    .as_array()
+                    .ok_or_else(|| unreadable("T3 linked environments file must be a JSON array.".into()))?;
+                let mut out = Vec::new();
+                for item in arr {
+                    let id = match item {
+                        Value::String(s) => Some(s.trim()),
+                        Value::Object(map) => {
+                            if map.get("fenced").and_then(Value::as_bool).unwrap_or(false) {
+                                None
+                            } else {
+                                map.get("environment_id").and_then(Value::as_str).map(str::trim)
+                            }
+                        }
+                        _ => return Err(unreadable("T3 linked environments entry must be a string or object.".into())),
+                    };
+                    if let Some(id) = id.filter(|s| !s.is_empty())
+                        && !out.iter().any(|existing| existing == id)
+                    {
+                        out.push(id.to_string());
+                    }
+                }
+                Ok(out)
+            }
+            Located::Sqlite(db_file) => {
+                let out = Command::new("python3")
+                    .arg("-I")
+                    .arg("-c")
+                    .arg(SQLITE_READER_PY)
+                    .arg("linked")
+                    .arg(&db_file)
+                    .output()
+                    .map_err(|e| unreadable(format!("T3 SQLite reader failed to launch: {e}.")))?;
+                if out.status.code() != Some(0) {
+                    let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    return Err(unreadable(format!("T3 SQLite database is unreadable: {detail}")));
+                }
+                serde_json::from_slice(&out.stdout)
+                    .map_err(|e| unreadable(format!("T3 SQLite reader returned invalid JSON: {e}.")))
+            }
+        }
+    }
+
+    /// Resolve a T3 destination (`t3:<env>/<id>`) against this host's exact registry (BRO-4229).
+    ///
+    /// - Never infers a thread from a shortened prefix or worktree label (exact id match only).
+    /// - Never routes a destination naming another environment to a local thread, even if a local
+    ///   thread happens to share the same id.
+    /// - Distinguishes linked remote environments from unknown remote environments, and fails
+    ///   closed as [`T3Destination::Unavailable`] when the registry cannot be read.
+    pub fn resolve_destination(&self, session: &SessionRef) -> T3Destination {
+        if session.surface != Surface::T3 {
+            return T3Destination::Unresolved { reason: format!("{session} is not a T3 session") };
+        }
+        if !is_safe_t3_id(&session.id) {
+            return T3Destination::Unresolved { reason: format!("{} is not a T3 thread id", short_id(&session.id)) };
+        }
+        if self.disconnected {
+            return T3Destination::Unavailable { reason: "T3 registry is disconnected.".into() };
+        }
+        match self.locate() {
+            Read::Present(_) => {}
+            Read::Absent => {
+                return T3Destination::Unavailable {
+                    reason: format!("No T3 registry database or snapshot at {}.", self.root.display()),
+                };
+            }
+            Read::Unreadable(why) => {
+                return T3Destination::Unavailable { reason: format!("T3 registry is unreadable: {why}.") };
+            }
+        }
+        let local_env = self.environment_id();
+        let requested_env = session.environment.as_deref().filter(|e| *e != "local" && *e != "-");
+        if let Some(env) = requested_env {
+            let is_remote = match local_env.as_deref() {
+                Some(local) => local != env,
+                None => match self.resolve(&session.id, false) {
+                    Ok(Resolution::Thread(t)) if t.environment_id.as_deref() == Some(env) => {
+                        return T3Destination::Local {
+                            session: SessionRef {
+                                surface: Surface::T3,
+                                environment: Some(env.to_string()),
+                                id: t.id.clone(),
+                            },
+                            environment_id: Some(env.to_string()),
+                            thread_id: t.id,
+                        };
+                    }
+                    Err(r) => return T3Destination::Unavailable { reason: r.message },
+                    Ok(_) => true,
+                },
+            };
+            if is_remote {
+                return match self.linked_environments() {
+                    Ok(links) => T3Destination::Remote {
+                        session: session.clone(),
+                        environment_id: env.to_string(),
+                        thread_id: session.id.clone(),
+                        linked: links.iter().any(|l| l == env),
+                    },
+                    Err(r) => T3Destination::Unavailable { reason: r.message },
+                };
+            }
+        }
+        match self.resolve(&session.id, false) {
+            Ok(Resolution::Thread(t)) => {
+                let canonical_env = t.environment_id.clone().or(local_env);
+                if let Some(env) = requested_env
+                    && canonical_env.as_deref() != Some(env)
+                {
+                    return T3Destination::Unresolved {
+                        reason: format!(
+                            "thread {} belongs to environment {}, not {env}",
+                            short_id(&t.id),
+                            canonical_env.as_deref().unwrap_or("-")
+                        ),
+                    };
+                }
+                T3Destination::Local {
+                    session: SessionRef { surface: Surface::T3, environment: canonical_env.clone(), id: t.id.clone() },
+                    environment_id: canonical_env,
+                    thread_id: t.id,
+                }
+            }
+            Ok(Resolution::Unresolved(reason)) => T3Destination::Unresolved { reason },
+            Err(r) => T3Destination::Unavailable { reason: r.message },
+        }
     }
 
     fn lookup(&self, id: &str) -> Result<Option<T3Thread>, IdentityRefusal> {

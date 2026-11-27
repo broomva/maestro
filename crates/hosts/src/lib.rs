@@ -32,7 +32,7 @@ pub use paseo::{
     PARENT_AGENT_LABEL, PaseoAgent, PaseoRegistry, PermissionLike, describe_permission, permission_request_id,
     resolve_real, within,
 };
-pub use t3::{LiveThreads, MAX_T3_ID, Resolution, T3Registry, T3Thread, is_safe_t3_id};
+pub use t3::{LiveThreads, MAX_T3_ID, Resolution, T3Destination, T3Registry, T3Thread, is_safe_t3_id};
 
 use maestro_core::SourceError;
 use maestro_core::need::Need;
@@ -880,6 +880,25 @@ impl SurfaceRegistry {
     /// This host's T3 environment id, the canonical form of a `local` or `-` T3 session.
     pub fn t3_environment(&self) -> Option<String> {
         self.t3.as_ref().and_then(T3Registry::environment_id)
+    }
+
+    /// This host's T3 registry, if one was configured or discovered.
+    pub fn t3(&self) -> Option<&T3Registry> {
+        self.t3.as_ref()
+    }
+
+    /// Resolve a T3 session destination against this host's T3 registry (BRO-4229).
+    pub fn resolve_t3_destination(&self, session: &SessionRef) -> T3Destination {
+        if session.surface != Surface::T3 {
+            return T3Destination::Unresolved { reason: format!("{session} is not a T3 session") };
+        }
+        if !t3::is_safe_t3_id(&session.id) {
+            return T3Destination::Unresolved { reason: format!("{} is not a T3 thread id", short_id(&session.id)) };
+        }
+        match &self.t3 {
+            Some(t3) => t3.resolve_destination(session),
+            None => T3Destination::Unavailable { reason: "no T3 registry is found on this host".into() },
+        }
     }
 
     /// What each of `vars` resolves to in T3's registry (BRO-3846). With no T3 registry here, each

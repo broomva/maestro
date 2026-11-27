@@ -1,7 +1,7 @@
 //! Read the answer writer's own receipts without inferring what an agent did afterwards.
 use crate::Store;
 use maestro_core::{Section, SourceError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -27,6 +27,20 @@ pub enum Stage {
     Failed,
 }
 
+/// Distinct notification outcome for a written answer receipt (BRO-4229): separates ledger-only
+/// writes from direct primary-session notification and explicit fallback-orchestrator routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatus {
+    /// Answer was written to the ledger; neither the primary asking session nor a fallback thread
+    /// was notified.
+    WrittenOnly,
+    /// The asking session itself was directly notified via T3.
+    PrimaryNotified,
+    /// Primary notification did not occur; the configured fallback thread was notified for triage.
+    FallbackNotified,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Delivery {
     pub id: String,
@@ -35,18 +49,61 @@ pub struct Delivery {
     pub signed_at: String,
     pub commit: Option<String>,
     pub woke: Option<String>,
+    #[serde(default)]
+    pub delivery: Option<DeliveryStatus>,
     pub landing: Option<String>,
     pub error: Option<String>,
 }
 
+fn valid_notified_thread(thread: &str) -> bool {
+    !thread.is_empty() && !thread.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+fn woke_is_primary(woke: &str) -> bool {
+    woke.strip_prefix("told T3 thread ").is_some_and(valid_notified_thread)
+}
+
+fn woke_is_fallback(woke: &str) -> bool {
+    woke.rsplit_once("; routed to fallback T3 thread ").is_some_and(|(_, thread)| valid_notified_thread(thread))
+}
+
 impl Delivery {
-    /// The writer records this exact phrase only after T3 accepts `thread send`.
-    /// It proves delivery to a session, never that work started or finished.
+    /// Classify a written receipt as primary-notified, fallback-notified, or written-only.
+    /// Cross-checks any structured `delivery` field against `woke` so an inconsistent or fallback
+    /// receipt never reports as primary-notified, and interprets historical receipts without the
+    /// `delivery` field from `woke`.
+    pub fn delivery_status(&self) -> Option<DeliveryStatus> {
+        (self.stage == Stage::Written).then(|| {
+            let inferred = match self.woke.as_deref() {
+                Some(w) if woke_is_primary(w) => DeliveryStatus::PrimaryNotified,
+                Some(w) if woke_is_fallback(w) => DeliveryStatus::FallbackNotified,
+                _ => DeliveryStatus::WrittenOnly,
+            };
+            match self.delivery {
+                Some(DeliveryStatus::PrimaryNotified) if inferred == DeliveryStatus::PrimaryNotified => {
+                    DeliveryStatus::PrimaryNotified
+                }
+                Some(DeliveryStatus::FallbackNotified) if inferred == DeliveryStatus::FallbackNotified => {
+                    DeliveryStatus::FallbackNotified
+                }
+                Some(DeliveryStatus::WrittenOnly) => DeliveryStatus::WrittenOnly,
+                None => inferred,
+                Some(_) => DeliveryStatus::WrittenOnly,
+            }
+        })
+    }
+
+    /// The writer records this exact phrase only after T3 accepts `thread send` for the primary
+    /// asking session. It proves delivery to that session, never that work started or finished,
+    /// and is false for fallback-only or written-only receipts.
     pub fn session_notified(&self) -> bool {
-        self.stage == Stage::Written
-            && self.woke.as_deref().and_then(|w| w.strip_prefix("told T3 thread ")).is_some_and(|thread| {
-                !thread.is_empty() && !thread.chars().any(|c| c.is_whitespace() || c.is_control())
-            })
+        self.delivery_status() == Some(DeliveryStatus::PrimaryNotified)
+    }
+
+    /// Whether primary notification did not succeed and the configured fallback thread was
+    /// notified for triage instead.
+    pub fn fallback_notified(&self) -> bool {
+        self.delivery_status() == Some(DeliveryStatus::FallbackNotified)
     }
 }
 

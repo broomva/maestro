@@ -163,8 +163,11 @@ pub struct ContextArgs {
 /// Every agent request names the session making it.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AskFileArgs {
-    /// Your session as `surface:environment/id`, e.g. `t3:local/6ff25f7c` or `paseo:-/ae7d9f21`.
-    pub session: String,
+    /// Your session as `surface:environment/id` with the full thread or session id (for example
+    /// `t3:<environment-id>/<full-thread-id>` or `paseo:-/<session-id>`). Never pass a shortened
+    /// UUID prefix or a worktree label. Optional inside a T3 thread where Maestro resolves your
+    /// exact thread from `T3CODE_THREAD_ID` or `CODEX_THREAD_ID`.
+    pub session: Option<String>,
     /// Ledger file name in the asks folder, e.g. `bro-3261-maestro-production.yaml`. It must exist: a ledger is opened with its arc in a workspace change.
     pub ledger: String,
     /// The ask, as ask_ledger.py's schema and the decision layer (`.control/asks/DECISION-LAYER.md`)
@@ -1135,6 +1138,180 @@ pub fn agent_request_with_hosts(
     agent_request_in(store, hosts, Ambient::Caller, kind, args)
 }
 
+/// Destination classification recorded at ask filing time (BRO-4229).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AskDestination {
+    /// Resolved to an exact open thread on this host's local T3 environment.
+    ResolvedLocal,
+    /// Names a linked remote T3 environment (not verifiable against local threads, never routed
+    /// locally by the local T3 CLI transport).
+    RemoteLinked { environment_id: String },
+    /// Non-T3 surface (for example `paseo` or `direct`), preserved as-is.
+    NonT3,
+    /// T3 session filed on a host with no T3 registry installed (not checked against a registry).
+    UnverifiedNoRegistry,
+}
+
+impl AskDestination {
+    fn as_json(&self, session: &maestro_core::session::SessionRef) -> Value {
+        match self {
+            AskDestination::ResolvedLocal => {
+                json!({ "session": session.to_string(), "status": "resolved_local" })
+            }
+            AskDestination::RemoteLinked { environment_id } => json!({
+                "session": session.to_string(),
+                "status": "remote_linked",
+                "environment": environment_id,
+                "direct_t3_cli_routable": false,
+            }),
+            AskDestination::NonT3 => json!({ "session": session.to_string(), "status": "non_t3" }),
+            AskDestination::UnverifiedNoRegistry => {
+                json!({ "session": session.to_string(), "status": "unverified_no_registry" })
+            }
+        }
+    }
+}
+
+/// Resolve the asking session and caller authority for `maestro_ask_file` (BRO-4229).
+///
+/// - Credentialed callers verify strictly through `verified_caller` and keep `Principal::Verified`.
+/// - Uncredentialed callers in a T3 child process (`Ambient::Caller`, `Attributed`, thread vars
+///   present) resolve their exact thread via `hosts.attribution()`, refuse any contradictory
+///   `session` argument (including shortened UUIDs or worktree labels), preserve configured-surface
+///   credential requirements, and stay `Principal::Unverified`.
+/// - Uncredentialed callers without T3 process vars (including the shared HTTP daemon
+///   `Ambient::Shared`) verify `t3:*` destinations against `hosts.resolve_t3_destination`:
+///   exact live local threads canonicalize to the host's authoritative environment id while
+///   staying `Principal::Unverified`; unresolved destinations (short UUIDs, worktree labels,
+///   archived/deleted/unknown threads) and unlinked remote environments are refused; an unreadable
+///   present T3 registry fails closed; linked remote environments are preserved verbatim without
+///   local lookup; and non-T3 callers are preserved.
+fn resolve_ask_filer(
+    hosts: &maestro_hosts::SurfaceRegistry,
+    session_opt: Option<&str>,
+    args: &Value,
+    ambient: Ambient,
+) -> Result<(maestro_core::session::SessionRef, Principal, AskDestination), McpError> {
+    use maestro_core::session::Surface;
+    use maestro_hosts::{Attributed, IdentityMode, RefusalReason, T3Destination};
+
+    let named = session_opt.map(session_of).transpose()?;
+    let presented = Presented::read(args, ambient)?;
+
+    if presented.credentialed() {
+        let check = if hosts.identity_mode() == IdentityMode::Attributed { Check::Write } else { Check::Request };
+        let verified = verified_caller(hosts, named.as_ref(), args, ambient, check)?.ok_or_else(|| {
+            refuse(RefusalReason::InvalidToken, "presented credential did not verify against any configured surface")
+        })?;
+        let session = verified.session().clone();
+        let dest = if session.surface == Surface::T3 { AskDestination::ResolvedLocal } else { AskDestination::NonT3 };
+        return Ok((session, maestro_hosts::verified_identity(&verified), dest));
+    }
+
+    let has_vars =
+        ambient == Ambient::Caller && hosts.identity_mode() != IdentityMode::Strict && !hosts.thread_vars().is_empty();
+    if has_vars {
+        if let Some(ref s) = named
+            && s.surface != Surface::T3
+        {
+            let var = hosts.thread_vars().iter().next().map(|v| v.name.as_str()).unwrap_or("T3 thread variable");
+            return Err(refuse(
+                RefusalReason::ThreadMismatch,
+                format!(
+                    "this process carries a T3 thread variable ({var}), which can never name the {} session {s}",
+                    s.surface.as_str()
+                ),
+            ));
+        }
+        let (attribution, environment) = match hosts.attribution() {
+            Attributed::Resolved { attribution, environment } => (attribution, environment),
+            Attributed::Refused(r) => return Err(refused(r)),
+            Attributed::Absent => {
+                return Err(refuse(
+                    RefusalReason::AttributionMissing,
+                    "no session was named and this process carries no T3 thread variable",
+                ));
+            }
+        };
+        let resolved = maestro_core::session::SessionRef {
+            surface: Surface::T3,
+            environment: environment.or_else(|| hosts.t3_environment()),
+            id: attribution.thread.clone(),
+        };
+        if let Some(ref s) = named
+            && s.canonical(resolved.environment.as_deref()) != resolved
+        {
+            return Err(refuse(
+                RefusalReason::ThreadMismatch,
+                format!(
+                    "{} names T3 thread {}, but the claimed session is {s}; omit session or pass the exact full thread id",
+                    attribution.variable, attribution.thread
+                ),
+            ));
+        }
+        if (hosts.has_configured_surface(&Surface::T3) || presented.cwd.is_some() || presented.node.is_some())
+            && let Some(verified) = claimed(hosts, &resolved, presented, None)?
+        {
+            return Ok((
+                verified.session().clone(),
+                maestro_hosts::verified_identity(&verified),
+                AskDestination::ResolvedLocal,
+            ));
+        }
+        return Ok((resolved, Principal::Unverified, AskDestination::ResolvedLocal));
+    }
+
+    let Some(session) = named else {
+        return Err(refuse(
+            RefusalReason::MissingSessionId,
+            "no session was named and this process carries no T3 thread variable (T3CODE_THREAD_ID or CODEX_THREAD_ID): pass your full session as surface:environment/id",
+        ));
+    };
+    if (hosts.has_configured_surface(&session.surface) || presented.cwd.is_some() || presented.node.is_some())
+        && let Some(verified) = claimed(hosts, &session, presented, None)?
+    {
+        let s = verified.session().clone();
+        let dest = if s.surface == Surface::T3 { AskDestination::ResolvedLocal } else { AskDestination::NonT3 };
+        return Ok((s, maestro_hosts::verified_identity(&verified), dest));
+    }
+    if session.surface != Surface::T3 {
+        return Ok((session, Principal::Unverified, AskDestination::NonT3));
+    }
+    match hosts.resolve_t3_destination(&session) {
+        T3Destination::Local { session: canonical, .. } => {
+            Ok((canonical, Principal::Unverified, AskDestination::ResolvedLocal))
+        }
+        T3Destination::Remote { session: remote, environment_id, linked, .. } => {
+            if linked {
+                Ok((remote, Principal::Unverified, AskDestination::RemoteLinked { environment_id }))
+            } else {
+                Err(McpError::invalid_params(
+                    format!(
+                        "T3 destination `{session}` names environment `{environment_id}`, which is neither this host's T3 environment nor a linked T3 environment"
+                    ),
+                    None,
+                ))
+            }
+        }
+        T3Destination::Unresolved { reason } => Err(McpError::invalid_params(
+            format!(
+                "T3 destination `{session}` does not resolve to an open T3 thread on this host ({reason}); pass the exact full T3 thread id, never a short prefix or worktree label"
+            ),
+            None,
+        )),
+        T3Destination::Unavailable { reason } => {
+            if hosts.t3().is_some() {
+                Err(refuse(
+                    RefusalReason::RegistryUnavailable,
+                    format!("cannot verify T3 destination `{session}`: {reason}"),
+                ))
+            } else {
+                Ok((session, Principal::Unverified, AskDestination::UnverifiedNoRegistry))
+            }
+        }
+    }
+}
+
 pub(crate) fn agent_request_in(
     store: &Store,
     hosts: &maestro_hosts::SurfaceRegistry,
@@ -1147,9 +1324,12 @@ pub(crate) fn agent_request_in(
     let payload = match kind {
         RequestKind::AskFile => {
             let a: AskFileArgs = parse(clean_args)?;
-            let parsed_session = session_of(&a.session)?;
-            let (session, caller) = resolve_caller(hosts, &parsed_session, &args, ambient)?;
-            return file_ask_as(store, session, &caller, &a.ledger, &a.ask);
+            let (session, caller, destination) = resolve_ask_filer(hosts, a.session.as_deref(), &args, ambient)?;
+            let mut out = file_ask_as(store, session.clone(), &caller, &a.ledger, &a.ask)?;
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert("destination".into(), destination.as_json(&session));
+            }
+            return Ok(out);
         }
         RequestKind::WorkQueue => json!(parse::<WorkQueueArgs>(clean_args)?),
         RequestKind::ActionRequest => json!(parse::<ActionRequestArgs>(clean_args)?),

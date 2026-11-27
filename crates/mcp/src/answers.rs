@@ -11,6 +11,7 @@
 //! Every stage is a receipt line in `<owner dir>/receipts.jsonl`, which the page polls.
 
 use crate::passkey::Assertion;
+use maestro_store::delivery::DeliveryStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,6 +81,10 @@ pub struct Receipt {
     pub commit: Option<String>,
     /// The session told, or why none was.
     pub woke: Option<String>,
+    /// Distinct notification state for a written answer: `written_only`, `primary_notified`, or
+    /// `fallback_notified` (BRO-4229).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryStatus>,
     pub landing: Option<String>,
     pub error: Option<String>,
 }
@@ -97,6 +102,9 @@ pub struct Writer {
     pub owner_dir: PathBuf,
     /// The T3 CLI that wakes a session, if any.
     pub t3: Option<T3>,
+    /// This host's T3 registry, used to verify environment and thread ownership before sending a
+    /// local wake (BRO-4229). When `None`, derived from `T3::Active(home)` if set.
+    pub t3_registry: Option<maestro_hosts::T3Registry>,
     /// Fallback T3 thread id (e.g. Meta Orchestrator) to triage an answered ask when the ask has
     /// no origin session, a non-T3 origin, or an unreachable origin thread.
     pub fallback_thread: Option<String>,
@@ -113,6 +121,17 @@ impl Writer {
             checkout: self.checkout.clone(),
             owner_dir: self.owner_dir.clone(),
             remote: self.remote,
+        }
+    }
+
+    /// The T3 registry used to verify wake destinations on this host.
+    pub fn resolved_t3_registry(&self) -> Option<maestro_hosts::T3Registry> {
+        if let Some(reg) = &self.t3_registry {
+            return Some(reg.clone());
+        }
+        match &self.t3 {
+            Some(T3::Active(home)) => Some(maestro_hosts::T3Registry::new(home)),
+            _ => None,
         }
     }
 }
@@ -465,26 +484,27 @@ pub fn fallback_wake_message(r: &Receipt, commit: &str, origin_session: Option<&
     )
 }
 
-fn t3_thread_of(session: &str) -> Option<&str> {
-    session.strip_prefix("t3:").and_then(|s| s.split_once('/')).map(|(_, t)| t).filter(|t| {
-        !t.is_empty()
-            && *t != "."
-            && *t != ".."
-            && !t.starts_with('-')
-            && t.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
-    })
+/// Parsed T3 session destination (`t3:<environment>/<thread>`), preserving both environment and
+/// thread id (BRO-4229).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct T3Target<'a> {
+    /// `None` for local aliases (`local`, `-`); `Some(env)` for an explicit environment id.
+    pub environment: Option<&'a str>,
+    pub thread: &'a str,
 }
 
-/// Wake the session an ask names (`t3:<environment>/<thread>`), as its next turn.
-pub fn wake(t3: Option<&Path>, session: Option<&str>, message: &str) -> String {
-    wake_once(t3, session, message).0
+/// Parse `t3:<environment>/<thread>` without discarding the environment segment.
+pub fn t3_target_of(session: &str) -> Option<T3Target<'_>> {
+    let (env_raw, thread) = session.strip_prefix("t3:")?.split_once('/')?;
+    let env_ok = !env_raw.is_empty() && !env_raw.chars().any(|c| c.is_whitespace() || c.is_control() || c == '/');
+    if !env_ok || !maestro_hosts::is_safe_t3_id(thread) {
+        return None;
+    }
+    let environment = (!matches!(env_raw, "local" | "-")).then_some(env_raw);
+    Some(T3Target { environment, thread })
 }
 
-fn wake_once(t3: Option<&Path>, session: Option<&str>, message: &str) -> (String, bool) {
-    let Some(session) = session else { return ("no session is named on the ask".into(), false) };
-    let Some(thread) = t3_thread_of(session) else {
-        return (format!("{session} is not a T3 session"), false);
-    };
+fn wake_thread_once(t3: Option<&Path>, thread: &str, message: &str) -> (String, bool) {
     let Some(t3) = t3 else { return ("no T3 CLI is configured".into(), false) };
     match Command::new(t3).args(["thread", "send", thread, message]).output() {
         Ok(o) if o.status.success() => (format!("told T3 thread {thread}"), false),
@@ -505,6 +525,34 @@ fn wake_once(t3: Option<&Path>, session: Option<&str>, message: &str) -> (String
     }
 }
 
+fn wake_thread_candidates(candidates: &[PathBuf], thread: &str, message: &str) -> String {
+    if candidates.is_empty() {
+        return wake_thread_once(None, thread, message).0;
+    }
+    let mut last = String::new();
+    for cli in candidates {
+        let (out, db_mismatch) = wake_thread_once(Some(cli.as_path()), thread, message);
+        if !db_mismatch {
+            return out;
+        }
+        last = out;
+    }
+    last
+}
+
+/// Wake the session an ask names (`t3:<environment>/<thread>`), as its next turn.
+pub fn wake(t3: Option<&Path>, session: Option<&str>, message: &str) -> String {
+    wake_once(t3, session, message).0
+}
+
+fn wake_once(t3: Option<&Path>, session: Option<&str>, message: &str) -> (String, bool) {
+    let Some(session) = session else { return ("no session is named on the ask".into(), false) };
+    let Some(target) = t3_target_of(session) else {
+        return (format!("{session} is not a T3 session"), false);
+    };
+    wake_thread_once(t3, target.thread, message)
+}
+
 /// Try each T3 CLI candidate in order; retry on the next candidate when a CLI rejects the running
 /// server's database schema (`ServerOwnsDatabaseError`).
 pub fn wake_candidates(candidates: &[PathBuf], session: Option<&str>, message: &str) -> String {
@@ -522,6 +570,91 @@ pub fn wake_candidates(candidates: &[PathBuf], session: Option<&str>, message: &
     last
 }
 
+/// Wake the ask's own T3 session, verifying its environment and exact thread id against
+/// `registry` when present (BRO-4229).
+///
+/// - Never invokes local `t3 thread send` for a remote (linked or unlinked) environment, an
+///   unresolved local destination (e.g. shortened UUID, worktree label, archived/deleted thread),
+///   or when the configured T3 registry is unavailable.
+/// - Distinguishes linked-environment transport limitation from a direct send or missing thread.
+/// - Preserves explicit fallback routing and avoids self-loops only when the primary target is
+///   the local fallback thread itself.
+/// - Returns both the recorded `woke` summary and the structured [`DeliveryStatus`].
+pub fn wake_with_registry(
+    candidates: &[PathBuf],
+    registry: Option<&maestro_hosts::T3Registry>,
+    session: Option<&str>,
+    fallback_thread: Option<&str>,
+    r: &Receipt,
+    commit: &str,
+) -> (String, DeliveryStatus) {
+    let primary_msg = wake_message(r, commit);
+    let (primary, local_same_as_fallback) = match session {
+        None => ("no session is named on the ask".to_string(), false),
+        Some(raw) => match t3_target_of(raw) {
+            None => (format!("{raw} is not a T3 session"), false),
+            Some(target) => match registry {
+                Some(reg) => {
+                    let sref = maestro_core::session::SessionRef {
+                        surface: maestro_core::session::Surface::T3,
+                        environment: target.environment.map(str::to_string),
+                        id: target.thread.to_string(),
+                    };
+                    match reg.resolve_destination(&sref) {
+                        maestro_hosts::T3Destination::Local { thread_id, .. } => {
+                            let same = fallback_thread.is_some_and(|fb| fb == thread_id);
+                            let out = wake_thread_candidates(candidates, &thread_id, &primary_msg);
+                            if out.starts_with("told T3 thread ") {
+                                return (out, DeliveryStatus::PrimaryNotified);
+                            }
+                            (out, same)
+                        }
+                        maestro_hosts::T3Destination::Remote { environment_id, thread_id, linked: true, .. } => (
+                            format!(
+                                "T3 CLI transport cannot route linked environment {environment_id} (thread {thread_id} is not local)"
+                            ),
+                            false,
+                        ),
+                        maestro_hosts::T3Destination::Remote { environment_id, thread_id, linked: false, .. } => (
+                            format!(
+                                "T3 environment {environment_id} is neither local nor linked on this host (thread {thread_id} will not be routed locally)"
+                            ),
+                            false,
+                        ),
+                        maestro_hosts::T3Destination::Unresolved { reason } => {
+                            (format!("T3 destination {raw} is unresolved on this host ({reason})"), false)
+                        }
+                        maestro_hosts::T3Destination::Unavailable { reason } => {
+                            (format!("T3 registry unavailable to verify destination {raw} ({reason})"), false)
+                        }
+                    }
+                }
+                None => {
+                    let same = fallback_thread.is_some_and(|fb| fb == target.thread);
+                    let out = wake_thread_candidates(candidates, target.thread, &primary_msg);
+                    if out.starts_with("told T3 thread ") {
+                        return (out, DeliveryStatus::PrimaryNotified);
+                    }
+                    (out, same)
+                }
+            },
+        },
+    };
+    let Some(fb) = fallback_thread.filter(|t| !t.is_empty() && maestro_hosts::is_safe_t3_id(t)) else {
+        return (primary, DeliveryStatus::WrittenOnly);
+    };
+    if local_same_as_fallback {
+        return (primary, DeliveryStatus::WrittenOnly);
+    }
+    let fb_msg = fallback_wake_message(r, commit, session, &primary);
+    let fb_out = wake_thread_candidates(candidates, fb, &fb_msg);
+    if fb_out.starts_with("told T3 thread ") {
+        (format!("{primary}; routed to fallback T3 thread {fb}"), DeliveryStatus::FallbackNotified)
+    } else {
+        (format!("{primary}; fallback T3 thread {fb} failed: {fb_out}"), DeliveryStatus::WrittenOnly)
+    }
+}
+
 /// Wake the ask's own T3 session; if none exists or it cannot be woken, route a triage message to
 /// the configured fallback orchestrator thread (skipping if the origin already named that thread).
 pub fn wake_with_fallback(
@@ -531,24 +664,27 @@ pub fn wake_with_fallback(
     r: &Receipt,
     commit: &str,
 ) -> String {
-    let primary = wake_candidates(candidates, session, &wake_message(r, commit));
-    if primary.starts_with("told T3 thread ") {
-        return primary;
+    wake_with_registry(candidates, None, session, fallback_thread, r, commit).0
+}
+
+/// Whether a previously logged receipt already recorded a completed notification (primary or
+/// fallback), so a crash-recovery retry skips sending a duplicate wake.
+fn prior_notified(owner_dir: &Path, id: &str) -> Option<(String, DeliveryStatus)> {
+    let prev = logged(owner_dir, id)?;
+    if prev.stage != Stage::Written {
+        return None;
     }
-    let Some(fb) = fallback_thread.filter(|t| !t.is_empty()) else {
-        return primary;
+    let woke = prev.woke?;
+    let status = match prev.delivery {
+        Some(DeliveryStatus::PrimaryNotified) if woke.starts_with("told T3 thread ") => DeliveryStatus::PrimaryNotified,
+        Some(DeliveryStatus::FallbackNotified) if woke.contains("; routed to fallback T3 thread ") => {
+            DeliveryStatus::FallbackNotified
+        }
+        None if woke.starts_with("told T3 thread ") => DeliveryStatus::PrimaryNotified,
+        None if woke.contains("; routed to fallback T3 thread ") => DeliveryStatus::FallbackNotified,
+        _ => return None,
     };
-    if session.and_then(t3_thread_of) == Some(fb) {
-        return primary;
-    }
-    let fb_session = format!("t3:_/{fb}");
-    let fb_msg = fallback_wake_message(r, commit, session, &primary);
-    let fb_out = wake_candidates(candidates, Some(&fb_session), &fb_msg);
-    if fb_out.starts_with("told T3 thread ") {
-        format!("{primary}; routed to fallback T3 thread {fb}")
-    } else {
-        format!("{primary}; fallback T3 thread {fb} failed: {fb_out}")
-    }
+    Some((woke, status))
 }
 
 /// Open or keep the ledger landing PR.
@@ -564,15 +700,27 @@ pub fn apply(w: &Writer, book: &Book, id: &str, assertion: &Assertion, nonce: &s
         Ok(commit) => {
             r.stage = Stage::Written;
             r.commit = Some(commit.clone());
-            book.put(r.clone());
-            let _ = log(&w.owner_dir, &r);
-            let candidates = w.t3.as_ref().map(T3::candidates).unwrap_or_default();
-            r.woke = Some(wake_with_fallback(&candidates, session, w.fallback_thread.as_deref(), &r, &commit));
-            book.put(r.clone());
+            if let Some((woke, delivery)) = prior_notified(&w.owner_dir, id) {
+                r.woke = Some(woke);
+                r.delivery = Some(delivery);
+                book.put(r.clone());
+            } else {
+                r.delivery = Some(DeliveryStatus::WrittenOnly);
+                book.put(r.clone());
+                let _ = log(&w.owner_dir, &r);
+                let candidates = w.t3.as_ref().map(T3::candidates).unwrap_or_default();
+                let reg = w.resolved_t3_registry();
+                let (woke, delivery) =
+                    wake_with_registry(&candidates, reg.as_ref(), session, w.fallback_thread.as_deref(), &r, &commit);
+                r.woke = Some(woke);
+                r.delivery = Some(delivery);
+                book.put(r.clone());
+                let _ = log(&w.owner_dir, &r);
+            }
             r.landing = Some(if w.remote { land(w) } else { "local only (not pushed)".into() });
             book.put(r.clone());
             // Settled last, and only once the final receipt is on disk: a crash before this resumes
-            // the answer, which is found written by its id, and the wake and the landing are tried again.
+            // the answer, which is found written by its id, and skips wake if already logged notified.
             if log(&w.owner_dir, &r).is_ok() {
                 settle(&w.owner_dir, id);
             }
@@ -607,6 +755,7 @@ mod tests {
             applies_at_ms: now_ms + 8_000,
             commit: None,
             woke: None,
+            delivery: None,
             landing: None,
             error: None,
         }
@@ -670,6 +819,7 @@ mod tests {
             checkout: state.path().join("checkout"),
             owner_dir: state.path().join("owner"),
             t3: None,
+            t3_registry: None,
             fallback_thread: None,
             remote: false,
         };

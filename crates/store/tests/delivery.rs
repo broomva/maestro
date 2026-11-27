@@ -1,4 +1,4 @@
-use maestro_store::delivery::Stage;
+use maestro_store::delivery::{DeliveryStatus, Stage};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Value, json};
 
@@ -132,4 +132,64 @@ fn an_empty_existing_log_is_a_known_empty_read() {
     let read = store.answer_deliveries();
     assert!(read.errors.is_empty());
     assert!(read.data.unwrap().is_empty());
+}
+
+#[test]
+fn delivery_status_distinguishes_written_only_primary_and_fallback_receipts() {
+    let (_dir, store) = machine();
+
+    // 1. Primary notified (explicit and historical without `delivery` field).
+    let mut primary = receipt("primary111111111", "written");
+    primary["woke"] = json!("told T3 thread 60f14287-1111-4222-8333-444444444444");
+    primary["delivery"] = json!("primary_notified");
+
+    let mut legacy_primary = receipt("legacyprimary111", "written");
+    legacy_primary["woke"] = json!("told T3 thread 60f14287-1111-4222-8333-444444444444");
+
+    // 2. Fallback notified (explicit and historical without `delivery` field) must NEVER count as primary.
+    let mut fallback = receipt("fallback11111111", "written");
+    fallback["woke"] = json!(
+        "T3 CLI transport cannot route linked environment env-mac (thread t1 is not local); routed to fallback T3 thread meta-orch"
+    );
+    fallback["delivery"] = json!("fallback_notified");
+
+    let mut legacy_fallback = receipt("legacyfallback11", "written");
+    legacy_fallback["woke"] =
+        json!("T3 did not take it (exit Some(1)): Thread not found; routed to fallback T3 thread meta-orch");
+
+    // 3. Written only (no fallback configured or fallback failed).
+    let mut written_only = receipt("writtenonly11111", "written");
+    written_only["woke"] = json!("T3 CLI transport cannot route linked environment env-mac (thread t1 is not local)");
+    written_only["delivery"] = json!("written_only");
+
+    // 4. Inconsistent receipt claiming primary_notified while `woke` records fallback must never report primary.
+    let mut bogus = receipt("inconsistent1111", "written");
+    bogus["woke"] = json!("unresolved; routed to fallback T3 thread meta-orch");
+    bogus["delivery"] = json!("primary_notified");
+
+    write(&store, &[primary, legacy_primary, fallback, legacy_fallback, written_only, bogus]);
+    let rows = store.answer_deliveries().data.unwrap();
+    let by_id = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+
+    for id in ["primary111111111", "legacyprimary111"] {
+        let r = by_id(id);
+        assert_eq!(r.delivery_status(), Some(DeliveryStatus::PrimaryNotified), "{id}");
+        assert!(r.session_notified(), "{id}");
+        assert!(!r.fallback_notified(), "{id}");
+    }
+    for id in ["fallback11111111", "legacyfallback11"] {
+        let r = by_id(id);
+        assert_eq!(r.delivery_status(), Some(DeliveryStatus::FallbackNotified), "{id}");
+        assert!(!r.session_notified(), "{id} must never report primary session_notified");
+        assert!(r.fallback_notified(), "{id}");
+    }
+    let wo = by_id("writtenonly11111");
+    assert_eq!(wo.delivery_status(), Some(DeliveryStatus::WrittenOnly));
+    assert!(!wo.session_notified());
+    assert!(!wo.fallback_notified());
+
+    let bad = by_id("inconsistent1111");
+    assert_eq!(bad.delivery_status(), Some(DeliveryStatus::WrittenOnly));
+    assert!(!bad.session_notified());
+    assert!(!bad.fallback_notified());
 }
