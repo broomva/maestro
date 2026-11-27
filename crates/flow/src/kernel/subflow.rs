@@ -30,7 +30,7 @@ use crate::ledger::WriteGuard;
 use crate::log::Log;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Stable refusal codes for IR v10 map & subflow operations.
@@ -647,9 +647,19 @@ pub fn claim_map_item(
         .clone();
 
     // Crash Point B check: if deterministic child log ALREADY exists with matching parent_ref and
-    // child_ir_hash, do NOT spawn a duplicate — simply append the missing parent SubflowStarted!
+    // child_ir_hash, do NOT spawn a duplicate — verify any allocated child_worktree is authentic
+    // and append the missing parent SubflowStarted!
     let child_exists = guard.log(&child_id).is_ok();
-    if !child_exists {
+    if child_exists {
+        let existing_log = guard.log(&child_id).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        let existing_started = pinned(&existing_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        if let (Some(wt_s), Some(parent_s)) = (
+            existing_started.params.get("child_worktree").and_then(Value::as_str),
+            existing_started.params.get("parent_repo").and_then(Value::as_str),
+        ) {
+            verify_allocated_child_worktree(Path::new(wt_s), Path::new(parent_s), None)?;
+        }
+    } else {
         let mut child_params = Map::new();
         child_params.insert("item".to_string(), item.input.clone());
         child_params.insert("item_key".to_string(), Value::String(item_key.to_string()));
@@ -681,24 +691,38 @@ pub fn claim_map_item(
                 }
                 let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 let wt_root = guard.root_path().join("worktrees");
+                if let Ok(meta) = std::fs::symlink_metadata(&wt_root)
+                    && meta.file_type().is_symlink()
+                {
+                    return Err(SubflowError::Storage(format!(
+                        "refusing symlinked worktrees root: {}",
+                        wt_root.display()
+                    )));
+                }
                 std::fs::create_dir_all(&wt_root).map_err(|e| SubflowError::Storage(e.to_string()))?;
                 let child_wt = wt_root.join(child_id.as_str());
-                if !child_wt.exists() {
-                    let add = Command::new("git")
-                        .args(["worktree", "add", "--detach", "-q"])
-                        .arg(&child_wt)
-                        .arg(&sha)
-                        .current_dir(&base_wd)
-                        .output()
-                        .map_err(|e| SubflowError::Storage(format!("git worktree add failed: {e}")))?;
-                    if !add.status.success() {
-                        return Err(SubflowError::Storage(format!(
-                            "git worktree add failed for {}: {}",
-                            child_wt.display(),
-                            String::from_utf8_lossy(&add.stderr).trim()
-                        )));
-                    }
+                // NEVER trust or reuse a pre-existing path (including symlinks or dangling symlinks!).
+                if std::fs::symlink_metadata(&child_wt).is_ok() {
+                    return Err(SubflowError::Storage(format!(
+                        "refusing pre-existing child worktree path (must not exist before allocation): {}",
+                        child_wt.display()
+                    )));
                 }
+                let add = Command::new("git")
+                    .args(["worktree", "add", "--detach", "-q"])
+                    .arg(&child_wt)
+                    .arg(&sha)
+                    .current_dir(&base_wd)
+                    .output()
+                    .map_err(|e| SubflowError::Storage(format!("git worktree add failed: {e}")))?;
+                if !add.status.success() {
+                    return Err(SubflowError::Storage(format!(
+                        "git worktree add failed for {}: {}",
+                        child_wt.display(),
+                        String::from_utf8_lossy(&add.stderr).trim()
+                    )));
+                }
+                verify_allocated_child_worktree(&child_wt, &base_wd, Some(&sha))?;
                 let child_wt_str = child_wt.to_string_lossy().to_string();
                 child_params.insert("parent_repo".to_string(), Value::String(base_wd.to_string_lossy().to_string()));
                 child_params.insert("repo".to_string(), Value::String(child_wt_str.clone()));
@@ -832,11 +856,97 @@ fn has_specific_open_effect(child_log: &Log, node: &str, iteration: &Iteration, 
     open
 }
 
+/// Verifies that `child_wt` is an authentic, non-symlink detached git worktree belonging to
+/// `parent_repo`, distinct from `parent_repo`, and (when `expected_sha` is `Some`) clean at that
+/// exact commit.
+fn verify_allocated_child_worktree(
+    child_wt: &Path,
+    parent_repo: &Path,
+    expected_sha: Option<&str>,
+) -> Result<(), SubflowError> {
+    let wt_meta = std::fs::symlink_metadata(child_wt)
+        .map_err(|e| SubflowError::Storage(format!("child worktree metadata failed: {e}")))?;
+    if wt_meta.file_type().is_symlink() || !wt_meta.is_dir() {
+        return Err(SubflowError::Storage(format!(
+            "child worktree {} must be a real non-symlink directory",
+            child_wt.display()
+        )));
+    }
+    let dot_git = child_wt.join(".git");
+    let git_meta = std::fs::symlink_metadata(&dot_git)
+        .map_err(|e| SubflowError::Storage(format!("child worktree .git metadata failed: {e}")))?;
+    if git_meta.file_type().is_symlink() || !git_meta.is_file() {
+        return Err(SubflowError::Storage(format!(
+            "child worktree {} must have a regular .git worktree pointer file",
+            child_wt.display()
+        )));
+    }
+    let wt_canon = std::fs::canonicalize(child_wt).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let parent_canon = std::fs::canonicalize(parent_repo).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    if wt_canon == parent_canon {
+        return Err(SubflowError::Storage(format!(
+            "child worktree {} resolves to parent repo {}",
+            child_wt.display(),
+            parent_repo.display()
+        )));
+    }
+    let git_common = |dir: &Path| -> Result<PathBuf, SubflowError> {
+        let out = Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(dir)
+            .output()
+            .map_err(|e| SubflowError::Storage(format!("git rev-parse --git-common-dir failed: {e}")))?;
+        if !out.status.success() {
+            return Err(SubflowError::Storage(format!(
+                "git rev-parse --git-common-dir failed in {}",
+                dir.display()
+            )));
+        }
+        let raw = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let abs = if raw.is_absolute() { raw } else { dir.join(raw) };
+        std::fs::canonicalize(&abs).map_err(|e| SubflowError::Storage(e.to_string()))
+    };
+    if git_common(child_wt)? != git_common(parent_repo)? {
+        return Err(SubflowError::Storage(format!(
+            "child worktree {} does not belong to parent repo {}",
+            child_wt.display(),
+            parent_repo.display()
+        )));
+    }
+    if let Some(sha) = expected_sha {
+        let head_out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(child_wt)
+            .output()
+            .map_err(|e| SubflowError::Storage(format!("git rev-parse HEAD failed: {e}")))?;
+        if !head_out.status.success() || String::from_utf8_lossy(&head_out.stdout).trim() != sha {
+            return Err(SubflowError::Storage(format!(
+                "child worktree {} HEAD does not match pinned base_sha {sha}",
+                child_wt.display()
+            )));
+        }
+        let status_out = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(child_wt)
+            .output()
+            .map_err(|e| SubflowError::Storage(format!("git status --porcelain failed: {e}")))?;
+        if !status_out.status.success() || !status_out.stdout.is_empty() {
+            return Err(SubflowError::Storage(format!(
+                "newly allocated child worktree {} is not clean",
+                child_wt.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Narrowly scoped `--reconcile-only` completion permitted on a `Superseded` child that has an
 /// open `EffectStarted` (fenced by `parent.owner` + `owner_epoch`).
-/// Verifies `(child_node, child_iteration, attempt)` matches an actual open `EffectStarted` on
-/// `child_log`, executes the node's declared `Class::Effect { reconcile, .. }` command via
-/// `exec::run` (never `run:`), and appends `EffectReconciled` only when `reconcile` exits 0.
+/// Requires a verified `termination_receipt` proving ALL recorded worker PIDs for this child have
+/// terminated BEFORE executing `reconcile:` (preventing a paused worker from racing reconciliation),
+/// verifies `(child_node, child_iteration, attempt)` matches an actual open `EffectStarted`, runs
+/// the node's declared `Class::Effect { reconcile, .. }` command via `exec::run` (never `run:`),
+/// and appends `EffectReconciled` only when `reconcile` exits 0.
 #[allow(clippy::too_many_arguments)]
 pub fn reconcile_superseded_effect(
     guard: &mut WriteGuard,
@@ -847,6 +957,7 @@ pub fn reconcile_superseded_effect(
     attempt: u32,
     inputs: BTreeMap<String, String>,
     reconcile_outputs: Value,
+    termination_receipt: &str,
     caller_owner: &Owner,
     claim_owner_epoch: u64,
 ) -> Result<(), SubflowError> {
@@ -857,6 +968,9 @@ pub fn reconcile_superseded_effect(
         return Err(SubflowError::SubflowSuperseded { child: child.to_string() });
     }
     let child_started = pinned(&child_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    // MUST prove worker termination BEFORE executing reconciliation so a paused worker cannot
+    // race the reconcile probe and perform the effect afterward (D6 post-termination reconciliation).
+    verify_termination_receipt(termination_receipt, &child_log, &child_started, true)?;
     let Some(node_def) = child_started.ir.nodes.get(child_node) else {
         return Err(SubflowError::WrongClass(child_node.to_string()));
     };
@@ -871,7 +985,12 @@ pub fn reconcile_superseded_effect(
     let raw_wd = child_started.ir.workdir.as_deref().ok_or_else(|| SubflowError::QuiescenceRefused {
         detail: format!("child {child} declares no workdir for reconcile"),
     })?;
-    let cwd = PathBuf::from(resolve_simple_workdir(raw_wd, &child_started.params));
+    let mut cwd = PathBuf::from(resolve_simple_workdir(raw_wd, &child_started.params));
+    if !cwd.is_dir()
+        && let Some(parent_repo) = child_started.params.get("parent_repo").and_then(Value::as_str)
+    {
+        cwd = PathBuf::from(parent_repo);
+    }
     if !cwd.is_absolute() || !cwd.is_dir() {
         return Err(SubflowError::QuiescenceRefused {
             detail: format!("child reconcile workdir invalid: {}", cwd.display()),
@@ -911,38 +1030,129 @@ pub fn reconcile_superseded_effect(
     Ok(())
 }
 
+/// Verifies that EVERY `Claimed.audit.process.pid` ever recorded in `child_log` is confirmed dead
+/// (`kill(pid, 0) == ESRCH`), returning the full set of verified-dead recorded PIDs.
+/// Prevents an earlier dead claimant from standing in for a later still-alive worker, and prevents
+/// a worktree-only receipt from releasing a reservation while any recorded worker is still alive.
+fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, SubflowError> {
+    let mut recorded_pids = BTreeSet::new();
+    for ev in &child_log.events {
+        if ev.kind == Claimed::KIND
+            && let Ok(c) = serde_json::from_value::<Claimed>(ev.body.clone())
+            && let Some(audit) = c.audit
+        {
+            recorded_pids.insert(audit.process.pid);
+        }
+    }
+    for &raw_pid in &recorded_pids {
+        let Ok(pid_i32) = i32::try_from(raw_pid) else {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("invalid recorded worker pid {raw_pid}"),
+            });
+        };
+        let Some(pid) = rustix::process::Pid::from_raw(pid_i32) else {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("invalid zero recorded worker pid {raw_pid}"),
+            });
+        };
+        match rustix::process::test_kill_process(pid) {
+            Err(rustix::io::Errno::SRCH) => {}
+            Ok(()) => {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "recorded worker pid {raw_pid} for child {} is still alive; cannot mark quiescent or reconcile",
+                        child_log.instance
+                    ),
+                });
+            }
+            Err(err) => {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "recorded worker pid {raw_pid} liveness check failed ({err}); refusing quiescence"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(recorded_pids)
+}
+
+/// Recursively verifies that `root` and EVERY file and subdirectory inside it is non-symlink and
+/// has zero write bits (`mode & 0o222 == 0`). Checking only root directory mode bits is
+/// insufficient because existing writable files remain modifiable.
+#[cfg(unix)]
+fn verify_tree_readonly_recursive(root: &Path) -> Result<(), SubflowError> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+        if meta.file_type().is_symlink() {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("symlink forbidden inside frozen child worktree: {}", path.display()),
+            });
+        }
+        let mode = meta.permissions().mode();
+        if (mode & 0o222) != 0 {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!(
+                    "entry {} inside child worktree is still writable (mode {:o})",
+                    path.display(),
+                    mode & 0o777
+                ),
+            });
+        }
+        if meta.is_dir() {
+            let entries = std::fs::read_dir(&path)
+                .map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+            for entry in entries {
+                let entry = entry.map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Verifies a structured `termination_receipt` bound STRICTLY to THIS child's own allocated
-/// `child_worktree` and/or `Claimed.audit.pid` recorded in `child_log` (never accepts an unrelated
-/// path, unrelated dead PID, or unrelated read-only directory!):
-/// - `worktree_removed:<path>`: `<path>` MUST equal `child_started.params["child_worktree"]` AND
-///   no longer exist on disk.
+/// `child_worktree` and EVERY `Claimed.audit.process.pid` recorded in `child_log`:
+/// - ALWAYS verifies ALL recorded worker PIDs in `child_log` are confirmed dead (`ESRCH`) first!
+/// - `pid:<u32>:exited|reaped`: `<pid>` MUST be in `recorded_pids` (which are ALL confirmed dead),
+///   and when `!for_reconcile` (quiescence) any allocated `child_worktree` must ALSO be removed or
+///   recursively read-only.
+/// - `worktree_removed:<path>`: `<path>` MUST equal `child_started.params["child_worktree"]`,
+///   `symlink_metadata` must return `NotFound`, AND all recorded worker PIDs are confirmed dead.
 /// - `worktree_readonly:<path>`: `<path>` MUST equal `child_started.params["child_worktree"]`,
-///   exist as a directory, and have zero write bits (`mode & 0o222 == 0`).
-/// - `pid:<u32>:exited|reaped`: `<pid>` MUST match a PID recorded in `child_log`'s `Claimed.audit.pid`,
-///   be confirmed dead via `kill(pid, 0) == ESRCH`, AND if the child has a `child_worktree`, that
-///   worktree must ALSO be removed or read-only.
-fn verify_termination_receipt(receipt: &str, child_log: &Log, child_started: &Started) -> Result<(), SubflowError> {
+///   be recursively read-only with zero writable files/dirs and zero symlinks, AND all recorded
+///   worker PIDs are confirmed dead.
+fn verify_termination_receipt(
+    receipt: &str,
+    child_log: &Log,
+    child_started: &Started,
+    for_reconcile: bool,
+) -> Result<(), SubflowError> {
     let r = receipt.trim();
     let expected_wt = child_started.params.get("child_worktree").and_then(Value::as_str);
 
+    // ALWAYS confirm EVERY recorded worker PID for this child is dead before accepting ANY receipt!
+    let recorded_pids = verify_all_child_workers_dead(child_log)?;
+
     let check_wt_frozen_or_removed = |wt_str: &str| -> Result<(), SubflowError> {
-        let p = std::path::Path::new(wt_str);
-        if !p.exists() {
-            return Ok(());
+        let p = Path::new(wt_str);
+        match std::fs::symlink_metadata(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(SubflowError::QuiescenceRefused { detail: e.to_string() }),
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(SubflowError::QuiescenceRefused {
+                        detail: format!("child worktree {wt_str:?} is not a real directory"),
+                    });
+                }
+            }
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(p)
-                .map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?
-                .permissions()
-                .mode();
-            if (mode & 0o222) == 0 {
-                return Ok(());
-            }
-            Err(SubflowError::QuiescenceRefused {
-                detail: format!("child worktree {wt_str:?} still exists and is writable (mode {:o})", mode & 0o777),
-            })
+            verify_tree_readonly_recursive(p)
         }
         #[cfg(not(unix))]
         {
@@ -954,19 +1164,11 @@ fn verify_termination_receipt(receipt: &str, child_log: &Log, child_started: &St
 
     if let Some(rest) = r.strip_prefix("pid:") {
         let parts: Vec<&str> = rest.split(':').collect();
-        if parts.len() == 2 && matches!(parts[1], "exited" | "reaped")
+        if parts.len() == 2
+            && matches!(parts[1], "exited" | "reaped")
             && let Ok(raw_pid) = parts[0].parse::<u32>()
             && raw_pid > 0
-            && let Ok(pid_i32) = i32::try_from(raw_pid)
-            && let Some(pid) = rustix::process::Pid::from_raw(pid_i32)
         {
-            let recorded_pids: BTreeSet<u32> = child_log
-                .events
-                .iter()
-                .filter(|e| e.kind == Claimed::KIND)
-                .filter_map(|e| serde_json::from_value::<Claimed>(e.body.clone()).ok())
-                .filter_map(|c| c.audit.map(|a| a.process.pid))
-                .collect();
             if !recorded_pids.contains(&raw_pid) {
                 return Err(SubflowError::QuiescenceRefused {
                     detail: format!(
@@ -975,20 +1177,10 @@ fn verify_termination_receipt(receipt: &str, child_log: &Log, child_started: &St
                     ),
                 });
             }
-            match rustix::process::test_kill_process(pid) {
-                Err(rustix::io::Errno::SRCH) => {}
-                Ok(()) => {
-                    return Err(SubflowError::QuiescenceRefused {
-                        detail: format!("worker pid {raw_pid} is still alive; cannot mark child quiescent"),
-                    });
-                }
-                Err(err) => {
-                    return Err(SubflowError::QuiescenceRefused {
-                        detail: format!("worker pid {raw_pid} liveness check failed ({err}); refusing quiescence"),
-                    });
-                }
-            }
-            if let Some(wt_str) = expected_wt {
+            // All recorded_pids (including raw_pid and any later claimants) were already verified dead above.
+            if !for_reconcile
+                && let Some(wt_str) = expected_wt
+            {
                 check_wt_frozen_or_removed(wt_str)?;
             }
             return Ok(());
@@ -1008,13 +1200,20 @@ fn verify_termination_receipt(receipt: &str, child_log: &Log, child_started: &St
                 detail: format!("worktree_removed path {path_str:?} does not match child's own worktree {exp:?}"),
             });
         }
-        let p = std::path::Path::new(path_str);
-        if !p.is_absolute() || p.exists() {
+        let p = Path::new(path_str);
+        if !p.is_absolute() {
             return Err(SubflowError::QuiescenceRefused {
-                detail: format!("child worktree still exists or is non-absolute: {path_str:?}"),
+                detail: format!("worktree_removed path must be absolute: {path_str:?}"),
             });
         }
-        return Ok(());
+        match std::fs::symlink_metadata(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            _ => {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!("child worktree still exists on disk: {path_str:?}"),
+                });
+            }
+        }
     }
     if let Some(path_str) = r.strip_prefix("worktree_readonly:") {
         let Some(exp) = expected_wt else {
@@ -1027,24 +1226,22 @@ fn verify_termination_receipt(receipt: &str, child_log: &Log, child_started: &St
                 detail: format!("worktree_readonly path {path_str:?} does not match child's own worktree {exp:?}"),
             });
         }
-        let p = std::path::Path::new(path_str);
-        if !p.is_absolute() || !p.is_dir() {
+        let p = Path::new(path_str);
+        if !p.is_absolute() {
             return Err(SubflowError::QuiescenceRefused {
-                detail: format!("worktree_readonly path must be an existing absolute directory: {path_str:?}"),
+                detail: format!("worktree_readonly path must be absolute: {path_str:?}"),
             });
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(p)
-                .map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?
-                .permissions()
-                .mode();
-            if (mode & 0o222) != 0 {
+            let meta = std::fs::symlink_metadata(p)
+                .map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+            if meta.file_type().is_symlink() || !meta.is_dir() {
                 return Err(SubflowError::QuiescenceRefused {
-                    detail: format!("child worktree {path_str:?} is still writable (mode {:o})", mode & 0o777),
+                    detail: format!("worktree_readonly path must be an existing non-symlink directory: {path_str:?}"),
                 });
             }
+            verify_tree_readonly_recursive(p)?;
             return Ok(());
         }
         #[cfg(not(unix))]
@@ -1082,7 +1279,7 @@ pub fn quiesce_subflow(
     }
     let child_log = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?;
     let child_started = pinned(&child_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
-    verify_termination_receipt(termination_receipt, &child_log, &child_started)?;
+    verify_termination_receipt(termination_receipt, &child_log, &child_started, false)?;
     if child_has_open_effect(&child_log) {
         return Err(SubflowError::QuiescenceRefused {
             detail: format!("child {child} still has an unreconciled EffectStarted"),

@@ -1249,7 +1249,7 @@ pub fn complete_as(
     if let Err(unfit) = check_receipt(&held, session, &outputs, &plan.argv) {
         return refuse(&mut guard, &held, unfit, &[]);
     }
-    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String, bool)> = None;
+    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String)> = None;
     if let Step::Effect { preconditions } = &plan.step {
         // The preconditions run with the lock released; then everything again under it.
         let input = guard_input(&held.log, &held.started, &held.rec.node)?;
@@ -1274,23 +1274,22 @@ pub fn complete_as(
             Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
         };
         let fence_db = fence_db_path.clone();
+        let is_child_subflow = held.started.parent_ref.is_some();
         let explicit_fencing = held
             .started
             .params
             .get("fencing_resource")
             .and_then(Value::as_str)
             .is_some_and(|s| !s.is_empty());
-        let require_target_atomic = explicit_fencing
-            && held
-                .started
-                .params
-                .get("require_target_fencing")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-        let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
-        let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
-        let op_id = format!("{}:{}:{}", instance.as_str(), held.rec.node, held.rec.attempt);
-        effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id, require_target_atomic));
+        // ALL IR v10 child subflow effects AND any effect declaring `fencing_resource` MUST
+        // enforce target-side atomic epoch consumption (no opt-out, no post-hoc controller commit).
+        // Legacy IR v3-v9 non-child effects without `fencing_resource` retain pre-v10 behavior.
+        if is_child_subflow || explicit_fencing {
+            let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
+            let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
+            let op_id = format!("{}:{}:{}", instance.as_str(), held.rec.node, held.rec.attempt);
+            effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id));
+        }
         let intent = EffectStarted {
             node: held.rec.node.clone(),
             iteration: held.rec.iteration.clone(),
@@ -1554,12 +1553,12 @@ fn extract_map_items(doc: &Value, over_expr: &str, item_key_expr: &str) -> Resul
 }
 
 /// Executes a fenced `Class::Effect` command under the per-resource lock, verifying/granting the
-/// epoch before execution and confirming target-side atomic consumption (or committing the epoch)
-/// before releasing the resource lock.
+/// epoch before execution and unconditionally verifying target-side atomic epoch consumption
+/// (`written_epoch == epoch` in the target's own transaction) before releasing the resource lock.
 fn run_fenced_effect(
     plan: &Plan,
     limits: &Limits,
-    (fence_resource, pinned_epoch, fence_db, op_id, require_target_atomic): (String, Option<u64>, PathBuf, String, bool),
+    (fence_resource, pinned_epoch, fence_db, op_id): (String, Option<u64>, PathBuf, String),
     outputs: &Value,
 ) -> Result<(Ran, Option<(&'static str, String)>), KernelError> {
     let fence_store = FencingStore::open(&fence_db)
@@ -1595,22 +1594,15 @@ fn run_fenced_effect(
     let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &fence_env_refs };
     let ran = exec::run(&plan.argv, &plan.cwd, limits, feed);
     let mut fence_commit_err: Option<(&'static str, String)> = None;
-    if matches!(ran, Ran::Exited { code: Some(0), .. }) {
-        if require_target_atomic {
-            if let Err(e) = fence_store.verify_target_consumed(&fence_resource, epoch, &op_id, &payload_digest) {
-                let code = match e {
-                    super::fencing::FencingError::StaleEpoch { .. }
-                    | super::fencing::FencingError::EpochAlreadyConsumed { .. } => "stale_fencing_epoch",
-                    super::fencing::FencingError::Storage(_) => "target_did_not_consume_epoch",
-                };
-                fence_commit_err = Some((code, e.to_string()));
-            }
-        } else {
-            let res_json = serde_json::to_string(outputs).unwrap_or_else(|_| "null".to_string());
-            if let Err(e) = fence_store.commit_fenced_write(&fence_resource, epoch, &op_id, &payload_digest, &res_json) {
-                fence_commit_err = Some(("stale_fencing_epoch", e.to_string()));
-            }
-        }
+    if matches!(ran, Ran::Exited { code: Some(0), .. })
+        && let Err(e) = fence_store.verify_target_consumed(&fence_resource, epoch, &op_id, &payload_digest)
+    {
+        let code = match e {
+            super::fencing::FencingError::StaleEpoch { .. }
+            | super::fencing::FencingError::EpochAlreadyConsumed { .. } => "stale_fencing_epoch",
+            super::fencing::FencingError::Storage(_) => "target_did_not_consume_epoch",
+        };
+        fence_commit_err = Some((code, e.to_string()));
     }
     drop(rlock);
     Ok((ran, fence_commit_err))

@@ -16,7 +16,7 @@
 //! - Upstream staleness incremental reuse + `stop` refusal until quiesced + spine determinism +
 //!   empty 0-item map completion.
 
-use maestro_core::session::{Harness, SessionRef, VerifiedSession};
+use maestro_core::session::{Audit, Harness, IdentityFacts, ProcessFacts, SessionRef, VerifiedSession};
 use maestro_flow::kernel::events::{
     Adopted, Approval, Claimed, Completed, EffectStarted, KernelEvent, MapItemSpec, Owner, Performer, Started,
     Superseded, digest, marker_digest, receipt_digest,
@@ -531,7 +531,7 @@ nodes:
         &LANE_YAML.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"),
         &eff_lane.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n"),
     );
-    let (dir, mut ledger, parent, me) = setup_parent(&yaml, json!({"repo": "/tmp", "max_parallel": 2}));
+    let (_dir, mut ledger, parent, me) = setup_parent(&yaml, json!({"repo": "/tmp", "max_parallel": 2}));
     let items_v1 = vec![MapItemSpec {
         key: "lane-a".into(),
         input_digest: "sha256:v1".into(),
@@ -549,7 +549,27 @@ nodes:
     expand_map(&mut g, &parent, "execute_lanes", Iteration::new(), items_v1, BTreeMap::new(), &me).unwrap();
     let (child, ep) = claim_map_item(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", None, &me).unwrap();
 
-    // Child starts an external effect!
+    // Record a real live worker Claimed event + open EffectStarted on the child!
+    let mut live_worker = Command::new("sleep").arg("60").spawn().unwrap();
+    let live_pid = live_worker.id();
+    let claimed_ev = Claimed {
+        node: "work".into(),
+        iteration: Iteration::new(),
+        attempt: 1,
+        inputs: BTreeMap::new(),
+        token_sha256: "sha256:worker-token".into(),
+        lease_until: "2099-01-01T00:00:00Z".into(),
+        cancel_at: None,
+        performer: None,
+        owner_epoch: Some(ep),
+        tool_use_id: None,
+        audit: Some(Audit {
+            identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
+            process: ProcessFacts { pid: live_pid, ..Default::default() },
+        }),
+    };
+    let cseq0 = g.log(&child).unwrap().seq();
+    g.append(&child, cseq0, claimed_ev.to_event().unwrap()).unwrap();
     let eff = EffectStarted {
         node: "work".into(),
         iteration: Iteration::new(),
@@ -575,7 +595,7 @@ nodes:
         "subflow_superseded"
     );
 
-    // Quiescence MUST fail while open EffectStarted exists AND MUST fail without termination_receipt!
+    // Quiescence MUST fail while open EffectStarted exists AND while worker is alive!
     assert_eq!(
         quiesce_subflow(&mut g, &parent, "execute_lanes", Iteration::new(), "lane-a", &child, "", &me)
             .unwrap_err()
@@ -590,6 +610,7 @@ nodes:
     );
 
     // Reconcile for a WRONG attempt (attempt=99) MUST fail closed!
+    let pid_rcpt = format!("pid:{live_pid}:exited");
     assert_eq!(
         reconcile_superseded_effect(
             &mut g,
@@ -600,6 +621,7 @@ nodes:
             99,
             BTreeMap::new(),
             json!({"ok": true}),
+            &pid_rcpt,
             &me,
             ep,
         )
@@ -607,9 +629,35 @@ nodes:
         .code(),
         "subflow_superseded"
     );
-    assert!(!dir.path().join("repo/reconcile_ran.txt").exists(), "reconcile command must not run for wrong attempt");
+    // Reconcile while the original worker PID is STILL ALIVE MUST fail closed (Round 5 Finding #3)!
+    assert_eq!(
+        reconcile_superseded_effect(
+            &mut g,
+            &parent,
+            &child,
+            "work",
+            Iteration::new(),
+            1,
+            BTreeMap::new(),
+            json!({"ok": true}),
+            &pid_rcpt,
+            &me,
+            ep,
+        )
+        .unwrap_err()
+        .code(),
+        "quiescence_refused"
+    );
+    let child_wt = {
+        let clog = g.log(&child).unwrap();
+        let cstart: Started = serde_json::from_value(clog.events[0].body.clone()).unwrap();
+        PathBuf::from(cstart.params.get("child_worktree").and_then(|v| v.as_str()).unwrap())
+    };
+    assert!(!child_wt.join("reconcile_ran.txt").exists(), "reconcile command must not run while worker is alive");
 
-    // Reconcile for the REAL open effect executes the declared reconcile command!
+    // Kill and reap the original worker -> post-termination reconcile now executes!
+    let _ = live_worker.kill();
+    let _ = live_worker.wait();
     reconcile_superseded_effect(
         &mut g,
         &parent,
@@ -619,19 +667,15 @@ nodes:
         1,
         BTreeMap::new(),
         json!({"ok": true}),
+        &pid_rcpt,
         &me,
         ep,
     )
     .unwrap();
-    let child_wt = {
-        let clog = g.log(&child).unwrap();
-        let cstart: Started = serde_json::from_value(clog.events[0].body.clone()).unwrap();
-        PathBuf::from(cstart.params.get("child_worktree").and_then(|v| v.as_str()).unwrap())
-    };
     assert_eq!(
         std::fs::read_to_string(child_wt.join("reconcile_ran.txt")).unwrap(),
         "reconciled",
-        "declared reconcile command must actually execute inside child's isolated worktree"
+        "declared reconcile command must actually execute inside child's isolated worktree after worker exit"
     );
 
     // Now confirmed child-bound worktree removal + zero open effects -> SubflowQuiesced succeeds!
@@ -1731,3 +1775,233 @@ fn t22_concurrent_normal_map_claims_dispatch_distinct_items_and_complete_unicode
     assert!(matches!(complete(&mut ledger, &sess, &cm1.token, json!({}), &Limits::default()).unwrap(), Completion::Completed { .. }));
     assert!(matches!(complete(&mut ledger, &sess, &cm2.token, json!({}), &Limits::default()).unwrap(), Completion::Completed { .. }));
 }
+
+#[test]
+fn t23_round5_quiescence_reconcile_fencing_and_worktree_hardening() {
+    // 1. Round 5 Finding #4: pre-existing symlink or directory at `<flows_root>/worktrees/<child_id>`
+    //    MUST be refused by claim_map_item (never trusted or reused!).
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-r5-wt");
+        let compiled = compile(&lead_v3_yaml()).unwrap();
+        let started = start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2})).unwrap();
+        let me = owner("owner-r5-wt");
+        let mut g = ledger.lock().unwrap();
+        expand_map(
+            &mut g,
+            &started.instance,
+            "execute_lanes",
+            Iteration::new(),
+            vec![MapItemSpec {
+                key: "lane-a".into(),
+                input_digest: digest(&json!(1)),
+                input: json!({"lane_id": "lane-a"}),
+                write_set: vec!["src/a/**".into()],
+            }],
+            BTreeMap::new(),
+            &me,
+        )
+        .unwrap();
+        let expected_cid = child_instance_id(&started.instance, "execute_lanes", &Iteration::new(), 0, "lane-a", 0).unwrap();
+        let wt_root = root.join("worktrees");
+        std::fs::create_dir_all(&wt_root).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&wt, wt_root.join(expected_cid.as_str())).unwrap();
+        let err = claim_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", None, &me)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("pre-existing child worktree path"),
+            "symlinked pre-existing child worktree path must be refused, got: {err}"
+        );
+    }
+
+    // 2. Round 5 Finding #1: worktree_removed, root-only worktree_readonly, and historical dead PID
+    //    MUST ALL fail while any recorded child worker PID is alive or any file inside the worktree
+    //    remains writable.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-r5-q");
+        let compiled = compile(&lead_v3_yaml()).unwrap();
+        let started = start(&mut ledger, &sess, &compiled, json!({"repo": wt.to_str().unwrap(), "max_parallel": 2})).unwrap();
+        let me = owner("owner-r5-q");
+        let mut g = ledger.lock().unwrap();
+        expand_map(
+            &mut g,
+            &started.instance,
+            "execute_lanes",
+            Iteration::new(),
+            vec![MapItemSpec {
+                key: "lane-a".into(),
+                input_digest: digest(&json!(1)),
+                input: json!({"lane_id": "lane-a"}),
+                write_set: vec!["src/a/**".into()],
+            }],
+            BTreeMap::new(),
+            &me,
+        )
+        .unwrap();
+        let (cid, ep) = claim_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", None, &me).unwrap();
+        let child_wt_str = {
+            let clog = g.log(&cid).unwrap();
+            let cstart: Started = serde_json::from_value(clog.events[0].body.clone()).unwrap();
+            cstart.params.get("child_worktree").and_then(|v| v.as_str()).unwrap().to_string()
+        };
+
+        // Attempt 1: dead historical PID; Attempt 2: STILL-ALIVE worker PID!
+        let mut dead_proc = Command::new("true").spawn().unwrap();
+        let dead_pid = dead_proc.id();
+        let _ = dead_proc.wait();
+        let mut live_proc = Command::new("sleep").arg("60").spawn().unwrap();
+        let live_pid = live_proc.id();
+        for (attempt, pid) in [(1u32, dead_pid), (2u32, live_pid)] {
+            let cev = Claimed {
+                node: "work".into(),
+                iteration: Iteration::new(),
+                attempt,
+                inputs: BTreeMap::new(),
+                token_sha256: format!("sha256:tok-{attempt}"),
+                lease_until: "2099-01-01T00:00:00Z".into(),
+                cancel_at: None,
+                performer: None,
+                owner_epoch: Some(ep),
+                tool_use_id: None,
+                audit: Some(Audit {
+                    identity: IdentityFacts { mode: "test".into(), variable: None, thread: None },
+                    process: ProcessFacts { pid, ..Default::default() },
+                }),
+            };
+            let seq = g.log(&cid).unwrap().seq();
+            g.append(&cid, seq, cev.to_event().unwrap()).unwrap();
+        }
+        finalize_map_item(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, Some("boom"), BTreeMap::new(), &me)
+            .unwrap();
+
+        // Historical dead PID while attempt 2 worker is still alive -> REFUSED!
+        assert_eq!(
+            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &format!("pid:{dead_pid}:exited"), &me)
+                .unwrap_err()
+                .code(),
+            "quiescence_refused"
+        );
+        // Root-only chmod 0o555 while files inside remain writable -> REFUSED!
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&child_wt_str, std::fs::Permissions::from_mode(0o555));
+            assert_eq!(
+                quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &format!("worktree_readonly:{child_wt_str}"), &me)
+                    .unwrap_err()
+                    .code(),
+                "quiescence_refused"
+            );
+            let _ = std::fs::set_permissions(&child_wt_str, std::fs::Permissions::from_mode(0o755));
+        }
+        // Even after removing child_wt, worktree_removed MUST fail while live_pid is alive!
+        let removed_rcpt = remove_child_worktree_receipt(&mut g, &cid);
+        assert_eq!(
+            quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &removed_rcpt, &me)
+                .unwrap_err()
+                .code(),
+            "quiescence_refused"
+        );
+        // Kill & reap live_pid -> NOW quiescence succeeds!
+        let _ = live_proc.kill();
+        let _ = live_proc.wait();
+        quiesce_subflow(&mut g, &started.instance, "execute_lanes", Iteration::new(), "lane-a", &cid, &removed_rcpt, &me)
+            .unwrap();
+    }
+
+    // 3. Round 5 Finding #2: child subflow Class::Effect MUST ALWAYS enforce target-side atomic
+    //    epoch consumption, even when `fencing_resource` is omitted or `require_target_fencing: false`.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("repo");
+        init_git_repo(&wt);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-r5-fence");
+
+        let child_eff_yaml = r#"
+flow: child_eff
+version: 1
+params: [repo, item_key, require_target_fencing]
+workdir: "{{params.repo}}"
+nodes:
+  do_effect:
+    class: effect
+    run: ["sh", "-c", "echo unfenced-write > unfenced.txt"]
+    reconcile: ["sh", "-c", "true"]
+"#;
+        let parent_yaml = format!(
+            r#"
+flow: parent_eff
+version: 1
+params: [repo, max_parallel, require_target_fencing]
+workdir: "{{{{params.repo}}}}"
+nodes:
+  plan:
+    class: work
+    verify: ["sh", "-c", "true"]
+  run_map:
+    class: map
+    needs: [plan]
+    over: ".nodes.plan.outputs.lanes"
+    uses: child_eff@1
+    item_key: ".lane_id"
+    max_items: 4
+    max_concurrency_param: max_parallel
+    ready_when: disjoint_writes
+subflows:
+  child_eff@1: |
+{}
+"#,
+            child_eff_yaml
+                .lines()
+                .map(|l| format!("    {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let compiled = compile(&parent_yaml).unwrap();
+        let started = start(
+            &mut ledger,
+            &sess,
+            &compiled,
+            json!({"repo": wt.to_str().unwrap(), "max_parallel": 2, "require_target_fencing": false}),
+        )
+        .unwrap();
+        let cp = claim(&mut ledger, &sess, &started.instance, "plan").unwrap();
+        complete(
+            &mut ledger,
+            &sess,
+            &cp.token,
+            json!({"lanes": [{"lane_id": "lane-a", "write_set": ["unfenced.txt"]}]}),
+            &Limits::default(),
+        )
+        .unwrap();
+        let cm = claim(&mut ledger, &sess, &started.instance, "run_map").unwrap();
+        let cid = InstanceId::new(cm.inputs.get("__map_child_instance").unwrap()).unwrap();
+        let ce = claim(&mut ledger, &sess, &cid, "do_effect").unwrap();
+        let res = complete(&mut ledger, &sess, &ce.token, json!({"ok": true}), &Limits::default()).unwrap();
+        match res {
+            Completion::Refused { code, .. } => {
+                assert_eq!(
+                    code, "target_did_not_consume_epoch",
+                    "child effect without fencing_resource or with require_target_fencing=false MUST fail closed on missing target atomic consumption"
+                );
+            }
+            other => panic!("expected target_did_not_consume_epoch refusal on unfenced child effect, got {other:?}"),
+        }
+    }
+}
+
