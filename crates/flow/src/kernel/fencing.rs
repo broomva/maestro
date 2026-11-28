@@ -406,6 +406,29 @@ impl FencingStore {
         Ok(ep.map(|v| v as u64))
     }
 
+    /// Looks up the epoch of an already-committed op matching `(resource_id, op_id, payload_digest)`
+    /// in `resource_epochs` so an unpinned `Step::Reconcile` retry after a crash between SQLite
+    /// commit and flow-log `Completed` reconciles via `IdempotentReplay` instead of re-executing
+    /// under a new epoch.
+    pub fn committed_op_epoch(
+        &self,
+        resource_id: &str,
+        op_id: &str,
+        payload_digest: &str,
+    ) -> Result<Option<u64>, FencingError> {
+        let conn = self.connect()?;
+        let ep: Option<i64> = conn
+            .query_row(
+                "SELECT written_epoch FROM resource_epochs
+                 WHERE resource_id = ?1 AND last_op_id = ?2 AND last_payload_digest = ?3 AND written_epoch > 0",
+                params![resource_id, op_id, payload_digest],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| FencingError::Storage(format!("lookup committed op epoch: {e}")))?;
+        Ok(ep.map(|v| v as u64))
+    }
+
     /// Built-in kernel actuator 1: executes a resource-fenced key/value write inside the EXACT
     /// SAME SQLite `BEGIN IMMEDIATE` transaction that checks for any pending git-ref CAS,
     /// validates `granted_epoch == incoming_epoch && written_epoch < incoming_epoch`, and commits

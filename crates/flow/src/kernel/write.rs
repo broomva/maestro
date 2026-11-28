@@ -1286,16 +1286,62 @@ pub fn complete_as(
         return Ok(Completion::Completed { appended, verify, stderr: String::new(), verdicts });
     }
 
-    let plan = match prepare(&held, &outputs) {
+    let mut plan = match prepare(&held, &outputs) {
         Ok(plan) => plan,
         Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
     };
     let is_reconcile = plan.step == Step::Reconcile;
     check_child_fence_in_guard(&guard, &held.log, &held.started, session, held.rec.owner_epoch, is_reconcile)?;
+    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String, FencedActuator)> = None;
+    if is_reconcile {
+        // Real crash recovery path: `EffectStarted` is already in the flow log, so `prepare()`
+        // selected `Step::Reconcile`. If this node is a fenced built-in kernel actuator, route
+        // directly into the actuator's atomic WAL reconciliation instead of the shell `reconcile`
+        // command so crash-pending rows (`fenced_git_refs.state = 'pending'`) and Crash Point 4
+        // already-committed ops reconcile cleanly end-to-end.
+        let explicit_fencing =
+            held.started.params.get("fencing_resource").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+        if let Some(Class::Effect { run, .. }) = held.started.ir.nodes.get(&held.rec.node).map(|n| &n.class)
+            && !run.is_empty()
+        {
+            let mut effect_argv = Vec::with_capacity(run.len());
+            let mut rem = MAX_ARGV;
+            for word in run {
+                match fill(&held.started.ir, &held.started.params, word, rem) {
+                    Ok(filled) => {
+                        rem -= filled.len();
+                        effect_argv.push(filled);
+                    }
+                    Err(e) => return refuse(&mut guard, &held, ("template_invalid", e), &[]),
+                }
+            }
+            let builtin_actuator = match FencedActuator::parse(&effect_argv) {
+                Ok(act) => act,
+                Err(detail) => return refuse(&mut guard, &held, ("invalid_fenced_actuator", detail), &[]),
+            };
+            if let Some(actuator) = builtin_actuator {
+                if !explicit_fencing {
+                    return refuse(
+                        &mut guard,
+                        &held,
+                        (
+                            "unfenced_child_effect",
+                            "fenced/child Class::Effect requires explicit fencing_resource with a built-in kernel atomic actuator".to_string(),
+                        ),
+                        &[],
+                    );
+                }
+                let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
+                let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
+                let op_id = effect_op_id(&instance, &held.rec.node, &held.rec.iteration);
+                plan.argv = effect_argv;
+                effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db_path.clone(), op_id, actuator));
+            }
+        }
+    }
     if let Err(unfit) = check_receipt(&held, session, &outputs, &plan.argv) {
         return refuse(&mut guard, &held, unfit, &[]);
     }
-    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String, FencedActuator)> = None;
     if let Step::Effect { preconditions } = &plan.step {
         // The preconditions run with the lock released; then everything again under it.
         let input = guard_input(&held.log, &held.started, &held.rec.node)?;
@@ -1360,7 +1406,7 @@ pub fn complete_as(
             };
             let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
             let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
-            let op_id = format!("{}:{}:{}", instance.as_str(), held.rec.node, held.rec.attempt);
+            let op_id = effect_op_id(&instance, &held.rec.node, &held.rec.iteration);
             effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id, actuator));
         }
         let intent = EffectStarted {
@@ -1622,6 +1668,14 @@ fn extract_map_items(doc: &Value, over_expr: &str, item_key_expr: &str) -> Resul
 
 type FencedRunOutcome = (Ran, Option<(&'static str, String)>);
 
+/// Canonical idempotency `op_id` for a fenced effect, keyed by `(instance, node, iteration)`
+/// rather than `attempt` so retries after claim lease expiry still match the crashed attempt's
+/// durable WAL entry.
+fn effect_op_id(instance: &InstanceId, node: &str, iteration: &Iteration) -> String {
+    let iter = serde_json::to_string(iteration).unwrap_or_else(|_| "{}".to_string());
+    format!("{}:{}:{}", instance.as_str(), node, iter)
+}
+
 /// Executes a built-in kernel-owned atomic fenced actuator (`FencedActuator::SqliteKvPut` or
 /// `FencedActuator::GitRefCas`) directly in Rust under the per-resource lock (zero external shell,
 /// zero wrapper scripts, zero hash-to-exec TOCTOU window).
@@ -1631,6 +1685,7 @@ fn run_fenced_effect(
     (fence_resource, pinned_epoch, fence_db, op_id, actuator): (String, Option<u64>, PathBuf, String, FencedActuator),
     outputs: &Value,
 ) -> Result<FencedRunOutcome, KernelError> {
+    let is_reconcile = plan.step == Step::Reconcile;
     let fence_store =
         FencingStore::open(&fence_db).map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
     let rlock = fence_store
@@ -1640,8 +1695,10 @@ fn run_fenced_effect(
     let result_json = serde_json::to_string(outputs).unwrap_or_else(|_| "null".to_string());
     // Pass pinned epochs straight into the actuator (which atomically handles crash-pending
     // recovery, idempotent replay, StaleEpoch, and EpochAlreadyConsumed under `rlock`). For
-    // unpinned git-ref retries after a crash, reuse the matching pending epoch if one exists so
-    // exact retries reconcile instead of granting a newer epoch that hits the pending guard.
+    // unpinned retries after a crash:
+    // 1. Reuse matching pending git-ref epoch (Crash Points 2 & 3).
+    // 2. On `Step::Reconcile`, reuse matching already-committed epoch (Crash Point 4).
+    // 3. Otherwise grant a fresh epoch.
     let epoch = match pinned_epoch {
         Some(ep) => ep,
         None => {
@@ -1658,7 +1715,14 @@ fn run_fenced_effect(
                     .map_err(|e| KernelError::Encode(format!("fencing pending lookup failed: {e}")))?,
                 FencedActuator::SqliteKvPut { .. } => None,
             };
-            match pending_ep {
+            let existing_ep = match pending_ep {
+                Some(ep) => Some(ep),
+                None if is_reconcile => fence_store
+                    .committed_op_epoch(&fence_resource, &op_id, &payload_digest)
+                    .map_err(|e| KernelError::Encode(format!("fencing committed lookup failed: {e}")))?,
+                None => None,
+            };
+            match existing_ep {
                 Some(ep) => ep,
                 None => fence_store
                     .grant_epoch_locked(&rlock, &fence_resource)

@@ -3166,8 +3166,11 @@ nodes:
         );
     }
 
-    // 6. End-to-end crash-pending recovery THROUGH kernel::complete() (pinned AND unpinned) +
-    //    KV replay guard against matching-op_id pending git-ref CAS!
+    // 6. Real crash-sequence recovery THROUGH kernel::complete() AFTER `EffectStarted` is already
+    //    in the flow log (so `prepare()` takes `Step::Reconcile`!), using a deliberately failing
+    //    shell `reconcile: [sh, -c, "exit 99"]` so ONLY the kernel's built-in actuator recovery
+    //    can succeed — tested for BOTH pinned (`fencing_epoch = 1`) AND unpinned (Crash Point 3
+    //    pending AND Crash Point 4 already-committed) flows, plus the public KV pending guard!
     {
         let dir = tempfile::tempdir().unwrap();
         let repo_dir = dir.path().join("repo");
@@ -3184,87 +3187,208 @@ nodes:
         .trim()
         .to_string();
         let zero_oid = "0".repeat(head_oid.len());
-        let flow_yaml = format!(
-            r#"
-flow: fenced_git_e2e_recovery
-version: 1
-params: [repo, fencing_resource, fencing_epoch]
-workdir: "{{{{params.repo}}}}"
-nodes:
-  ship:
-    class: effect
-    run: ["maestro:fenced-git-ref-cas", "refs/heads/e2e-wal-ship", "{zero_oid}", "{head_oid}"]
-    reconcile: [sh, -c, "true"]
-"#
+
+        // 6a. PINNED real crash after `EffectStarted` + WAL pending row (Crash Point 3).
+        let pinned_yaml = format!(
+            "flow: fenced_git_e2e_pinned\nversion: 1\nparams: [repo, fencing_resource, fencing_epoch]\nworkdir: \"{{{{params.repo}}}}\"\nnodes:\n  ship:\n    class: effect\n    run: [\"maestro:fenced-git-ref-cas\", \"refs/heads/e2e-wal-pinned\", \"{zero_oid}\", \"{head_oid}\"]\n    reconcile: [sh, -c, \"exit 99\"]\n"
         );
-        let compiled = compile(&flow_yaml).unwrap();
+        let pinned_compiled = compile(&pinned_yaml).unwrap();
         let db_path = root.join("fencing_epochs.sqlite");
         let fstore = FencingStore::open(&db_path).unwrap();
-        let ep1 = fstore.grant_epoch("git:e2e-wal").unwrap();
+        let ep1 = fstore.grant_epoch("git:e2e-pinned").unwrap();
         assert_eq!(ep1, 1);
 
-        let s = start(
+        let s_pin = start(
             &mut ledger,
             &sess,
-            &compiled,
+            &pinned_compiled,
             json!({
                 "repo": repo_dir.to_str().unwrap(),
-                "fencing_resource": "git:e2e-wal",
+                "fencing_resource": "git:e2e-pinned",
                 "fencing_epoch": 1
             }),
         )
         .unwrap();
-        let c = claim(&mut ledger, &sess, &s.instance, "ship").unwrap();
+        let c_pin = claim(&mut ledger, &sess, &s_pin.instance, "ship").unwrap();
         let outputs = json!({"ok": true});
-        let op_id = format!("{}:ship:1", s.instance.as_str());
+        let op_id_pin = format!("{}:ship:{{}}", s_pin.instance.as_str());
         let payload_digest = digest(&outputs);
 
-        // Simulate a crash right after git update-ref succeeded while fenced_git_refs is still
-        // 'pending' and written_epoch = 1 (before kernel::complete() wrote Completed to the log)!
+        // Append the REAL `EffectStarted` event that `complete()` writes before invoking the
+        // actuator, then simulate a crash right after `git update-ref` while `state = 'pending'`.
         {
-            let rlock = fstore.acquire_resource_lock("git:e2e-wal").unwrap();
+            let mut g = ledger.lock().unwrap();
+            let seq = g.log(&s_pin.instance).unwrap().seq();
+            let eff = EffectStarted {
+                node: "ship".into(),
+                iteration: Iteration::new(),
+                attempt: 1,
+                inputs: BTreeMap::new(),
+                guard_digest: None,
+            };
+            g.append(&s_pin.instance, seq, eff.to_event().unwrap()).unwrap();
+        }
+        {
+            let rlock = fstore.acquire_resource_lock("git:e2e-pinned").unwrap();
             fstore
                 .execute_atomic_git_ref_cas(
                     &rlock,
                     &repo_dir,
-                    "git:e2e-wal",
+                    "git:e2e-pinned",
                     1,
-                    &op_id,
+                    &op_id_pin,
                     &payload_digest,
                     &serde_json::to_string(&outputs).unwrap(),
-                    "refs/heads/e2e-wal-ship",
+                    "refs/heads/e2e-wal-pinned",
                     &zero_oid,
                     &head_oid,
                 )
                 .unwrap();
         }
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute("UPDATE fenced_git_refs SET state = 'pending' WHERE resource_id = 'git:e2e-wal'", []).unwrap();
+        conn.execute("UPDATE fenced_git_refs SET state = 'pending' WHERE resource_id = 'git:e2e-pinned'", []).unwrap();
         drop(conn);
 
-        // Public execute_atomic_sqlite_kv with the SAME (epoch=1, op_id, payload_digest) MUST be
-        // rejected transactionally by commit_fenced_write_with_tx (never IdempotentReplay)!
-        let kv_blocked =
-            fstore.execute_atomic_sqlite_kv("git:e2e-wal", 1, &op_id, &payload_digest, "{}", "k", "v").unwrap_err();
+        // Public `execute_atomic_sqlite_kv` with the SAME `(epoch=1, op_id, payload_digest)` MUST
+        // fail closed inside `BEGIN IMMEDIATE` BEFORE `IdempotentReplay` while pending!
+        let kv_blocked = fstore
+            .execute_atomic_sqlite_kv("git:e2e-pinned", 1, &op_id_pin, &payload_digest, "{}", "k", "v")
+            .unwrap_err();
         assert!(
             kv_blocked.to_string().contains("pending_git_ref_cas_recovery_required"),
             "public KV call with matching op_id/digest MUST fail closed inside tx while git-ref is pending: {kv_blocked}"
         );
 
-        // Exact retry through kernel::complete() MUST reconcile the pending row to 'committed' and
-        // return Completion::Completed (NOT stale_fencing_epoch)!
-        let comp = complete(&mut ledger, &sess, &c.token, outputs, &Limits::default()).unwrap();
+        // Real retry through `kernel::complete()` enters `Step::Reconcile` (because `EffectStarted`
+        // is already in the log!) and MUST recover via the built-in actuator (NOT shell `exit 99`)!
+        let comp_pin = complete(&mut ledger, &sess, &c_pin.token, outputs.clone(), &Limits::default()).unwrap();
         assert!(
-            matches!(comp, Completion::Completed { .. }),
-            "pinned kernel::complete() retry MUST recover crash-pending git-ref CAS: {comp:?}"
+            matches!(comp_pin, Completion::Completed { .. }),
+            "pinned Step::Reconcile retry MUST recover crash-pending git-ref CAS: {comp_pin:?}"
         );
-
-        // Confirm state is now 'committed' and a subsequent epoch=2 KV write succeeds cleanly!
-        let ep2 = fstore.grant_epoch("git:e2e-wal").unwrap();
+        let ep2 = fstore.grant_epoch("git:e2e-pinned").unwrap();
         assert_eq!(ep2, 2);
         let kv_ok = fstore
-            .execute_atomic_sqlite_kv("git:e2e-wal", ep2, "op-after", "sha256:after", "{}", "k", "after")
+            .execute_atomic_sqlite_kv("git:e2e-pinned", ep2, "op-after", "sha256:after", "{}", "k", "after")
             .unwrap();
         assert_eq!(kv_ok, FencedWriteOutcome::Committed { epoch: 2 });
+
+        // 6b. UNPINNED real crash after `EffectStarted` + WAL pending row (Crash Point 3).
+        let unpinned_yaml = format!(
+            "flow: fenced_git_e2e_unpinned\nversion: 1\nparams: [repo, fencing_resource]\nworkdir: \"{{{{params.repo}}}}\"\nnodes:\n  ship:\n    class: effect\n    run: [\"maestro:fenced-git-ref-cas\", \"refs/heads/e2e-wal-unpinned\", \"{zero_oid}\", \"{head_oid}\"]\n    reconcile: [sh, -c, \"exit 99\"]\n"
+        );
+        let unpinned_compiled = compile(&unpinned_yaml).unwrap();
+        let s_unpin = start(
+            &mut ledger,
+            &sess,
+            &unpinned_compiled,
+            json!({
+                "repo": repo_dir.to_str().unwrap(),
+                "fencing_resource": "git:e2e-unpinned"
+            }),
+        )
+        .unwrap();
+        let c_unpin = claim(&mut ledger, &sess, &s_unpin.instance, "ship").unwrap();
+        let op_id_unpin = format!("{}:ship:{{}}", s_unpin.instance.as_str());
+        {
+            let mut g = ledger.lock().unwrap();
+            let seq = g.log(&s_unpin.instance).unwrap().seq();
+            let eff = EffectStarted {
+                node: "ship".into(),
+                iteration: Iteration::new(),
+                attempt: 1,
+                inputs: BTreeMap::new(),
+                guard_digest: None,
+            };
+            g.append(&s_unpin.instance, seq, eff.to_event().unwrap()).unwrap();
+        }
+        let uep1 = fstore.grant_epoch("git:e2e-unpinned").unwrap();
+        assert_eq!(uep1, 1);
+        {
+            let rlock = fstore.acquire_resource_lock("git:e2e-unpinned").unwrap();
+            fstore
+                .execute_atomic_git_ref_cas(
+                    &rlock,
+                    &repo_dir,
+                    "git:e2e-unpinned",
+                    1,
+                    &op_id_unpin,
+                    &payload_digest,
+                    &serde_json::to_string(&outputs).unwrap(),
+                    "refs/heads/e2e-wal-unpinned",
+                    &zero_oid,
+                    &head_oid,
+                )
+                .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("UPDATE fenced_git_refs SET state = 'pending' WHERE resource_id = 'git:e2e-unpinned'", [])
+            .unwrap();
+        drop(conn);
+        let comp_unpin = complete(&mut ledger, &sess, &c_unpin.token, outputs.clone(), &Limits::default()).unwrap();
+        assert!(
+            matches!(comp_unpin, Completion::Completed { .. }),
+            "unpinned Step::Reconcile retry MUST recover crash-pending git-ref CAS: {comp_unpin:?}"
+        );
+        let uep2 = fstore.grant_epoch("git:e2e-unpinned").unwrap();
+        assert_eq!(uep2, 2);
+        let kv_unpin_ok =
+            fstore.execute_atomic_sqlite_kv("git:e2e-unpinned", uep2, "op-u2", "sha256:u2", "{}", "k", "u2").unwrap();
+        assert_eq!(kv_unpin_ok, FencedWriteOutcome::Committed { epoch: 2 });
+
+        // 6c. UNPINNED Crash Point 4 (already `'committed'` in SQLite, crashed before flow-log
+        //     `Completed`): `Step::Reconcile` MUST reconcile idempotently via `committed_op_epoch`!
+        let cp4_yaml = format!(
+            "flow: fenced_git_e2e_cp4\nversion: 1\nparams: [repo, fencing_resource]\nworkdir: \"{{{{params.repo}}}}\"\nnodes:\n  ship:\n    class: effect\n    run: [\"maestro:fenced-git-ref-cas\", \"refs/heads/e2e-wal-cp4\", \"{zero_oid}\", \"{head_oid}\"]\n    reconcile: [sh, -c, \"exit 99\"]\n"
+        );
+        let cp4_compiled = compile(&cp4_yaml).unwrap();
+        let s_cp4 = start(
+            &mut ledger,
+            &sess,
+            &cp4_compiled,
+            json!({
+                "repo": repo_dir.to_str().unwrap(),
+                "fencing_resource": "git:e2e-cp4"
+            }),
+        )
+        .unwrap();
+        let c_cp4 = claim(&mut ledger, &sess, &s_cp4.instance, "ship").unwrap();
+        let op_id_cp4 = format!("{}:ship:{{}}", s_cp4.instance.as_str());
+        {
+            let mut g = ledger.lock().unwrap();
+            let seq = g.log(&s_cp4.instance).unwrap().seq();
+            let eff = EffectStarted {
+                node: "ship".into(),
+                iteration: Iteration::new(),
+                attempt: 1,
+                inputs: BTreeMap::new(),
+                guard_digest: None,
+            };
+            g.append(&s_cp4.instance, seq, eff.to_event().unwrap()).unwrap();
+        }
+        let cep1 = fstore.grant_epoch("git:e2e-cp4").unwrap();
+        assert_eq!(cep1, 1);
+        {
+            let rlock = fstore.acquire_resource_lock("git:e2e-cp4").unwrap();
+            fstore
+                .execute_atomic_git_ref_cas(
+                    &rlock,
+                    &repo_dir,
+                    "git:e2e-cp4",
+                    1,
+                    &op_id_cp4,
+                    &payload_digest,
+                    &serde_json::to_string(&outputs).unwrap(),
+                    "refs/heads/e2e-wal-cp4",
+                    &zero_oid,
+                    &head_oid,
+                )
+                .unwrap();
+        }
+        let comp_cp4 = complete(&mut ledger, &sess, &c_cp4.token, outputs, &Limits::default()).unwrap();
+        assert!(
+            matches!(comp_cp4, Completion::Completed { .. }),
+            "unpinned Crash Point 4 Step::Reconcile retry MUST replay already-committed CAS cleanly: {comp_cp4:?}"
+        );
     }
 }
