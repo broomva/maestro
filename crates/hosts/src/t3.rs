@@ -1032,7 +1032,7 @@ impl T3Registry {
                     }
                 }
                 Read::Present(false) | Read::Absent => {}
-                Read::Unreadable(why) => return Read::Unreadable(why),
+                Read::Unreadable(unread) => return Read::Unreadable(unread),
             }
         }
         Read::Present(found)

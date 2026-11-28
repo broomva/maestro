@@ -276,6 +276,31 @@ fn an_unassigned_or_malformed_native_id_never_makes_an_id_unnamed() {
     }
 }
 
+/// BRO-4227: a registry source that does not read, beside one `locate` reads first, means the
+/// registry cannot prove no row carries the id: never `Unnamed`.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_second_source_never_makes_an_id_unnamed() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sqlite(tmp.path());
+    let snapshot = serde_json::json!([{
+        "id": "mcp:snap", "cwd": "/work", "environment_id": "env-sqlite", "provider": "codex",
+        "created_at": "2026-11-17T00:00:00Z", "active_provider_thread_id": "pt-snap",
+        "provider_threads": [{ "provider_thread_id": "pt-snap", "native_id": "native-snap" }],
+    }]);
+    std::fs::write(root.join("threads.json"), snapshot.to_string()).unwrap();
+    let userdata = root.join("userdata");
+    std::fs::set_permissions(&userdata, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::metadata(userdata.join("statev2.sqlite")).is_ok();
+    let r = T3Registry::new(&root).resolve("01a22012-nested-reviewer", true);
+    std::fs::set_permissions(&userdata, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if readable {
+        return; // running as root: a 000 directory still reads, so this case cannot be built
+    }
+    assert!(!matches!(r, Ok(Resolution::Unnamed(_))), "{r:?}");
+}
+
 #[test]
 fn native_ids_resolve_through_the_active_provider_row_only() {
     let tmp = tempfile::tempdir().unwrap();
