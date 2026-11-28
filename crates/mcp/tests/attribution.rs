@@ -1227,6 +1227,43 @@ fn stop_gate_snapshot_without_provider_rows_is_not_nested() {
     assert_eq!(out.alerts.len(), 1, "{out:?}");
 }
 
+/// BRO-4227 independent review: the stop named as another thread (B) beside the nested shape for
+/// A has two candidates, so it is never the nested shape and is alerted.
+#[test]
+fn stop_gate_named_other_thread_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, C));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+    let out = gate_named(&f, &hosts, Harness::Codex, &format!("t3:{ENV}/{B}"), &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+/// BRO-4227 independent review: a thread row whose environment differs from the host's may own
+/// instances stored under the host's environment, so "owns nothing" is not proven: alerted.
+#[test]
+fn stop_gate_foreign_thread_environment_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, B));
+    let dir = f.root.join("t3-foreign-env");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut rows: Value = serde_json::from_str(&std::fs::read_to_string(&f.t3).unwrap()).unwrap();
+    for t in rows.as_array_mut().unwrap() {
+        if t["id"] == A {
+            t["environment_id"] = json!("env-elsewhere");
+        }
+    }
+    std::fs::write(dir.join("threads.json"), rows.to_string()).unwrap();
+    std::fs::write(dir.join("environment-id"), format!("{ENV}\n")).unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(dir.join("threads.json"))), None)
+        .with_identity_mode(ATTRIB)
+        .with_thread_vars(ThreadVars::from_pairs([(T3V, A.to_string())]))
+        .with_process_reader(Arc::new(FakeProcs));
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
 /// The generated driver skill says how each harness writes.
 #[test]
 fn the_driver_skill_says_how_codex_and_gemini_write() {

@@ -394,11 +394,14 @@ impl Run<'_> {
                 return self.note(format!("{unnamed} {why}"));
             }
             Attributed::Refused(refusal) => {
-                // One candidate, canonical with a known environment: an owner stored as
-                // `t3:env/A` is matched only by a candidate that names env.
+                // One candidate whose environment is this host's own: owners stored as `t3:-/A`
+                // or `t3:local/A` canonicalise to the host's environment, so only a candidate in
+                // that environment is matched against them (independent review, BRO-4227).
+                let host_env = self.hosts.t3_environment();
                 self.nested = nested_in_thread(&each)
                     && candidates.len() == 1
-                    && candidates[0].environment.as_deref().is_some_and(|e| !e.is_empty() && e != "-");
+                    && host_env.as_deref().is_some_and(|h| !h.is_empty() && h != "-")
+                    && candidates[0].environment == host_env;
                 return self.unbound(&candidates, &refusal);
             }
             Attributed::Resolved { attribution, environment } => (attribution, environment),

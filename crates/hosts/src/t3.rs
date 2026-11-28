@@ -619,8 +619,9 @@ def main():
             if not isinstance(ref, dict):
                 raise PayloadError(f"a provider row of thread {r['thread_id']} has a malformed nativeThreadRef")
             native = ref.get("nativeId")
+            # A row whose native id is not yet assigned cannot prove it does not carry this one.
             if native is None:
-                continue
+                raise PayloadError(f"a provider row of thread {r['thread_id']} has no native id yet")
             if not isinstance(native, str):
                 raise PayloadError(f"a provider row of thread {r['thread_id']} has a malformed nativeThreadRef")
             if native == target_id:
@@ -1080,7 +1081,7 @@ impl T3Registry {
             for p in providers {
                 match p.get("native_id") {
                     Some(serde_json::Value::String(id)) => found |= id == native_id,
-                    Some(serde_json::Value::Null) => {}
+                    // Not yet assigned: it cannot prove it does not carry this id.
                     _ => return Err("a provider row has no readable native_id".to_string()),
                 }
             }

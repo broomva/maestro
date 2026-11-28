@@ -248,6 +248,34 @@ fn a_snapshot_beside_a_database_never_makes_an_id_unnamed() {
     assert!(matches!(t3.resolve("01a22012-nested-reviewer", true).unwrap(), Resolution::Unnamed(_)));
 }
 
+/// BRO-4227 independent review: a provider row whose native id is not yet assigned (null), or a
+/// JSON one that is not a string, cannot prove it does not carry the id: never `Unnamed`.
+#[test]
+fn an_unassigned_or_malformed_native_id_never_makes_an_id_unnamed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sqlite(tmp.path());
+    let db = root.join("userdata/statev2.sqlite");
+    let script = "import sqlite3, sys\nc = sqlite3.connect(sys.argv[1])\nc.execute(\"INSERT INTO orchestration_v2_projection_provider_threads (provider_thread_id, thread_id, payload_json) VALUES ('pt-null', 'mcp:switched', '{\\\"nativeThreadRef\\\": {\\\"nativeId\\\": null}}')\")\nc.commit()\n";
+    let out = std::process::Command::new("python3").arg("-I").arg("-c").arg(script).arg(&db).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(matches!(T3Registry::new(&root).resolve("01a22012-x", true).unwrap(), Resolution::Unresolved(_)));
+    for bad in [serde_json::json!(null), serde_json::json!(7)] {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = serde_json::json!([{
+            "id": "mcp:snap", "cwd": "/work", "environment_id": "env", "provider": "codex",
+            "created_at": "2026-11-17T00:00:00Z", "active_provider_thread_id": "pt-snap",
+            "provider_threads": [{ "provider_thread_id": "pt-snap", "native_id": "native-snap" },
+                                 { "provider_thread_id": "pt-old", "native_id": bad }],
+        }]);
+        std::fs::write(dir.path().join("threads.json"), snapshot.to_string()).unwrap();
+        let t3 = T3Registry::new(dir.path().join("threads.json"));
+        // A malformed row may make the registry unreadable (an error, alerted) or the id Unresolved;
+        // either way it is never Unnamed.
+        let r = t3.resolve("01a22012-x", true);
+        assert!(!matches!(r, Ok(Resolution::Unnamed(_))), "{bad}: {r:?}");
+    }
+}
+
 #[test]
 fn native_ids_resolve_through_the_active_provider_row_only() {
     let tmp = tempfile::tempdir().unwrap();
