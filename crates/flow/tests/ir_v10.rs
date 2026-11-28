@@ -3247,6 +3247,7 @@ nodes:
         }
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute("UPDATE fenced_git_refs SET state = 'pending' WHERE resource_id = 'git:e2e-pinned'", []).unwrap();
+        conn.execute("UPDATE fenced_ops SET state = 'pending' WHERE resource_id = 'git:e2e-pinned'", []).unwrap();
         drop(conn);
 
         // Public `execute_atomic_sqlite_kv` with the SAME `(epoch=1, op_id, payload_digest)` MUST
@@ -3324,6 +3325,7 @@ nodes:
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute("UPDATE fenced_git_refs SET state = 'pending' WHERE resource_id = 'git:e2e-unpinned'", [])
             .unwrap();
+        conn.execute("UPDATE fenced_ops SET state = 'pending' WHERE resource_id = 'git:e2e-unpinned'", []).unwrap();
         drop(conn);
         let comp_unpin = complete(&mut ledger, &sess, &c_unpin.token, outputs.clone(), &Limits::default()).unwrap();
         assert!(
@@ -3337,7 +3339,7 @@ nodes:
         assert_eq!(kv_unpin_ok, FencedWriteOutcome::Committed { epoch: 2 });
 
         // 6c. UNPINNED Crash Point 4 (already `'committed'` in SQLite, crashed before flow-log
-        //     `Completed`): `Step::Reconcile` MUST reconcile idempotently via `committed_op_epoch`!
+        //     `Completed`): `Step::Reconcile` MUST reconcile idempotently via `fenced_ops`!
         let cp4_yaml = format!(
             "flow: fenced_git_e2e_cp4\nversion: 1\nparams: [repo, fencing_resource]\nworkdir: \"{{{{params.repo}}}}\"\nnodes:\n  ship:\n    class: effect\n    run: [\"maestro:fenced-git-ref-cas\", \"refs/heads/e2e-wal-cp4\", \"{zero_oid}\", \"{head_oid}\"]\n    reconcile: [sh, -c, \"exit 99\"]\n"
         );
@@ -3385,10 +3387,119 @@ nodes:
                 )
                 .unwrap();
         }
-        let comp_cp4 = complete(&mut ledger, &sess, &c_cp4.token, outputs, &Limits::default()).unwrap();
+        let comp_cp4 = complete(&mut ledger, &sess, &c_cp4.token, outputs.clone(), &Limits::default()).unwrap();
         assert!(
             matches!(comp_cp4, Completion::Completed { .. }),
             "unpinned Crash Point 4 Step::Reconcile retry MUST replay already-committed CAS cleanly: {comp_cp4:?}"
+        );
+
+        // 6d. Interleaved KV recovery: op A (unpinned) commits `shared-k = from-A` at epoch 1 and
+        //     crashes before flow-log `Completed`. Op B then writes `shared-k = from-B` at epoch 2
+        //     (overwriting `resource_epochs.last_op_id`). When op A reconciles, it MUST replay via
+        //     durable `fenced_ops` WITHOUT granting a fresh epoch and WITHOUT overwriting B!
+        let kv_a_yaml = "flow: fenced_kv_interleave_a\nversion: 1\nparams: [repo, fencing_resource]\nworkdir: \"{{params.repo}}\"\nnodes:\n  ship:\n    class: effect\n    run: [\"maestro:fenced-sqlite-kv\", \"shared-k\", \"from-A\"]\n    reconcile: [sh, -c, \"exit 99\"]\n";
+        let kv_a_compiled = compile(kv_a_yaml).unwrap();
+        let s_a = start(
+            &mut ledger,
+            &sess,
+            &kv_a_compiled,
+            json!({
+                "repo": repo_dir.to_str().unwrap(),
+                "fencing_resource": "kv:interleave"
+            }),
+        )
+        .unwrap();
+        let c_a = claim(&mut ledger, &sess, &s_a.instance, "ship").unwrap();
+        let op_id_a = format!("{}:ship:{{}}", s_a.instance.as_str());
+        {
+            let mut g = ledger.lock().unwrap();
+            let seq = g.log(&s_a.instance).unwrap().seq();
+            let eff = EffectStarted {
+                node: "ship".into(),
+                iteration: Iteration::new(),
+                attempt: 1,
+                inputs: BTreeMap::new(),
+                guard_digest: None,
+            };
+            g.append(&s_a.instance, seq, eff.to_event().unwrap()).unwrap();
+        }
+        let a_ep = fstore.grant_epoch("kv:interleave").unwrap();
+        assert_eq!(a_ep, 1);
+        fstore
+            .execute_atomic_sqlite_kv(
+                "kv:interleave",
+                a_ep,
+                &op_id_a,
+                &payload_digest,
+                &serde_json::to_string(&outputs).unwrap(),
+                "shared-k",
+                "from-A",
+            )
+            .unwrap();
+        // Op B now advances the SAME resource & key to epoch 2, overwriting last_op_id!
+        let b_ep = fstore.grant_epoch("kv:interleave").unwrap();
+        assert_eq!(b_ep, 2);
+        fstore
+            .execute_atomic_sqlite_kv("kv:interleave", b_ep, "op-B", "sha256:opB", "{}", "shared-k", "from-B")
+            .unwrap();
+        // Op A reconciles -> MUST succeed cleanly via `fenced_ops` AND preserve B's value & epoch 2!
+        let comp_a = complete(&mut ledger, &sess, &c_a.token, outputs.clone(), &Limits::default()).unwrap();
+        assert!(
+            matches!(comp_a, Completion::Completed { .. }),
+            "interleaved op A Step::Reconcile MUST replay via fenced_ops without overwriting B: {comp_a:?}"
+        );
+        assert_eq!(
+            fstore.read_fenced_kv("kv:interleave", "shared-k").unwrap(),
+            Some(("from-B".to_string(), 2, "op-B".to_string())),
+            "interleaved op A reconcile MUST NEVER overwrite newer op B's KV value!"
+        );
+        let (granted_after, written_after): (i64, i64) = {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.query_row(
+                "SELECT granted_epoch, written_epoch FROM resource_epochs WHERE resource_id = 'kv:interleave'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!((granted_after, written_after), (2, 2), "interleaved op A reconcile MUST NOT grant a fresh epoch");
+
+        // 6e. Unpinned Crash Point 1 (`EffectStarted` in log, NO `fenced_ops` evidence at all):
+        //     `Step::Reconcile` MUST fail closed (`effect_unreconciled`) and NEVER overwrite B!
+        let kv_c_yaml = "flow: fenced_kv_interleave_c\nversion: 1\nparams: [repo, fencing_resource]\nworkdir: \"{{params.repo}}\"\nnodes:\n  ship:\n    class: effect\n    run: [\"maestro:fenced-sqlite-kv\", \"shared-k\", \"from-C\"]\n    reconcile: [sh, -c, \"exit 99\"]\n";
+        let kv_c_compiled = compile(kv_c_yaml).unwrap();
+        let s_c = start(
+            &mut ledger,
+            &sess,
+            &kv_c_compiled,
+            json!({
+                "repo": repo_dir.to_str().unwrap(),
+                "fencing_resource": "kv:interleave"
+            }),
+        )
+        .unwrap();
+        let c_c = claim(&mut ledger, &sess, &s_c.instance, "ship").unwrap();
+        {
+            let mut g = ledger.lock().unwrap();
+            let seq = g.log(&s_c.instance).unwrap().seq();
+            let eff = EffectStarted {
+                node: "ship".into(),
+                iteration: Iteration::new(),
+                attempt: 1,
+                inputs: BTreeMap::new(),
+                guard_digest: None,
+            };
+            g.append(&s_c.instance, seq, eff.to_event().unwrap()).unwrap();
+        }
+        let comp_c = complete(&mut ledger, &sess, &c_c.token, outputs, &Limits::default()).unwrap();
+        assert!(
+            matches!(comp_c, Completion::Refused { code: "effect_unreconciled", .. }),
+            "unpinned Step::Reconcile without durable fenced_ops evidence MUST fail closed: {comp_c:?}"
+        );
+        assert_eq!(
+            fstore.read_fenced_kv("kv:interleave", "shared-k").unwrap(),
+            Some(("from-B".to_string(), 2, "op-B".to_string())),
+            "refused unpinned reconcile MUST leave op B's KV value untouched"
         );
     }
 }

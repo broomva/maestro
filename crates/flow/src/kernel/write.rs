@@ -1693,12 +1693,109 @@ fn run_fenced_effect(
         .map_err(|e| KernelError::Encode(format!("fencing lock failed: {e}")))?;
     let payload_digest = digest(outputs);
     let result_json = serde_json::to_string(outputs).unwrap_or_else(|_| "null".to_string());
-    // Pass pinned epochs straight into the actuator (which atomically handles crash-pending
-    // recovery, idempotent replay, StaleEpoch, and EpochAlreadyConsumed under `rlock`). For
-    // unpinned retries after a crash:
-    // 1. Reuse matching pending git-ref epoch (Crash Points 2 & 3).
-    // 2. On `Step::Reconcile`, reuse matching already-committed epoch (Crash Point 4).
-    // 3. Otherwise grant a fresh epoch.
+    let (expected_kind, expected_target) = match &actuator {
+        FencedActuator::SqliteKvPut { key, .. } => ("sqlite_kv", key.as_str()),
+        FencedActuator::GitRefCas { ref_name, .. } => ("git_ref_cas", ref_name.as_str()),
+    };
+
+    // Consult the durable per-operation ledger (`fenced_ops`) BEFORE touching epochs so an
+    // already-committed op recovers idempotently even after later ops have overwritten
+    // `resource_epochs.last_op_id`, and an unpinned `Step::Reconcile` with no durable record
+    // fails closed instead of granting a fresh epoch that could overwrite a newer writer.
+    let recorded_op = fence_store
+        .lookup_fenced_op(&fence_resource, &op_id)
+        .map_err(|e| KernelError::Encode(format!("fencing op lookup failed: {e}")))?;
+    if let Some(rec) = &recorded_op {
+        match rec.state.as_str() {
+            "committed" => {
+                let epoch_ok = pinned_epoch.is_none_or(|ep| ep == rec.epoch);
+                if epoch_ok
+                    && rec.payload_digest == payload_digest
+                    && rec.actuator_kind == expected_kind
+                    && rec.target_key == expected_target
+                {
+                    drop(rlock);
+                    let receipt = serde_json::json!({
+                        "resource": fence_resource,
+                        "epoch": rec.epoch,
+                        "op_id": op_id,
+                    });
+                    return Ok((
+                        Ran::Exited { code: Some(0), stdout: receipt.to_string().into_bytes(), stderr: Vec::new() },
+                        None,
+                    ));
+                }
+                drop(rlock);
+                return Ok((
+                    Ran::Failed {
+                        code: "stale_fencing_epoch",
+                        detail: format!(
+                            "fenced op {op_id} on {fence_resource} already committed at epoch={} with different metadata",
+                            rec.epoch
+                        ),
+                        stderr: Vec::new(),
+                    },
+                    None,
+                ));
+            }
+            "aborted" => {
+                drop(rlock);
+                return Ok((
+                    Ran::Failed {
+                        code: "stale_fencing_epoch",
+                        detail: format!("fenced op {op_id} on {fence_resource} was aborted at epoch={}", rec.epoch),
+                        stderr: Vec::new(),
+                    },
+                    None,
+                ));
+            }
+            "pending" => {
+                if let Some(ep) = pinned_epoch
+                    && ep != rec.epoch
+                {
+                    drop(rlock);
+                    return Ok((
+                        Ran::Failed {
+                            code: "stale_fencing_epoch",
+                            detail: format!(
+                                "pending fenced op {op_id} on {fence_resource} has epoch={} != pinned {ep}",
+                                rec.epoch
+                            ),
+                            stderr: Vec::new(),
+                        },
+                        None,
+                    ));
+                }
+            }
+            other => {
+                drop(rlock);
+                return Ok((
+                    Ran::Failed {
+                        code: "fencing_commit_failed",
+                        detail: format!("unexpected fenced_ops state {other:?} for ({fence_resource}, {op_id})"),
+                        stderr: Vec::new(),
+                    },
+                    None,
+                ));
+            }
+        }
+    } else if is_reconcile && pinned_epoch.is_none() {
+        // Unpinned `Step::Reconcile` with NO durable `fenced_ops` evidence: cannot distinguish
+        // pre-write crash from a concurrent newer writer without risking overwriting newer state.
+        // Fail closed instead of granting a fresh epoch.
+        drop(rlock);
+        return Ok((
+            Ran::Failed {
+                code: "effect_unreconciled",
+                detail: format!(
+                    "reconcile found no durable fenced_ops evidence for unpinned started effect ({fence_resource}, {op_id}); refusing to grant a fresh epoch"
+                ),
+                stderr: Vec::new(),
+            },
+            None,
+        ));
+    }
+
     let epoch = match pinned_epoch {
         Some(ep) => ep,
         None => {
@@ -1715,14 +1812,7 @@ fn run_fenced_effect(
                     .map_err(|e| KernelError::Encode(format!("fencing pending lookup failed: {e}")))?,
                 FencedActuator::SqliteKvPut { .. } => None,
             };
-            let existing_ep = match pending_ep {
-                Some(ep) => Some(ep),
-                None if is_reconcile => fence_store
-                    .committed_op_epoch(&fence_resource, &op_id, &payload_digest)
-                    .map_err(|e| KernelError::Encode(format!("fencing committed lookup failed: {e}")))?,
-                None => None,
-            };
-            match existing_ep {
+            match pending_ep {
                 Some(ep) => ep,
                 None => fence_store
                     .grant_epoch_locked(&rlock, &fence_resource)

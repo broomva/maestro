@@ -113,6 +113,17 @@ pub enum FencedWriteOutcome {
     IdempotentReplay { epoch: u64, cached_result_json: String },
 }
 
+/// Durable per-operation fencing ledger record (survives later writes to the same resource).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FencedOpRecord {
+    pub payload_digest: String,
+    pub actuator_kind: String,
+    pub target_key: String,
+    pub epoch: u64,
+    pub result_json: String,
+    pub state: String,
+}
+
 /// Durable SQLite WAL store for resource-scoped `fencing_epoch: u64` allocation and validation.
 #[derive(Debug, Clone)]
 pub struct FencingStore {
@@ -157,6 +168,17 @@ impl FencingStore {
                  payload_digest TEXT NOT NULL DEFAULT '',
                  state TEXT NOT NULL DEFAULT 'committed',
                  PRIMARY KEY (resource_id, ref_name)
+             );
+             CREATE TABLE IF NOT EXISTS fenced_ops (
+                 resource_id TEXT NOT NULL,
+                 op_id TEXT NOT NULL,
+                 payload_digest TEXT NOT NULL,
+                 actuator_kind TEXT NOT NULL,
+                 target_key TEXT NOT NULL,
+                 epoch INTEGER NOT NULL,
+                 result_json TEXT NOT NULL,
+                 state TEXT NOT NULL,
+                 PRIMARY KEY (resource_id, op_id)
              );
              COMMIT;",
         )
@@ -406,33 +428,33 @@ impl FencingStore {
         Ok(ep.map(|v| v as u64))
     }
 
-    /// Looks up the epoch of an already-committed op matching `(resource_id, op_id, payload_digest)`
-    /// in `resource_epochs` so an unpinned `Step::Reconcile` retry after a crash between SQLite
-    /// commit and flow-log `Completed` reconciles via `IdempotentReplay` instead of re-executing
-    /// under a new epoch.
-    pub fn committed_op_epoch(
-        &self,
-        resource_id: &str,
-        op_id: &str,
-        payload_digest: &str,
-    ) -> Result<Option<u64>, FencingError> {
+    /// Looks up the durable per-operation ledger row for `(resource_id, op_id)` across all
+    /// historical epochs (even after later operations overwrite `resource_epochs.last_op_id`).
+    pub fn lookup_fenced_op(&self, resource_id: &str, op_id: &str) -> Result<Option<FencedOpRecord>, FencingError> {
         let conn = self.connect()?;
-        let ep: Option<i64> = conn
-            .query_row(
-                "SELECT written_epoch FROM resource_epochs
-                 WHERE resource_id = ?1 AND last_op_id = ?2 AND last_payload_digest = ?3 AND written_epoch > 0",
-                params![resource_id, op_id, payload_digest],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|e| FencingError::Storage(format!("lookup committed op epoch: {e}")))?;
-        Ok(ep.map(|v| v as u64))
+        conn.query_row(
+            "SELECT payload_digest, actuator_kind, target_key, epoch, result_json, state
+             FROM fenced_ops WHERE resource_id = ?1 AND op_id = ?2",
+            params![resource_id, op_id],
+            |r| {
+                Ok(FencedOpRecord {
+                    payload_digest: r.get(0)?,
+                    actuator_kind: r.get(1)?,
+                    target_key: r.get(2)?,
+                    epoch: r.get::<_, i64>(3)? as u64,
+                    result_json: r.get(4)?,
+                    state: r.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| FencingError::Storage(format!("lookup fenced_ops: {e}")))
     }
 
     /// Built-in kernel actuator 1: executes a resource-fenced key/value write inside the EXACT
     /// SAME SQLite `BEGIN IMMEDIATE` transaction that checks for any pending git-ref CAS,
-    /// validates `granted_epoch == incoming_epoch && written_epoch < incoming_epoch`, and commits
-    /// `written_epoch = incoming_epoch`.
+    /// validates `granted_epoch == incoming_epoch && written_epoch < incoming_epoch`, commits
+    /// `written_epoch = incoming_epoch`, and records a durable per-op row in `fenced_ops`.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_atomic_sqlite_kv(
         &self,
@@ -448,6 +470,8 @@ impl FencingStore {
         let key_owned = key.to_string();
         let val_owned = value.to_string();
         let op_owned = op_id.to_string();
+        let dig_owned = payload_digest.to_string();
+        let res_json_owned = result_json.to_string();
         let out = self.commit_fenced_write_with_tx(
             resource_id,
             incoming_epoch,
@@ -465,6 +489,20 @@ impl FencingStore {
                     params![res_owned, key_owned, val_owned, incoming_epoch as i64, op_owned],
                 )
                 .map_err(|e| FencingError::Storage(format!("fenced_kv write failed: {e}")))?;
+                conn.execute(
+                    "INSERT INTO fenced_ops
+                       (resource_id, op_id, payload_digest, actuator_kind, target_key, epoch, result_json, state)
+                     VALUES (?1, ?2, ?3, 'sqlite_kv', ?4, ?5, ?6, 'committed')
+                     ON CONFLICT(resource_id, op_id) DO UPDATE SET
+                       payload_digest = excluded.payload_digest,
+                       actuator_kind = excluded.actuator_kind,
+                       target_key = excluded.target_key,
+                       epoch = excluded.epoch,
+                       result_json = excluded.result_json,
+                       state = 'committed'",
+                    params![res_owned, op_owned, dig_owned, key_owned, incoming_epoch as i64, res_json_owned],
+                )
+                .map_err(|e| FencingError::Storage(format!("fenced_ops kv record failed: {e}")))?;
                 Ok(())
             },
         )?;
@@ -472,12 +510,14 @@ impl FencingStore {
             let conn = self.connect()?;
             let committed: Option<i64> = conn
                 .query_row(
-                    "SELECT 1 FROM fenced_kv WHERE resource_id = ?1 AND key = ?2 AND epoch = ?3 AND op_id = ?4",
-                    params![resource_id, key, incoming_epoch as i64, op_id],
+                    "SELECT 1 FROM fenced_ops
+                     WHERE resource_id = ?1 AND op_id = ?2 AND payload_digest = ?3
+                       AND actuator_kind = 'sqlite_kv' AND target_key = ?4 AND epoch = ?5 AND state = 'committed'",
+                    params![resource_id, op_id, payload_digest, key, incoming_epoch as i64],
                     |r| r.get(0),
                 )
                 .optional()
-                .map_err(|e| FencingError::Storage(format!("verify committed fenced_kv: {e}")))?;
+                .map_err(|e| FencingError::Storage(format!("verify committed fenced_ops kv: {e}")))?;
             if committed.is_none() {
                 return Err(FencingError::EpochAlreadyConsumed {
                     resource_id: resource_id.to_string(),
@@ -539,9 +579,38 @@ impl FencingStore {
         Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
     }
 
-    /// Atomically marks a git-ref CAS row `'aborted'` AND clears `last_op_id`/`last_payload_digest`/
-    /// `last_result_json` in `resource_epochs` (while keeping `written_epoch` consumed) so a failed
-    /// or aborted CAS can NEVER replay as `IdempotentReplay`.
+    /// Atomically marks a git-ref CAS row `'committed'` in BOTH `fenced_git_refs` and `fenced_ops`.
+    fn commit_git_ref_cas(
+        &self,
+        resource_id: &str,
+        ref_name: &str,
+        epoch: u64,
+        op_id: &str,
+    ) -> Result<(), FencingError> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| FencingError::Storage(format!("begin commit_git_ref_cas tx: {e}")))?;
+        tx.execute(
+            "UPDATE fenced_git_refs SET state = 'committed'
+             WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
+            params![resource_id, ref_name, epoch as i64, op_id],
+        )
+        .map_err(|e| FencingError::Storage(format!("commit fenced_git_refs: {e}")))?;
+        tx.execute(
+            "UPDATE fenced_ops SET state = 'committed'
+             WHERE resource_id = ?1 AND op_id = ?2 AND epoch = ?3",
+            params![resource_id, op_id, epoch as i64],
+        )
+        .map_err(|e| FencingError::Storage(format!("commit fenced_ops: {e}")))?;
+        tx.commit().map_err(|e| FencingError::Storage(format!("commit commit_git_ref_cas tx: {e}")))?;
+        Ok(())
+    }
+
+    /// Atomically marks a git-ref CAS row `'aborted'` in BOTH `fenced_git_refs` and `fenced_ops`
+    /// AND clears `last_op_id`/`last_payload_digest`/`last_result_json` in `resource_epochs`
+    /// (while keeping `written_epoch` consumed) so a failed or aborted CAS can NEVER replay as
+    /// `IdempotentReplay`.
     fn abort_git_ref_cas(
         &self,
         resource_id: &str,
@@ -559,6 +628,12 @@ impl FencingStore {
             params![resource_id, ref_name, epoch as i64, op_id],
         )
         .map_err(|e| FencingError::Storage(format!("abort fenced_git_refs: {e}")))?;
+        tx.execute(
+            "UPDATE fenced_ops SET state = 'aborted'
+             WHERE resource_id = ?1 AND op_id = ?2 AND epoch = ?3",
+            params![resource_id, op_id, epoch as i64],
+        )
+        .map_err(|e| FencingError::Storage(format!("abort fenced_ops: {e}")))?;
         tx.execute(
             "UPDATE resource_epochs
              SET last_op_id = NULL, last_payload_digest = NULL, last_result_json = NULL
@@ -699,13 +774,7 @@ impl FencingStore {
             let still_at_old =
                 (expected_is_zero && current_oid.is_none()) || current_oid.as_deref() == Some(expected_old_oid);
             if already_applied {
-                let conn = self.connect()?;
-                conn.execute(
-                    "UPDATE fenced_git_refs SET state = 'committed'
-                     WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
-                    params![resource_id, ref_name, incoming_epoch as i64, op_id],
-                )
-                .map_err(|e| FencingError::Storage(format!("commit recovered fenced_git_refs: {e}")))?;
+                self.commit_git_ref_cas(resource_id, ref_name, incoming_epoch, op_id)?;
                 return Ok(FencedWriteOutcome::IdempotentReplay {
                     epoch: incoming_epoch,
                     cached_result_json: result_json.to_string(),
@@ -745,6 +814,7 @@ impl FencingStore {
             let new_owned = new_oid.to_string();
             let op_owned = op_id.to_string();
             let dig_owned = payload_digest.to_string();
+            let res_json_owned = result_json.to_string();
             let reserved = self.commit_fenced_write_with_tx(
                 resource_id,
                 incoming_epoch,
@@ -779,23 +849,38 @@ impl FencingStore {
                         params![res_owned, ref_owned, old_owned, new_owned, incoming_epoch as i64, op_owned, dig_owned],
                     )
                     .map_err(|e| FencingError::Storage(format!("reserve fenced_git_refs failed: {e}")))?;
+                    conn.execute(
+                        "INSERT INTO fenced_ops
+                           (resource_id, op_id, payload_digest, actuator_kind, target_key, epoch, result_json, state)
+                         VALUES (?1, ?2, ?3, 'git_ref_cas', ?4, ?5, ?6, 'pending')
+                         ON CONFLICT(resource_id, op_id) DO UPDATE SET
+                           payload_digest = excluded.payload_digest,
+                           actuator_kind = excluded.actuator_kind,
+                           target_key = excluded.target_key,
+                           epoch = excluded.epoch,
+                           result_json = excluded.result_json,
+                           state = 'pending'",
+                        params![res_owned, op_owned, dig_owned, ref_owned, incoming_epoch as i64, res_json_owned],
+                    )
+                    .map_err(|e| FencingError::Storage(format!("reserve fenced_ops failed: {e}")))?;
                     Ok(())
                 },
             )?;
             if let FencedWriteOutcome::IdempotentReplay { .. } = reserved {
-                // Only honor IdempotentReplay if fenced_git_refs explicitly confirms state == 'committed'
+                // Only honor IdempotentReplay if fenced_ops explicitly confirms state == 'committed'
                 // for this exact ref, epoch, op_id, and payload_digest!
                 let conn = self.connect()?;
                 let committed: Option<i64> = conn
                     .query_row(
-                        "SELECT 1 FROM fenced_git_refs
-                         WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3
-                           AND op_id = ?4 AND payload_digest = ?5 AND state = 'committed'",
-                        params![resource_id, ref_name, incoming_epoch as i64, op_id, payload_digest],
+                        "SELECT 1 FROM fenced_ops
+                         WHERE resource_id = ?1 AND op_id = ?2 AND payload_digest = ?3
+                           AND actuator_kind = 'git_ref_cas' AND target_key = ?4
+                           AND epoch = ?5 AND state = 'committed'",
+                        params![resource_id, op_id, payload_digest, ref_name, incoming_epoch as i64],
                         |r| r.get(0),
                     )
                     .optional()
-                    .map_err(|e| FencingError::Storage(format!("verify committed fenced_git_refs: {e}")))?;
+                    .map_err(|e| FencingError::Storage(format!("verify committed fenced_ops git_ref_cas: {e}")))?;
                 if committed.is_some() {
                     return Ok(reserved);
                 }
@@ -821,14 +906,8 @@ impl FencingStore {
             )));
         }
 
-        // 4. Mark durable WAL intent committed.
-        let conn = self.connect()?;
-        conn.execute(
-            "UPDATE fenced_git_refs SET state = 'committed'
-             WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
-            params![resource_id, ref_name, incoming_epoch as i64, op_id],
-        )
-        .map_err(|e| FencingError::Storage(format!("finalize fenced_git_refs failed: {e}")))?;
+        // 4. Mark durable WAL intent committed in both fenced_git_refs and fenced_ops.
+        self.commit_git_ref_cas(resource_id, ref_name, incoming_epoch, op_id)?;
         if recovering_same_pending {
             Ok(FencedWriteOutcome::IdempotentReplay {
                 epoch: incoming_epoch,
