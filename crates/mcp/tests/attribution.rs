@@ -1201,6 +1201,32 @@ fn stop_gate_unknown_environment_is_not_nested() {
     assert_eq!(out.alerts.len(), 1, "{out:?}");
 }
 
+/// BRO-4227 review round 4: a JSON snapshot row that omits `provider_threads` does not prove
+/// that no provider row carries the stdin id, so the stop is alerted. The row is an archived
+/// thread's, which the live lookup skips, so only the Unnamed proof reads it.
+#[test]
+fn stop_gate_snapshot_without_provider_rows_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, B));
+    let dir = f.root.join("t3-omitted");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut rows: Value = serde_json::from_str(&std::fs::read_to_string(&f.t3).unwrap()).unwrap();
+    for t in rows.as_array_mut().unwrap() {
+        if t["id"] == "mcp:thread-archived" {
+            t.as_object_mut().unwrap().remove("provider_threads");
+        }
+    }
+    std::fs::write(dir.join("threads.json"), rows.to_string()).unwrap();
+    std::fs::write(dir.join("environment-id"), format!("{ENV}\n")).unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(dir.join("threads.json"))), None)
+        .with_identity_mode(ATTRIB)
+        .with_thread_vars(ThreadVars::from_pairs([(T3V, A.to_string())]))
+        .with_process_reader(Arc::new(FakeProcs));
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("native-archived"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
 /// The generated driver skill says how each harness writes.
 #[test]
 fn the_driver_skill_says_how_codex_and_gemini_write() {

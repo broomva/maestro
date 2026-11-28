@@ -1016,10 +1016,30 @@ impl T3Registry {
     fn native_ever_carried(&self, native_id: &str) -> Result<bool, IdentityRefusal> {
         let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
         if let Some(json_file) = self.json_path() {
-            let rows = Self::snapshot_rows(&json_file).map_err(|e| unreadable(e.message))?;
-            return Ok(rows
-                .iter()
-                .any(|raw| raw.provider_threads.iter().any(|p| p.native_id.as_deref() == Some(native_id))));
+            // Read raw, not through `RawT3Thread`, whose `provider_threads` defaults to empty: a row
+            // must list its provider rows explicitly, each `native_id` a string or null, or the
+            // snapshot cannot prove that no row carries the id (BRO-4227 P20 r4).
+            let Read::Present(text) = read::read_text(&json_file) else {
+                return Err(unreadable("T3 JSON registry did not read".to_string()));
+            };
+            let rows: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| unreadable(format!("T3 JSON registry is not JSON: {e}")))?;
+            let rows = rows.as_array().ok_or_else(|| unreadable("T3 JSON registry is not an array".to_string()))?;
+            let mut found = false;
+            for row in rows {
+                let providers = row
+                    .get("provider_threads")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| unreadable("a T3 thread row does not list its provider rows".to_string()))?;
+                for p in providers {
+                    match p.get("native_id") {
+                        Some(serde_json::Value::String(id)) => found |= id == native_id,
+                        Some(serde_json::Value::Null) => {}
+                        _ => return Err(unreadable("a provider row has no readable native_id".to_string())),
+                    }
+                }
+            }
+            return Ok(found);
         }
         if let Some(db_file) = self.sqlite_path() {
             let out = Command::new("python3")
