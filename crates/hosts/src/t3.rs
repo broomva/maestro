@@ -1011,53 +1011,98 @@ impl T3Registry {
     }
 
     /// The threads whose active provider-thread row carries `native_id`, read from the registry.
-    /// Whether any provider row of any thread (archived, deleted or retired rows included) carries
-    /// `native_id`. Only [`Resolution::Unnamed`] reads it; an error means "cannot tell".
-    fn native_ever_carried(&self, native_id: &str) -> Result<bool, IdentityRefusal> {
-        let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
-        if let Some(json_file) = self.json_path() {
-            // Read raw, not through `RawT3Thread`, whose `provider_threads` defaults to empty: a row
-            // must list its provider rows explicitly, each `native_id` a string or null, or the
-            // snapshot cannot prove that no row carries the id (BRO-4227 P20 r4).
-            let Read::Present(text) = read::read_text(&json_file) else {
-                return Err(unreadable("T3 JSON registry did not read".to_string()));
-            };
-            let rows: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| unreadable(format!("T3 JSON registry is not JSON: {e}")))?;
-            let rows = rows.as_array().ok_or_else(|| unreadable("T3 JSON registry is not an array".to_string()))?;
-            let mut found = false;
-            for row in rows {
-                let providers = row
-                    .get("provider_threads")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or_else(|| unreadable("a T3 thread row does not list its provider rows".to_string()))?;
-                for p in providers {
-                    match p.get("native_id") {
-                        Some(serde_json::Value::String(id)) => found |= id == native_id,
-                        Some(serde_json::Value::Null) => {}
-                        _ => return Err(unreadable("a provider row has no readable native_id".to_string())),
+    /// Every registry file this root could be read from (`locate` takes the first): each JSON
+    /// snapshot and SQLite database present. A candidate that does not read is unreadable.
+    fn every_source(&self) -> Read<Vec<Located>> {
+        let json = [self.root.clone(), self.root.join("threads.json")].map(|c| (c, true));
+        let sqlite = [self.root.clone(), self.root.join("statev2.sqlite"), self.root.join("userdata/statev2.sqlite")]
+            .map(|c| (c, false));
+        let mut found: Vec<Located> = Vec::new();
+        for (candidate, is_json) in json.into_iter().chain(sqlite) {
+            let ext = candidate.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            if !(if is_json { ext == "json" } else { ext == "sqlite" || ext == "db" }) {
+                continue;
+            }
+            match read::is_file(&candidate) {
+                Read::Present(true) => {
+                    let l = if is_json { Located::Json(candidate) } else { Located::Sqlite(candidate) };
+                    if !found.contains(&l) {
+                        found.push(l);
                     }
                 }
+                Read::Present(false) | Read::Absent => {}
+                Read::Unreadable(why) => return Read::Unreadable(why),
             }
-            return Ok(found);
         }
-        if let Some(db_file) = self.sqlite_path() {
-            let out = Command::new("python3")
-                .arg("-I")
-                .arg("-c")
-                .arg(SQLITE_READER_PY)
-                .arg("native_any")
-                .arg(&db_file)
-                .arg(native_id)
-                .output()
-                .map_err(|e| unreadable(format!("T3 SQLite reader failed to launch: {e}.")))?;
-            if out.status.code() != Some(0) {
-                return Err(unreadable(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+        Read::Present(found)
+    }
+
+    /// Whether any provider row of any thread (archived, deleted or retired rows included) carries
+    /// `native_id`, in EVERY registry source present, not only the one `locate` reads: a stale
+    /// snapshot beside a database proves nothing about the database (BRO-4227 P20 r5). Only
+    /// [`Resolution::Unnamed`] reads it: `Ok(false)` needs at least one source, every source read
+    /// and validated, and no match. An error means "cannot tell".
+    fn native_ever_carried(&self, native_id: &str) -> Result<bool, IdentityRefusal> {
+        let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
+        let sources = match self.every_source() {
+            Read::Present(s) if !s.is_empty() => s,
+            Read::Present(_) | Read::Absent => return Err(unreadable("no T3 registry file".to_string())),
+            Read::Unreadable(why) => return Err(unreadable(format!("T3 registry is unreadable: {why}"))),
+        };
+        for source in sources {
+            let carried = match source {
+                Located::Json(path) => Self::json_carries(&path, native_id),
+                Located::Sqlite(path) => Self::sqlite_carries(&path, native_id),
             }
-            return serde_json::from_slice(&out.stdout)
-                .map_err(|e| unreadable(format!("T3 SQLite reader returned invalid JSON: {e}.")));
+            .map_err(unreadable)?;
+            if carried {
+                return Ok(true);
+            }
         }
-        Err(unreadable("no T3 registry file".to_string()))
+        Ok(false)
+    }
+
+    /// A JSON snapshot read raw, not through `RawT3Thread`, whose `provider_threads` defaults to
+    /// empty: every row must list its provider rows, each `native_id` a string or null.
+    fn json_carries(path: &Path, native_id: &str) -> Result<bool, String> {
+        let Read::Present(text) = read::read_text(path) else {
+            return Err("T3 JSON registry did not read".to_string());
+        };
+        let rows: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("T3 JSON registry is not JSON: {e}"))?;
+        let rows = rows.as_array().ok_or_else(|| "T3 JSON registry is not an array".to_string())?;
+        let mut found = false;
+        for row in rows {
+            let providers = row
+                .get("provider_threads")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "a T3 thread row does not list its provider rows".to_string())?;
+            for p in providers {
+                match p.get("native_id") {
+                    Some(serde_json::Value::String(id)) => found |= id == native_id,
+                    Some(serde_json::Value::Null) => {}
+                    _ => return Err("a provider row has no readable native_id".to_string()),
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// A SQLite registry's every provider row, validated (`native_any` in [`SQLITE_READER_PY`]).
+    fn sqlite_carries(path: &Path, native_id: &str) -> Result<bool, String> {
+        let out = Command::new("python3")
+            .arg("-I")
+            .arg("-c")
+            .arg(SQLITE_READER_PY)
+            .arg("native_any")
+            .arg(path)
+            .arg(native_id)
+            .output()
+            .map_err(|e| format!("T3 SQLite reader failed to launch: {e}."))?;
+        if out.status.code() != Some(0) {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("T3 SQLite reader returned invalid JSON: {e}."))
     }
 
     fn native_threads(&self, native_id: &str) -> Result<Vec<String>, IdentityRefusal> {

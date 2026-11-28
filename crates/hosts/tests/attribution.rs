@@ -229,6 +229,25 @@ fn a_malformed_provider_row_never_makes_an_id_unnamed() {
     assert!(matches!(t3.resolve("01a22012-nested-reviewer", true).unwrap(), Resolution::Unresolved(_)));
 }
 
+/// BRO-4227 review round 5: a JSON snapshot that `locate` prefers does not prove anything about
+/// a SQLite registry beside it. Here the snapshot carries no row for the id, the database's
+/// archived thread does, so the id stays `Unresolved`, never `Unnamed`.
+#[test]
+fn a_snapshot_beside_a_database_never_makes_an_id_unnamed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sqlite(tmp.path());
+    let snapshot = serde_json::json!([{
+        "id": "mcp:snap", "cwd": "/work", "environment_id": "env-sqlite", "provider": "codex",
+        "created_at": "2026-11-17T00:00:00Z", "active_provider_thread_id": "pt-snap",
+        "provider_threads": [{ "provider_thread_id": "pt-snap", "native_id": "native-snap" }],
+    }]);
+    std::fs::write(root.join("threads.json"), snapshot.to_string()).unwrap();
+    let t3 = T3Registry::new(&root);
+    assert_eq!(resolved(t3.resolve("native-snap", true).unwrap()), "mcp:snap", "locate reads the snapshot");
+    assert!(matches!(t3.resolve("native-arch", true).unwrap(), Resolution::Unresolved(_)));
+    assert!(matches!(t3.resolve("01a22012-nested-reviewer", true).unwrap(), Resolution::Unnamed(_)));
+}
+
 #[test]
 fn native_ids_resolve_through_the_active_provider_row_only() {
     let tmp = tempfile::tempdir().unwrap();
