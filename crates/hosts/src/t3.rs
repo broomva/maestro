@@ -424,6 +424,9 @@ pub enum Resolution {
     Thread(Box<T3Thread>),
     /// No thread, more than one, or one archived or deleted: why.
     Unresolved(String),
+    /// A native id that no thread's active provider row carries: a session T3 never ran, such as
+    /// a nested `codex exec` started inside a thread (BRO-4227). Refused as `Unresolved` is.
+    Unnamed(String),
 }
 
 /// T3 thread registry reader (`statev2.sqlite` or JSON snapshot).
@@ -1045,7 +1048,7 @@ impl T3Registry {
             let found = self.native_threads(value)?;
             match found.as_slice() {
                 [] => {
-                    return Ok(Resolution::Unresolved(format!(
+                    return Ok(Resolution::Unnamed(format!(
                         "no T3 thread's active provider row is {}",
                         short_id(value)
                     )));

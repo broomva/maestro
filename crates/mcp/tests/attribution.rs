@@ -1137,6 +1137,21 @@ fn stop_gate_nested_reviewer_with_no_owned_work_files_no_alert() {
     assert_eq!(last_kind(&f, &a), "StopUnverified");
 }
 
+/// BRO-4227 review: an ambiguous stdin id (two provider rows carry it) is not a nested process,
+/// so the stop is alerted even when the inherited thread owns nothing: the owner could be either
+/// duplicate thread, and one of them has work.
+#[test]
+fn stop_gate_ambiguous_stdin_still_alerts() {
+    let f = fx();
+    let dup = f.begin_as((T3V, "mcp:dup-1"));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("native-dup"));
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: attribution_unresolved")), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert_eq!(last_kind(&f, &dup), "Started", "not a known candidate's");
+}
+
 /// The generated driver skill says how each harness writes.
 #[test]
 fn the_driver_skill_says_how_codex_and_gemini_write() {
@@ -1205,6 +1220,9 @@ fn a_direct_sessions_codex_stdin_contradicts_it_only_as_a_t3_thread() {
     let out = stop::gate(&f.paths, &hosts, Ambient::Shared, &claim, &g, &codex_stop("native-c"));
     allowed(&out);
     assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: thread_mismatch")), "{out:?}");
+    // BRO-4227 review: the Direct session's own work is not among the candidates, so a mismatch is
+    // always alerted, never taken for a nested process.
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
 }
 
 /// BRO-3846 review, finding 2: a failure after resolution, a named session's attribution failure,

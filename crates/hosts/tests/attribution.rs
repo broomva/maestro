@@ -188,13 +188,13 @@ conn.commit()
 fn resolved(r: Resolution) -> String {
     match r {
         Resolution::Thread(t) => t.id,
-        Resolution::Unresolved(why) => panic!("unresolved: {why}"),
+        Resolution::Unresolved(why) | Resolution::Unnamed(why) => panic!("unresolved: {why}"),
     }
 }
 
 fn unresolved(r: Resolution) -> String {
     match r {
-        Resolution::Unresolved(why) => why,
+        Resolution::Unresolved(why) | Resolution::Unnamed(why) => why,
         Resolution::Thread(t) => panic!("resolved to {}", t.id),
     }
 }
