@@ -268,6 +268,19 @@ impl FencingStore {
         let conn = self.connect()?;
         conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| FencingError::Storage(e.to_string()))?;
         let res = (|| -> Result<FencedWriteOutcome, FencingError> {
+            let pending_ref: Option<String> = conn
+                .query_row(
+                    "SELECT ref_name FROM fenced_git_refs WHERE resource_id = ?1 AND state = 'pending' LIMIT 1",
+                    params![resource_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| FencingError::Storage(format!("check pending git refs in tx: {e}")))?;
+            if let Some(pending) = pending_ref {
+                return Err(FencingError::Storage(format!(
+                    "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS on ({resource_id}, {pending})"
+                )));
+            }
             struct EpochRow {
                 granted: i64,
                 written: i64,
@@ -366,9 +379,37 @@ impl FencingStore {
         Ok(ResourceLockGuard { _file: file })
     }
 
+    /// Looks up the epoch of an unresolved `'pending'` git-ref CAS matching this exact
+    /// `(resource_id, ref_name, old_oid, new_oid, op_id, payload_digest)` so an unpinned kernel
+    /// retry routes directly into crash recovery instead of granting a new epoch that would hit
+    /// the pending barrier.
+    pub fn pending_git_ref_epoch(
+        &self,
+        resource_id: &str,
+        ref_name: &str,
+        expected_old_oid: &str,
+        new_oid: &str,
+        op_id: &str,
+        payload_digest: &str,
+    ) -> Result<Option<u64>, FencingError> {
+        let conn = self.connect()?;
+        let ep: Option<i64> = conn
+            .query_row(
+                "SELECT epoch FROM fenced_git_refs
+                 WHERE resource_id = ?1 AND ref_name = ?2 AND old_oid = ?3 AND new_oid = ?4
+                   AND op_id = ?5 AND payload_digest = ?6 AND state = 'pending'",
+                params![resource_id, ref_name, expected_old_oid, new_oid, op_id, payload_digest],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| FencingError::Storage(format!("lookup pending git-ref epoch: {e}")))?;
+        Ok(ep.map(|v| v as u64))
+    }
+
     /// Built-in kernel actuator 1: executes a resource-fenced key/value write inside the EXACT
-    /// SAME SQLite `BEGIN IMMEDIATE` transaction that validates `granted_epoch == incoming_epoch
-    /// && written_epoch < incoming_epoch` and commits `written_epoch = incoming_epoch`.
+    /// SAME SQLite `BEGIN IMMEDIATE` transaction that checks for any pending git-ref CAS,
+    /// validates `granted_epoch == incoming_epoch && written_epoch < incoming_epoch`, and commits
+    /// `written_epoch = incoming_epoch`.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_atomic_sqlite_kv(
         &self,
@@ -380,52 +421,49 @@ impl FencingStore {
         key: &str,
         value: &str,
     ) -> Result<FencedWriteOutcome, FencingError> {
-        {
-            let conn = self.connect()?;
-            let pending_ref: Option<String> = conn
-                .query_row(
-                    "SELECT ref_name FROM fenced_git_refs WHERE resource_id = ?1 AND state = 'pending' LIMIT 1",
-                    params![resource_id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(|e| FencingError::Storage(format!("check pending git refs: {e}")))?;
-            if let Some(pending) = pending_ref {
-                return Err(FencingError::Storage(format!(
-                    "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS on ({resource_id}, {pending})"
-                )));
-            }
-        }
         let res_owned = resource_id.to_string();
         let key_owned = key.to_string();
         let val_owned = value.to_string();
         let op_owned = op_id.to_string();
-        self.commit_fenced_write_with_tx(resource_id, incoming_epoch, op_id, payload_digest, result_json, move |conn| {
-            let pending_ref: Option<String> = conn
-                .query_row(
-                    "SELECT ref_name FROM fenced_git_refs WHERE resource_id = ?1 AND state = 'pending' LIMIT 1",
-                    params![res_owned],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(|e| FencingError::Storage(format!("check pending git refs: {e}")))?;
-            if let Some(pending) = pending_ref {
-                return Err(FencingError::Storage(format!(
-                    "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS on ({res_owned}, {pending})"
-                )));
-            }
-            conn.execute(
-                "INSERT INTO fenced_kv (resource_id, key, value, epoch, op_id)
+        let out = self.commit_fenced_write_with_tx(
+            resource_id,
+            incoming_epoch,
+            op_id,
+            payload_digest,
+            result_json,
+            move |conn| {
+                conn.execute(
+                    "INSERT INTO fenced_kv (resource_id, key, value, epoch, op_id)
                      VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(resource_id, key) DO UPDATE SET
                        value = excluded.value,
                        epoch = excluded.epoch,
                        op_id = excluded.op_id",
-                params![res_owned, key_owned, val_owned, incoming_epoch as i64, op_owned],
-            )
-            .map_err(|e| FencingError::Storage(format!("fenced_kv write failed: {e}")))?;
-            Ok(())
-        })
+                    params![res_owned, key_owned, val_owned, incoming_epoch as i64, op_owned],
+                )
+                .map_err(|e| FencingError::Storage(format!("fenced_kv write failed: {e}")))?;
+                Ok(())
+            },
+        )?;
+        if matches!(out, FencedWriteOutcome::IdempotentReplay { .. }) {
+            let conn = self.connect()?;
+            let committed: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM fenced_kv WHERE resource_id = ?1 AND key = ?2 AND epoch = ?3 AND op_id = ?4",
+                    params![resource_id, key, incoming_epoch as i64, op_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| FencingError::Storage(format!("verify committed fenced_kv: {e}")))?;
+            if committed.is_none() {
+                return Err(FencingError::EpochAlreadyConsumed {
+                    resource_id: resource_id.to_string(),
+                    incoming: incoming_epoch,
+                    written: incoming_epoch,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Reads the current committed `(value, epoch, op_id)` from `fenced_kv`.

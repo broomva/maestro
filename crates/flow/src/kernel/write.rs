@@ -1636,23 +1636,36 @@ fn run_fenced_effect(
     let rlock = fence_store
         .acquire_resource_lock(&fence_resource)
         .map_err(|e| KernelError::Encode(format!("fencing lock failed: {e}")))?;
-    let epoch = match pinned_epoch {
-        Some(ep) => {
-            if let Err(e) = fence_store.verify_epoch_current(&fence_resource, ep) {
-                drop(rlock);
-                return Ok((
-                    Ran::Failed { code: "stale_fencing_epoch", detail: e.to_string(), stderr: Vec::new() },
-                    None,
-                ));
-            }
-            ep
-        }
-        None => fence_store
-            .grant_epoch_locked(&rlock, &fence_resource)
-            .map_err(|e| KernelError::Encode(format!("fencing grant failed: {e}")))?,
-    };
     let payload_digest = digest(outputs);
     let result_json = serde_json::to_string(outputs).unwrap_or_else(|_| "null".to_string());
+    // Pass pinned epochs straight into the actuator (which atomically handles crash-pending
+    // recovery, idempotent replay, StaleEpoch, and EpochAlreadyConsumed under `rlock`). For
+    // unpinned git-ref retries after a crash, reuse the matching pending epoch if one exists so
+    // exact retries reconcile instead of granting a newer epoch that hits the pending guard.
+    let epoch = match pinned_epoch {
+        Some(ep) => ep,
+        None => {
+            let pending_ep = match &actuator {
+                FencedActuator::GitRefCas { ref_name, expected_old_oid, new_oid } => fence_store
+                    .pending_git_ref_epoch(
+                        &fence_resource,
+                        ref_name,
+                        expected_old_oid,
+                        new_oid,
+                        &op_id,
+                        &payload_digest,
+                    )
+                    .map_err(|e| KernelError::Encode(format!("fencing pending lookup failed: {e}")))?,
+                FencedActuator::SqliteKvPut { .. } => None,
+            };
+            match pending_ep {
+                Some(ep) => ep,
+                None => fence_store
+                    .grant_epoch_locked(&rlock, &fence_resource)
+                    .map_err(|e| KernelError::Encode(format!("fencing grant failed: {e}")))?,
+            }
+        }
+    };
     let outcome = match actuator {
         FencedActuator::SqliteKvPut { key, value } => fence_store.execute_atomic_sqlite_kv(
             &fence_resource,

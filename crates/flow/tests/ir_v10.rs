@@ -3165,4 +3165,106 @@ nodes:
             "exact retry of an aborted CAS MUST fail closed (EpochAlreadyConsumed), NEVER IdempotentReplay: {retry_fail:?}"
         );
     }
+
+    // 6. End-to-end crash-pending recovery THROUGH kernel::complete() (pinned AND unpinned) +
+    //    KV replay guard against matching-op_id pending git-ref CAS!
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        init_git_repo(&repo_dir);
+        let root = dir.path().join("flows");
+        let host = HostId::new("test-host").unwrap();
+        let mut ledger = Ledger::open(&root, &host, Options::default()).unwrap();
+        let sess = verified_owner("owner-e2e-wal");
+
+        let head_oid = String::from_utf8(
+            Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&repo_dir).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let zero_oid = "0".repeat(head_oid.len());
+        let flow_yaml = format!(
+            r#"
+flow: fenced_git_e2e_recovery
+version: 1
+params: [repo, fencing_resource, fencing_epoch]
+workdir: "{{{{params.repo}}}}"
+nodes:
+  ship:
+    class: effect
+    run: ["maestro:fenced-git-ref-cas", "refs/heads/e2e-wal-ship", "{zero_oid}", "{head_oid}"]
+    reconcile: [sh, -c, "true"]
+"#
+        );
+        let compiled = compile(&flow_yaml).unwrap();
+        let db_path = root.join("fencing_epochs.sqlite");
+        let fstore = FencingStore::open(&db_path).unwrap();
+        let ep1 = fstore.grant_epoch("git:e2e-wal").unwrap();
+        assert_eq!(ep1, 1);
+
+        let s = start(
+            &mut ledger,
+            &sess,
+            &compiled,
+            json!({
+                "repo": repo_dir.to_str().unwrap(),
+                "fencing_resource": "git:e2e-wal",
+                "fencing_epoch": 1
+            }),
+        )
+        .unwrap();
+        let c = claim(&mut ledger, &sess, &s.instance, "ship").unwrap();
+        let outputs = json!({"ok": true});
+        let op_id = format!("{}:ship:1", s.instance.as_str());
+        let payload_digest = digest(&outputs);
+
+        // Simulate a crash right after git update-ref succeeded while fenced_git_refs is still
+        // 'pending' and written_epoch = 1 (before kernel::complete() wrote Completed to the log)!
+        {
+            let rlock = fstore.acquire_resource_lock("git:e2e-wal").unwrap();
+            fstore
+                .execute_atomic_git_ref_cas(
+                    &rlock,
+                    &repo_dir,
+                    "git:e2e-wal",
+                    1,
+                    &op_id,
+                    &payload_digest,
+                    &serde_json::to_string(&outputs).unwrap(),
+                    "refs/heads/e2e-wal-ship",
+                    &zero_oid,
+                    &head_oid,
+                )
+                .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("UPDATE fenced_git_refs SET state = 'pending' WHERE resource_id = 'git:e2e-wal'", []).unwrap();
+        drop(conn);
+
+        // Public execute_atomic_sqlite_kv with the SAME (epoch=1, op_id, payload_digest) MUST be
+        // rejected transactionally by commit_fenced_write_with_tx (never IdempotentReplay)!
+        let kv_blocked =
+            fstore.execute_atomic_sqlite_kv("git:e2e-wal", 1, &op_id, &payload_digest, "{}", "k", "v").unwrap_err();
+        assert!(
+            kv_blocked.to_string().contains("pending_git_ref_cas_recovery_required"),
+            "public KV call with matching op_id/digest MUST fail closed inside tx while git-ref is pending: {kv_blocked}"
+        );
+
+        // Exact retry through kernel::complete() MUST reconcile the pending row to 'committed' and
+        // return Completion::Completed (NOT stale_fencing_epoch)!
+        let comp = complete(&mut ledger, &sess, &c.token, outputs, &Limits::default()).unwrap();
+        assert!(
+            matches!(comp, Completion::Completed { .. }),
+            "pinned kernel::complete() retry MUST recover crash-pending git-ref CAS: {comp:?}"
+        );
+
+        // Confirm state is now 'committed' and a subsequent epoch=2 KV write succeeds cleanly!
+        let ep2 = fstore.grant_epoch("git:e2e-wal").unwrap();
+        assert_eq!(ep2, 2);
+        let kv_ok = fstore
+            .execute_atomic_sqlite_kv("git:e2e-wal", ep2, "op-after", "sha256:after", "{}", "k", "after")
+            .unwrap();
+        assert_eq!(kv_ok, FencedWriteOutcome::Committed { epoch: 2 });
+    }
 }
