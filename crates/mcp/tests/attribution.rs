@@ -1166,6 +1166,41 @@ fn stop_gate_archived_or_deleted_stdin_still_alerts() {
     }
 }
 
+/// BRO-4227 review round 3: the nested shape needs the inherited `T3CODE_THREAD_ID`. A resolved
+/// `CODEX_THREAD_ID` beside an unregistered stdin id is not that shape, so it is alerted.
+#[test]
+fn stop_gate_codex_thread_var_alone_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, B));
+    let hosts = f.hosts(ATTRIB, &[(CXV, "native-a")], Reg::Good, false);
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+/// BRO-4227 review round 3: a candidate whose T3 environment is unknown may not match an owner
+/// stored with one, so "owns nothing" is not proven and the stop is alerted.
+#[test]
+fn stop_gate_unknown_environment_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, B));
+    let dir = f.root.join("t3-no-env");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut rows: Value = serde_json::from_str(&std::fs::read_to_string(&f.t3).unwrap()).unwrap();
+    for t in rows.as_array_mut().unwrap() {
+        t.as_object_mut().unwrap().remove("environment_id");
+    }
+    std::fs::write(dir.join("threads.json"), rows.to_string()).unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(dir.join("threads.json"))), None)
+        .with_identity_mode(ATTRIB)
+        .with_thread_vars(ThreadVars::from_pairs([(T3V, A.to_string())]))
+        .with_process_reader(Arc::new(FakeProcs));
+    assert!(hosts.t3_environment().is_none(), "the fixture must have no environment");
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
 /// The generated driver skill says how each harness writes.
 #[test]
 fn the_driver_skill_says_how_codex_and_gemini_write() {

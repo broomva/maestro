@@ -215,6 +215,20 @@ fn only_a_native_id_no_row_carries_is_unnamed() {
     }
 }
 
+/// BRO-4227 review round 3: a provider row whose nativeThreadRef does not read, retired or not,
+/// means the registry cannot tell whether an id is carried, so it is never `Unnamed`.
+#[test]
+fn a_malformed_provider_row_never_makes_an_id_unnamed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sqlite(tmp.path());
+    let db = root.join("userdata/statev2.sqlite");
+    let script = "import sqlite3, sys\nc = sqlite3.connect(sys.argv[1])\nc.execute(\"INSERT INTO orchestration_v2_projection_provider_threads (provider_thread_id, thread_id, payload_json) VALUES ('pt-bad', 'mcp:switched', '{\\\"nativeThreadRef\\\": \\\"oops\\\"}')\")\nc.commit()\n";
+    let out = std::process::Command::new("python3").arg("-I").arg("-c").arg(script).arg(&db).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let t3 = T3Registry::new(root);
+    assert!(matches!(t3.resolve("01a22012-nested-reviewer", true).unwrap(), Resolution::Unresolved(_)));
+}
+
 #[test]
 fn native_ids_resolve_through_the_active_provider_row_only() {
     let tmp = tempfile::tempdir().unwrap();

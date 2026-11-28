@@ -61,7 +61,7 @@ use maestro_flow::kernel::events::{StopUnverified, Unblockable, digest};
 use maestro_flow::kernel::stop::{self as kstop, Assessment, Recorded, Refusals};
 use maestro_flow::kernel::{self, KernelError};
 use maestro_flow::{Ledger, Options, Reader};
-use maestro_hosts::{Attributed, IdentityMode, STDIN_SESSION_ID, ThreadVars, VarOutcome};
+use maestro_hosts::{Attributed, IdentityMode, STDIN_SESSION_ID, T3CODE_THREAD_ID, ThreadVars, VarOutcome};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -207,16 +207,16 @@ fn nested_in_thread(each: &[(maestro_hosts::ThreadVar, VarOutcome)]) -> bool {
     let unnamed_stdin = |(v, o): &&(maestro_hosts::ThreadVar, VarOutcome)| {
         v.name == STDIN_SESSION_ID && v.native && matches!(o, VarOutcome::Unnamed(_))
     };
-    let threads: Vec<&String> = each
-        .iter()
-        .filter_map(|(_, o)| match o {
-            VarOutcome::Thread { id, .. } => Some(id),
-            _ => None,
-        })
-        .collect();
+    // The inherited `T3CODE_THREAD_ID` must be among the variables and resolve, with a known
+    // environment, to the one thread every other variable names.
+    let Some((id, _)) = each.iter().find_map(|(v, o)| match o {
+        VarOutcome::Thread { id, environment: Some(env) } if v.name == T3CODE_THREAD_ID && !v.native => Some((id, env)),
+        _ => None,
+    }) else {
+        return false;
+    };
     each.iter().filter(unnamed_stdin).count() == 1
-        && threads.len() + 1 == each.len()
-        && threads.first().is_some_and(|first| threads.iter().all(|t| t == first))
+        && each.iter().all(|e| unnamed_stdin(&e) || matches!(&e.1, VarOutcome::Thread { id: t, .. } if t == id))
 }
 
 /// Use the same fail-open code whether the reader or the writer encounters a busy lock.
@@ -394,7 +394,11 @@ impl Run<'_> {
                 return self.note(format!("{unnamed} {why}"));
             }
             Attributed::Refused(refusal) => {
-                self.nested = nested_in_thread(&each) && candidates.len() == 1;
+                // One candidate, canonical with a known environment: an owner stored as
+                // `t3:env/A` is matched only by a candidate that names env.
+                self.nested = nested_in_thread(&each)
+                    && candidates.len() == 1
+                    && candidates[0].environment.as_deref().is_some_and(|e| !e.is_empty() && e != "-");
                 return self.unbound(&candidates, &refusal);
             }
             Attributed::Resolved { attribution, environment } => (attribution, environment),

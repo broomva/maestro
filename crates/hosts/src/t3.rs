@@ -424,8 +424,9 @@ pub enum Resolution {
     Thread(Box<T3Thread>),
     /// No thread, more than one, or one archived or deleted: why.
     Unresolved(String),
-    /// A native id that no thread's active provider row carries: a session T3 never ran, such as
-    /// a nested `codex exec` started inside a thread (BRO-4227). Refused as `Unresolved` is.
+    /// A native id that no provider row of any thread carries (live or not, active or retired), all
+    /// rows read: a session T3 never ran, such as a nested `codex exec` started inside a thread
+    /// (BRO-4227). Refused as `Unresolved` is.
     Unnamed(String),
 }
 
@@ -607,13 +608,23 @@ def main():
         if "orchestration_v2_projection_provider_threads" not in tables:
             sys.stderr.write("sqlite_error: missing table orchestration_v2_projection_provider_threads\n")
             sys.exit(2)
+        # Validated as the `native` mode validates an active row: a malformed nativeThreadRef or
+        # a non-string nativeId is "cannot tell", never "not found".
         found = False
-        for r in conn.execute("SELECT payload_json FROM orchestration_v2_projection_provider_threads"):
-            payload = payload_of(r["payload_json"], "a provider row")
+        for r in conn.execute("SELECT thread_id, payload_json FROM orchestration_v2_projection_provider_threads"):
+            payload = payload_of(r["payload_json"], f"a provider row of thread {r['thread_id']}")
             ref = payload.get("nativeThreadRef")
-            if isinstance(ref, dict) and ref.get("nativeId") == target_id:
+            if ref is None:
+                continue
+            if not isinstance(ref, dict):
+                raise PayloadError(f"a provider row of thread {r['thread_id']} has a malformed nativeThreadRef")
+            native = ref.get("nativeId")
+            if native is None:
+                continue
+            if not isinstance(native, str):
+                raise PayloadError(f"a provider row of thread {r['thread_id']} has a malformed nativeThreadRef")
+            if native == target_id:
                 found = True
-                break
         print(json.dumps(found))
         sys.exit(0)
     if mode == "native":

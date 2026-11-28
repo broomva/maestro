@@ -110,7 +110,7 @@ pub enum VarOutcome {
     Thread { id: String, environment: Option<String> },
     /// No thread, several, or an archived or deleted one.
     Unresolved(String),
-    /// A native id that no thread's active provider row carries (see `t3::Resolution::Unnamed`);
+    /// A native id that no provider row of any thread carries (see `t3::Resolution::Unnamed`);
     /// combined exactly as `Unresolved` is.
     Unnamed(String),
     /// The registry did not read.
