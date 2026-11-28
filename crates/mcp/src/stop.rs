@@ -426,6 +426,8 @@ impl Run<'_> {
         let host = self.hosts.t3_environment();
         let candidates = candidates.to_vec();
         let (mut made, mut failed) = (Vec::new(), Vec::new());
+        // Whether every candidate's instances were read and none is unfinished (BRO-4227).
+        let mut owns_nothing = false;
         if !candidates.is_empty()
             && let Ok(root) = crate::flow::flows_root(&self.paths.workspace)
         {
@@ -435,6 +437,7 @@ impl Run<'_> {
                 .and_then(|guard| kstop::owned_by_threads(&guard, &candidates, host.as_deref()));
             match owned {
                 Ok((owned, unread)) => {
+                    owns_nothing = owned.is_empty() && unread.is_empty();
                     for u in unread {
                         failed.push(format!("{} ({})", u.instance, u.code));
                     }
@@ -464,9 +467,23 @@ impl Run<'_> {
                         }
                     }
                 }
-                Err(missing) if missing.code() == "no_ledger" => {}
+                Err(missing) if missing.code() == "no_ledger" => owns_nothing = true,
                 Err(e) => failed.push(format!("the flow ledger ({}: {e})", busy_code(e.code()))),
             }
+        }
+        // A thread variable that names no thread, or two that disagree, beside known candidate
+        // threads that own no unfinished instance: no flow work could be left by this stop, so no
+        // owner ask (BRO-4227). The usual case is a nested `codex exec` (a P20 reviewer) started
+        // inside a T3 thread: it inherits the thread's `T3CODE_THREAD_ID`, and its stdin
+        // `session_id` is its own Codex session, which no T3 thread's provider row names. A registry
+        // that did not read, or candidates not all read, still alert.
+        let attribution_only =
+            matches!(refusal.reason, RefusalReason::AttributionUnresolved | RefusalReason::ThreadMismatch);
+        if attribution_only && owns_nothing && failed.is_empty() {
+            let named = candidates.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            return self.note(format!(
+                "candidate thread(s) {named} own no unfinished flow instance, so this stop could leave no flow work; no alert is filed."
+            ));
         }
         let session = candidates.first().cloned().unwrap_or_else(|| SessionRef {
             surface: Surface::T3,

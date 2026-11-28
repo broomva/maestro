@@ -1113,6 +1113,30 @@ fn stop_gate_failed_append_is_named_in_the_alert() {
     assert!(f.ledger().contains(&format!("StopUnverified could not be recorded on: {a}")), "{}", f.ledger());
 }
 
+/// BRO-4227: a nested `codex exec` (a P20 reviewer) inside T3 thread A inherits A's
+/// `T3CODE_THREAD_ID`, and its stdin `session_id` is its own Codex session, which no thread names.
+/// When A owns no unfinished instance, no flow work can be left: the stop goes through with a
+/// note and no owner ask. Once A owns one, the same stop records `StopUnverified` and alerts.
+#[test]
+fn stop_gate_nested_reviewer_with_no_owned_work_files_no_alert() {
+    let f = fx();
+    let b = f.begin_as((T3V, B));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: attribution_unresolved")), "{out:?}");
+    assert!(out.notes.iter().any(|n| n.contains("no alert is filed")), "{out:?}");
+    assert!(out.alerts.is_empty() && out.recorded.is_empty(), "{out:?}");
+    assert_eq!(last_kind(&f, &b), "Started", "another thread's instance is untouched");
+    assert!(!f.ledger().contains("stop-gate-"), "{}", f.ledger());
+    // A now owns an unfinished instance: the same stop is recorded and alerted, as before.
+    let a = f.begin_as((T3V, A));
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert_eq!(last_kind(&f, &a), "StopUnverified");
+}
+
 /// The generated driver skill says how each harness writes.
 #[test]
 fn the_driver_skill_says_how_codex_and_gemini_write() {
