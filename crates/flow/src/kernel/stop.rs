@@ -284,6 +284,14 @@ pub(crate) fn assess(
             }
         }
     }
+    if !retired && super::subflow::has_unsettled_subflows(log) && work.is_empty() {
+        work.push(Work::Node {
+            node: "subflow_quiescence".to_string(),
+            class: "map".to_string(),
+            iteration: Iteration::new(),
+            held: true,
+        });
+    }
     if retired {
         work.clear();
         waiting.clear();

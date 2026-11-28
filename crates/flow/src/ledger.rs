@@ -300,6 +300,13 @@ pub struct WriteGuard<'a> {
     root: Dir,
 }
 
+impl WriteGuard<'_> {
+    /// Returns the ledger's root path on disk.
+    pub fn root_path(&self) -> &std::path::Path {
+        &self.ledger.layout.root
+    }
+}
+
 impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
         let _ = self.ledger.lock_file.unlock();

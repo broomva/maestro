@@ -1,0 +1,1880 @@
+//! IR v10 bounded dynamic `map` & version-pinned `subflow` orchestration kernel.
+//!
+//! Enforces every cross-instance invariant of the two-timescale evolvable flow-kernel spec:
+//! - Deterministic child instance IDs: `fi_sub_<sha256(parent|node|iter|epoch|item_key|retry)[..24]>`
+//! - Strict canonical lock order (`lock(parent) -> lock(child)` via the ledger's single `WriteGuard`)
+//! - Crash Points A, B, and C idempotent recovery (zero duplicate child spawns, zero orphans)
+//! - Monotonic `owner_epoch` adoption fencing (`former_owners_claim`)
+//! - `Superseded` write fencing (`subflow_superseded`) with the narrow `reconcile_only` exception
+//!   for open `EffectStarted` entries (`EffectReconciled`)
+//! - True quiescence (`SubflowQuiesced`): refuses mere lease expiry; requires confirmed worker
+//!   termination receipt AND zero unreconciled `EffectStarted` entries
+//! - Atomic claim-time `disjoint_writes` + `max_concurrency` check retaining reservations on BOTH
+//!   `SubflowStarted` AND unquiesced `Superseded` siblings until `SubflowQuiesced`
+//! - Runtime `reserve_providers` / `provider_pool` liveness enforcer (`provider_pool_exhausted`)
+//! - Recursive child performer union attestation for downstream `different_from(map_node)`
+
+use super::events::{
+    Adopted, Answered, Claimed, Completed, EffectReconciled, EffectStarted, KernelEvent, MapExpanded, MapItemSpec,
+    Owner, ParentRef, Performer, Retired, Started, SubflowCompleted, SubflowFailed, SubflowQuiesced, SubflowStarted,
+    Superseded, digest, performers_receipt_digest,
+};
+use super::exec::{self, Feed, Limits, Ran, Search};
+use super::ir::{Class, Iteration, OnItemFailure, ReadyWhen};
+use super::replay::{Reason, State, next_of, pinned};
+use super::write::{PROVIDERS, provider_of};
+use super::writeset::{validate_write_set, verify_worktree_writes_auto, write_sets_intersect};
+use crate::clock;
+use crate::ids::InstanceId;
+use crate::ledger::WriteGuard;
+use crate::log::Log;
+use serde_json::{Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// Stable refusal codes for IR v10 map & subflow operations.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SubflowError {
+    #[error("not a map or subflow node: {0}")]
+    WrongClass(String),
+    #[error("caller is not the current parent owner")]
+    NotOwner,
+    #[error("former_owners_claim: stale owner_epoch {claim_epoch} != current {current_epoch}")]
+    FormerOwnersClaim { claim_epoch: u64, current_epoch: u64 },
+    #[error("subflow_superseded: child {child} is superseded (or parent retired)")]
+    SubflowSuperseded { child: String },
+    #[error("write_set_conflict: item {item_key} overlaps active or unquiesced sibling {sibling}")]
+    WriteSetConflict { item_key: String, sibling: String },
+    #[error("write_set_violation: item {item_key} wrote outside declared write_set: {violations:?}")]
+    WriteSetViolation { item_key: String, violations: Vec<String> },
+    #[error("invalid_child: {detail}")]
+    InvalidChild { detail: String },
+    #[error("child_not_terminal: child {child} is not terminal ({detail})")]
+    ChildNotTerminal { child: String, detail: String },
+    #[error("concurrency_limit: {in_flight} in-flight >= max {limit}")]
+    ConcurrencyLimit { in_flight: usize, limit: usize },
+    #[error("provider_pool_exhausted: {detail}")]
+    ProviderPoolExhausted { detail: String },
+    #[error("quiescence_refused: {detail}")]
+    QuiescenceRefused { detail: String },
+    #[error("invalid_map_expansion: {detail}")]
+    InvalidExpansion { detail: String },
+    #[error("kernel storage error: {0}")]
+    Storage(String),
+}
+
+impl SubflowError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            SubflowError::WrongClass(_) => "wrong_class",
+            SubflowError::NotOwner => "not_owner",
+            SubflowError::FormerOwnersClaim { .. } => "former_owners_claim",
+            SubflowError::SubflowSuperseded { .. } => "subflow_superseded",
+            SubflowError::WriteSetConflict { .. } => "write_set_conflict",
+            SubflowError::WriteSetViolation { .. } => "write_set_violation",
+            SubflowError::InvalidChild { .. } => "invalid_child",
+            SubflowError::ChildNotTerminal { .. } => "child_not_terminal",
+            SubflowError::ConcurrencyLimit { .. } => "concurrency_limit",
+            SubflowError::ProviderPoolExhausted { .. } => "provider_pool_exhausted",
+            SubflowError::QuiescenceRefused { .. } => "quiescence_refused",
+            SubflowError::InvalidExpansion { .. } => "invalid_map_expansion",
+            SubflowError::Storage(_) => "storage_error",
+        }
+    }
+}
+
+/// Returns `(required, write_set)` for a child instance spawned by a `map` node.
+/// `required` is true whenever the parent `map` declares `ready_when: disjoint_writes` OR the
+/// item itself declares a non-empty `write_set`.
+pub fn child_requires_write_set(parent_log: &Log, parent_ref: &ParentRef) -> (bool, Vec<String>) {
+    let disjoint = pinned(parent_log)
+        .ok()
+        .and_then(|s| s.ir.nodes.get(&parent_ref.node).cloned())
+        .is_some_and(|n| matches!(n.class, Class::Map { ready_when: Some(ReadyWhen::DisjointWrites), .. }));
+    let st = fold_map_state(parent_log, &parent_ref.node, &parent_ref.iteration);
+    let ws = st.items.get(&parent_ref.item_key).map(|i| i.write_set.clone()).unwrap_or_default();
+    (disjoint || !ws.is_empty(), ws)
+}
+
+/// Returns the parent-declared `write_set` for a child instance spawned by a `map` node, if any.
+pub fn child_declared_write_set(parent_log: &Log, parent_ref: &ParentRef) -> Option<Vec<String>> {
+    let st = fold_map_state(parent_log, &parent_ref.node, &parent_ref.iteration);
+    let item = st.items.get(&parent_ref.item_key)?;
+    if item.write_set.is_empty() { None } else { Some(item.write_set.clone()) }
+}
+
+/// Returns the `owner_epoch` recorded when `parent_log` spawned `child_instance`.
+pub fn child_spawn_owner_epoch(parent_log: &Log, child_instance: &str) -> Option<u64> {
+    parent_log
+        .events
+        .iter()
+        .rev()
+        .filter(|e| e.kind == SubflowStarted::KIND)
+        .filter_map(|e| serde_json::from_value::<SubflowStarted>(e.body.clone()).ok())
+        .find(|s| s.child_instance == child_instance)
+        .map(|s| s.owner_epoch)
+}
+
+/// Derives the deterministic child `InstanceId` for Crash Points A/B/C idempotency:
+/// `fi_sub_<sha256(parent|node|iteration|map_epoch|item_key|retry_attempt)[0..24]>`.
+pub fn child_instance_id(
+    parent: &InstanceId,
+    node: &str,
+    iteration: &Iteration,
+    map_epoch: u64,
+    item_key: &str,
+    retry_attempt: u32,
+) -> Result<InstanceId, SubflowError> {
+    let payload = serde_json::json!({
+        "parent": parent.as_str(),
+        "node": node,
+        "iteration": iteration,
+        "map_epoch": map_epoch,
+        "item_key": item_key,
+        "retry_attempt": retry_attempt,
+    });
+    let hash = digest(&payload);
+    let hex = hash.strip_prefix("sha256:").unwrap_or(&hash);
+    let short = &hex[..hex.len().min(24)];
+    InstanceId::new(format!("fi_sub_{short}")).map_err(|e| SubflowError::Storage(e.to_string()))
+}
+
+/// Current monotonic `owner_epoch` of a parent instance: `0` at `Started`, incremented by 1 per
+/// `Adopted` event.
+pub fn parent_owner_epoch(log: &Log) -> u64 {
+    log.events.iter().filter(|e| e.kind == Adopted::KIND).count() as u64
+}
+
+/// Current effective owner of a parent instance (latest `Adopted.to`, else `Started.owner`).
+pub fn parent_current_owner(log: &Log) -> Option<Owner> {
+    let mut owner =
+        log.events.first().and_then(|e| serde_json::from_value::<Started>(e.body.clone()).ok()).and_then(|s| s.owner);
+    for e in &log.events {
+        if e.kind == Adopted::KIND
+            && let Ok(a) = serde_json::from_value::<Adopted>(e.body.clone())
+        {
+            owner = Some(a.to);
+        }
+    }
+    owner
+}
+
+fn parent_is_retired(log: &Log) -> bool {
+    log.events.iter().any(|e| e.kind == Retired::KIND)
+}
+
+/// Summary of a map node's runtime item state replayed purely from parent log events.
+#[derive(Debug, Clone, Default)]
+pub struct MapRuntimeState {
+    pub latest_epoch: Option<u64>,
+    pub items: BTreeMap<String, MapItemSpec>,
+    /// Active `SubflowStarted` children not yet completed, failed, or superseded.
+    pub in_flight: BTreeMap<String, SubflowStarted>,
+    /// Latest completed receipt per `item_key`.
+    pub completed: BTreeMap<String, SubflowCompleted>,
+    /// Failure attempts per `item_key`.
+    pub failed_attempts: BTreeMap<String, Vec<SubflowFailed>>,
+    /// Failed children awaiting `SubflowQuiesced` (still holding write_set & retry reservations!).
+    pub failed_unquiesced: BTreeMap<String, SubflowFailed>,
+    /// Superseded children awaiting `SubflowQuiesced` (still holding write_set reservations!).
+    pub superseded_unquiesced: BTreeMap<String, Superseded>,
+    /// All quiesced child instance IDs.
+    pub quiesced_children: BTreeSet<String>,
+    /// Every child `SubflowStarted` record by `child_instance` ID.
+    pub started_by_child: BTreeMap<String, SubflowStarted>,
+    /// Providers already used by started or completed items in the current epoch.
+    pub used_providers: BTreeSet<String>,
+}
+
+/// Replays the parent log (read-only) for one `(node, iteration)` map node.
+pub fn fold_map_state(log: &Log, node: &str, iteration: &Iteration) -> MapRuntimeState {
+    let mut st = MapRuntimeState::default();
+    for ev in &log.events {
+        match ev.kind.as_str() {
+            MapExpanded::KIND => {
+                if let Ok(m) = serde_json::from_value::<MapExpanded>(ev.body.clone())
+                    && m.node == node
+                    && &m.iteration == iteration
+                {
+                    st.latest_epoch = Some(m.map_epoch);
+                    st.items.clear();
+                    for item in m.items {
+                        st.items.insert(item.key.clone(), item);
+                    }
+                }
+            }
+            SubflowStarted::KIND => {
+                if let Ok(s) = serde_json::from_value::<SubflowStarted>(ev.body.clone())
+                    && s.node == node
+                    && &s.iteration == iteration
+                {
+                    if let Some(p) = s.performer.as_ref().and_then(|p| provider_of(&p.harness)) {
+                        st.used_providers.insert(p.to_string());
+                    }
+                    st.started_by_child.insert(s.child_instance.clone(), s.clone());
+                    st.in_flight.insert(s.item_key.clone(), s);
+                }
+            }
+            SubflowCompleted::KIND => {
+                if let Ok(c) = serde_json::from_value::<SubflowCompleted>(ev.body.clone())
+                    && c.node == node
+                    && &c.iteration == iteration
+                {
+                    for perf in &c.performers {
+                        if let Some(p) = provider_of(&perf.harness) {
+                            st.used_providers.insert(p.to_string());
+                        }
+                    }
+                    if st.in_flight.get(&c.item_key).is_some_and(|s| s.child_instance == c.child_instance) {
+                        st.in_flight.remove(&c.item_key);
+                    }
+                    st.completed.insert(c.item_key.clone(), c);
+                }
+            }
+            SubflowFailed::KIND => {
+                if let Ok(f) = serde_json::from_value::<SubflowFailed>(ev.body.clone())
+                    && f.node == node
+                    && &f.iteration == iteration
+                {
+                    for perf in &f.performers {
+                        if let Some(p) = provider_of(&perf.harness) {
+                            st.used_providers.insert(p.to_string());
+                        }
+                    }
+                    if st.in_flight.get(&f.item_key).is_some_and(|s| s.child_instance == f.child_instance) {
+                        st.in_flight.remove(&f.item_key);
+                    }
+                    if !st.quiesced_children.contains(&f.child_instance) {
+                        st.failed_unquiesced.insert(f.child_instance.clone(), f.clone());
+                    }
+                    st.failed_attempts.entry(f.item_key.clone()).or_default().push(f);
+                }
+            }
+            Superseded::KIND => {
+                if let Ok(sup) = serde_json::from_value::<Superseded>(ev.body.clone())
+                    && sup.node == node
+                    && &sup.iteration == iteration
+                {
+                    if st.in_flight.get(&sup.item_key).is_some_and(|s| s.child_instance == sup.child_instance) {
+                        st.in_flight.remove(&sup.item_key);
+                    }
+                    if !st.quiesced_children.contains(&sup.child_instance) {
+                        st.superseded_unquiesced.insert(sup.child_instance.clone(), sup);
+                    }
+                }
+            }
+            SubflowQuiesced::KIND => {
+                if let Ok(q) = serde_json::from_value::<SubflowQuiesced>(ev.body.clone())
+                    && q.node == node
+                    && &q.iteration == iteration
+                {
+                    st.superseded_unquiesced.remove(&q.child_instance);
+                    st.failed_unquiesced.remove(&q.child_instance);
+                    st.quiesced_children.insert(q.child_instance);
+                }
+            }
+            _ => {}
+        }
+    }
+    st
+}
+
+/// Returns true if the parent log has ANY `Superseded` or `SubflowFailed` child that has not yet
+/// logged `SubflowQuiesced` or ANY expanded `map` node with unfinished items (used by `stop::assess`).
+pub fn has_unsettled_subflows(log: &Log) -> bool {
+    let mut unquiesced: BTreeSet<String> = BTreeSet::new();
+    let mut expanded_nodes: BTreeMap<(String, Iteration), usize> = BTreeMap::new();
+    let mut completed_nodes: BTreeSet<(String, Iteration)> = BTreeSet::new();
+    for ev in &log.events {
+        match ev.kind.as_str() {
+            Superseded::KIND => {
+                if let Ok(s) = serde_json::from_value::<Superseded>(ev.body.clone()) {
+                    unquiesced.insert(s.child_instance);
+                }
+            }
+            SubflowFailed::KIND => {
+                if let Ok(f) = serde_json::from_value::<SubflowFailed>(ev.body.clone()) {
+                    unquiesced.insert(f.child_instance);
+                }
+            }
+            SubflowQuiesced::KIND => {
+                if let Ok(q) = serde_json::from_value::<SubflowQuiesced>(ev.body.clone()) {
+                    unquiesced.remove(&q.child_instance);
+                }
+            }
+            MapExpanded::KIND => {
+                if let Ok(m) = serde_json::from_value::<MapExpanded>(ev.body.clone()) {
+                    expanded_nodes.insert((m.node, m.iteration), m.items.len());
+                }
+            }
+            Completed::KIND => {
+                if let Ok(c) = serde_json::from_value::<Completed>(ev.body.clone()) {
+                    completed_nodes.insert((c.node, c.iteration));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !unquiesced.is_empty() {
+        return true;
+    }
+    expanded_nodes.keys().any(|k| !completed_nodes.contains(k))
+}
+
+/// Checks whether a child instance currently has an open `EffectStarted` without a matching
+/// `Completed` or `EffectReconciled`.
+pub fn child_has_open_effect(child_log: &Log) -> bool {
+    let mut open: BTreeSet<(String, Iteration, u32)> = BTreeSet::new();
+    for ev in &child_log.events {
+        match ev.kind.as_str() {
+            EffectStarted::KIND => {
+                if let Ok(s) = serde_json::from_value::<EffectStarted>(ev.body.clone()) {
+                    open.insert((s.node, s.iteration, s.attempt));
+                }
+            }
+            Completed::KIND => {
+                if let Ok(c) = serde_json::from_value::<Completed>(ev.body.clone()) {
+                    open.remove(&(c.node, c.iteration, c.attempt));
+                }
+            }
+            EffectReconciled::KIND => {
+                if let Ok(r) = serde_json::from_value::<EffectReconciled>(ev.body.clone()) {
+                    open.remove(&(r.node, r.iteration, r.attempt));
+                }
+            }
+            _ => {}
+        }
+    }
+    !open.is_empty()
+}
+
+/// Validates parent-delegated ownership, `owner_epoch` adoption fencing, and `Superseded` write
+/// fencing on a child instance under `lock(parent) -> lock(child)`.
+///
+/// When `reconcile_only` is true, permits ONLY reconciliation of an already-open `EffectStarted`
+/// on a `Superseded` child (still strictly fenced by `owner_epoch` and current parent owner).
+pub fn check_child_write_fence(
+    parent_log: &Log,
+    child_log: &Log,
+    caller_owner: &Owner,
+    claim_owner_epoch: u64,
+    reconcile_only: bool,
+) -> Result<(), SubflowError> {
+    let Some(current_owner) = parent_current_owner(parent_log) else {
+        return Err(SubflowError::NotOwner);
+    };
+    if &current_owner != caller_owner {
+        return Err(SubflowError::NotOwner);
+    }
+    let current_epoch = parent_owner_epoch(parent_log);
+    if claim_owner_epoch != current_epoch {
+        return Err(SubflowError::FormerOwnersClaim { claim_epoch: claim_owner_epoch, current_epoch });
+    }
+    if parent_is_retired(parent_log) {
+        return Err(SubflowError::SubflowSuperseded { child: child_log.instance.to_string() });
+    }
+    let child_id = child_log.instance.as_str();
+    let is_superseded = parent_log.events.iter().any(|ev| {
+        ev.kind == Superseded::KIND
+            && serde_json::from_value::<Superseded>(ev.body.clone()).is_ok_and(|s| s.child_instance == child_id)
+    });
+    let is_quiesced = parent_log.events.iter().any(|ev| {
+        ev.kind == SubflowQuiesced::KIND
+            && serde_json::from_value::<SubflowQuiesced>(ev.body.clone()).is_ok_and(|q| q.child_instance == child_id)
+    });
+    if is_quiesced {
+        return Err(SubflowError::SubflowSuperseded { child: child_id.to_string() });
+    }
+    if is_superseded {
+        if reconcile_only && child_has_open_effect(child_log) {
+            return Ok(());
+        }
+        return Err(SubflowError::SubflowSuperseded { child: child_id.to_string() });
+    }
+    Ok(())
+}
+
+/// Atomically appends `MapExpanded` under exclusive `WriteGuard` (never inside read-only `next`).
+/// If `items` is empty (`0` items), also records a clean empty `Completed` receipt on the `map`
+/// node.
+#[allow(clippy::too_many_arguments)]
+pub fn expand_map(
+    guard: &mut WriteGuard,
+    parent: &InstanceId,
+    node: &str,
+    iteration: Iteration,
+    items: Vec<MapItemSpec>,
+    inputs: BTreeMap<String, String>,
+    caller_owner: &Owner,
+) -> Result<u64, SubflowError> {
+    let log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    if parent_current_owner(&log).as_ref() != Some(caller_owner) {
+        return Err(SubflowError::NotOwner);
+    }
+    let started = pinned(&log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let Some(n) = started.ir.nodes.get(node) else {
+        return Err(SubflowError::WrongClass(node.to_string()));
+    };
+    let Class::Map { max_items, ready_when, .. } = &n.class else {
+        return Err(SubflowError::WrongClass(node.to_string()));
+    };
+    if items.len() > *max_items as usize {
+        return Err(SubflowError::InvalidExpansion {
+            detail: format!("{} items exceeds max_items {max_items}", items.len()),
+        });
+    }
+    let mut keys = BTreeSet::new();
+    let mut normalized_items = Vec::with_capacity(items.len());
+    for mut item in items {
+        if item.key.trim().is_empty() {
+            return Err(SubflowError::InvalidExpansion { detail: "empty item_key".into() });
+        }
+        if !keys.insert(item.key.clone()) {
+            return Err(SubflowError::InvalidExpansion { detail: format!("duplicate item_key {:?}", item.key) });
+        }
+        if matches!(ready_when, Some(ReadyWhen::DisjointWrites)) && item.write_set.is_empty() {
+            return Err(SubflowError::InvalidExpansion {
+                detail: format!("item {:?} has empty write_set under ready_when: disjoint_writes", item.key),
+            });
+        }
+        item.write_set =
+            validate_write_set(&item.write_set).map_err(|detail| SubflowError::InvalidExpansion { detail })?;
+        normalized_items.push(item);
+    }
+
+    let state = fold_map_state(&log, node, &iteration);
+    let map_epoch = state.latest_epoch.map_or(0, |e| e + 1);
+    let ev = MapExpanded {
+        node: node.to_string(),
+        iteration: iteration.clone(),
+        map_epoch,
+        inputs: inputs.clone(),
+        items: normalized_items.clone(),
+    };
+    let new_ev = ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(parent, _seq, new_ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
+
+    // Empty map (0 items) completes immediately with an empty items map and empty performers union.
+    if normalized_items.is_empty() {
+        let done = Completed {
+            node: node.to_string(),
+            iteration,
+            attempt: 1,
+            inputs,
+            outputs: serde_json::json!({ "items": {} }),
+            verify: None,
+            performer: None,
+            performers: Vec::new(),
+            tool_use_id: None,
+            audit: None,
+        };
+        let done_ev = done.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+        {
+            let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+            guard.append(parent, _seq, done_ev)
+        }
+        .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    }
+    Ok(map_epoch)
+}
+
+/// Claims one `map` item under exclusive `WriteGuard`, enforcing:
+/// - Crash Points A & B idempotency via deterministic `fi_sub_*` child IDs;
+/// - Atomic claim-time `disjoint_writes` retaining reservations on `SubflowStarted` AND unquiesced
+///   `Superseded` siblings until `SubflowQuiesced`;
+/// - `max_concurrency` limit;
+/// - Runtime `reserve_providers` / `provider_pool` liveness enforcer (`provider_pool_exhausted`);
+/// - Canonical `parent -> child` creation order (child `Started` with `parent_ref`, then parent
+///   `SubflowStarted` with `owner_epoch`).
+#[allow(clippy::too_many_arguments)]
+pub fn claim_map_item(
+    guard: &mut WriteGuard,
+    parent: &InstanceId,
+    node: &str,
+    iteration: Iteration,
+    item_key: &str,
+    performer: Option<Performer>,
+    caller_owner: &Owner,
+) -> Result<(InstanceId, u64), SubflowError> {
+    let parent_log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    if parent_current_owner(&parent_log).as_ref() != Some(caller_owner) {
+        return Err(SubflowError::NotOwner);
+    }
+    if parent_is_retired(&parent_log) {
+        return Err(SubflowError::SubflowSuperseded { child: parent.to_string() });
+    }
+    let started = pinned(&parent_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let Some(n) = started.ir.nodes.get(node) else {
+        return Err(SubflowError::WrongClass(node.to_string()));
+    };
+    let Class::Map {
+        max_items,
+        max_concurrency_param,
+        ready_when,
+        reserve_providers,
+        provider_pool,
+        item_retry_max,
+        uses,
+        subflow_ir_hash,
+        ..
+    } = &n.class
+    else {
+        return Err(SubflowError::WrongClass(node.to_string()));
+    };
+
+    let state = fold_map_state(&parent_log, node, &iteration);
+    let Some(map_epoch) = state.latest_epoch else {
+        return Err(SubflowError::InvalidExpansion { detail: format!("map node {node} has not been expanded") });
+    };
+    let Some(item) = state.items.get(item_key) else {
+        return Err(SubflowError::InvalidExpansion { detail: format!("unknown item_key {item_key:?}") });
+    };
+
+    // If already in-flight in this epoch, return existing child idempotently!
+    if let Some(active) = state.in_flight.get(item_key) {
+        let cid = InstanceId::new(&active.child_instance).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        return Ok((cid, active.owner_epoch));
+    }
+
+    let retry_attempt = state.failed_attempts.get(item_key).map_or(0, Vec::len) as u32;
+    if retry_attempt > *item_retry_max {
+        return Err(SubflowError::InvalidExpansion {
+            detail: format!("item {item_key} exhausted item_retry.max ({item_retry_max})"),
+        });
+    }
+
+    // 1. Concurrency limit recheck under exclusive write lock.
+    let mut limit = *max_items as usize;
+    if let Some(param_name) = max_concurrency_param
+        && let Some(v) = started.params.get(param_name).and_then(Value::as_u64)
+        && v > 0
+    {
+        limit = limit.min(v as usize);
+    }
+    if state.in_flight.len() >= limit {
+        return Err(SubflowError::ConcurrencyLimit { in_flight: state.in_flight.len(), limit });
+    }
+
+    // 2. Atomic claim-time `disjoint_writes` check retaining reservations on `SubflowStarted`,
+    //    unquiesced `Superseded`, AND unquiesced `SubflowFailed` siblings until `SubflowQuiesced`!
+    for (child_id, fail) in &state.failed_unquiesced {
+        if fail.item_key == item_key {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!(
+                    "failed child {child_id} for item {item_key:?} must be quiesced (SubflowQuiesced) before retry"
+                ),
+            });
+        }
+    }
+    if matches!(ready_when, Some(ReadyWhen::DisjointWrites)) && !item.write_set.is_empty() {
+        for (sib_key, active_sib) in &state.in_flight {
+            if write_sets_intersect(&item.write_set, &active_sib.write_set)
+                .map_err(|detail| SubflowError::InvalidExpansion { detail })?
+            {
+                return Err(SubflowError::WriteSetConflict {
+                    item_key: item_key.to_string(),
+                    sibling: sib_key.clone(),
+                });
+            }
+        }
+        for (child_id, sup) in &state.superseded_unquiesced {
+            if let Some(orig) = state.started_by_child.get(child_id)
+                && write_sets_intersect(&item.write_set, &orig.write_set)
+                    .map_err(|detail| SubflowError::InvalidExpansion { detail })?
+            {
+                return Err(SubflowError::WriteSetConflict {
+                    item_key: item_key.to_string(),
+                    sibling: format!("superseded:{}:{child_id}", sup.item_key),
+                });
+            }
+        }
+        for (child_id, fail) in &state.failed_unquiesced {
+            if let Some(orig) = state.started_by_child.get(child_id)
+                && write_sets_intersect(&item.write_set, &orig.write_set)
+                    .map_err(|detail| SubflowError::InvalidExpansion { detail })?
+            {
+                return Err(SubflowError::WriteSetConflict {
+                    item_key: item_key.to_string(),
+                    sibling: format!("failed_unquiesced:{}:{child_id}", fail.item_key),
+                });
+            }
+        }
+    }
+
+    // 3. Runtime provider-pool & `reserve_providers` liveness enforcer.
+    if let Some(perf) = &performer {
+        let Some(prov) = provider_of(&perf.harness) else {
+            return Err(SubflowError::ProviderPoolExhausted {
+                detail: format!("performer harness {:?} has no attested provider", perf.harness),
+            });
+        };
+        if !provider_pool.is_empty() && !provider_pool.iter().any(|p| p == prov) {
+            return Err(SubflowError::ProviderPoolExhausted {
+                detail: format!("provider {prov:?} is not in allowed provider_pool {provider_pool:?}"),
+            });
+        }
+        if let Some(reserve) = reserve_providers {
+            let mut prospective = state.used_providers.clone();
+            prospective.insert(prov.to_string());
+            let remaining = PROVIDERS.len().saturating_sub(prospective.len());
+            if remaining < *reserve as usize {
+                return Err(SubflowError::ProviderPoolExhausted {
+                    detail: format!(
+                        "accepting provider {prov:?} would leave {remaining} unused providers (< reserve_providers={reserve})"
+                    ),
+                });
+            }
+        }
+    }
+
+    // 4. Deterministic child ID (Crash Points A & B idempotency).
+    let child_id = child_instance_id(parent, node, &iteration, map_epoch, item_key, retry_attempt)?;
+    let owner_epoch = parent_owner_epoch(&parent_log);
+    let child_ir = started
+        .ir
+        .subflows
+        .get(uses)
+        .ok_or_else(|| SubflowError::Storage(format!("missing pinned subflow IR {uses}")))?
+        .clone();
+
+    // Crash Point B check: if deterministic child log ALREADY exists with matching parent_ref and
+    // child_ir_hash, do NOT spawn a duplicate — verify (or finish allocating after crash between
+    // child Started and git worktree add) its worktree against the pinned base_sha + cleanliness,
+    // then append the missing parent SubflowStarted!
+    let child_exists = guard.log(&child_id).is_ok();
+    if child_exists {
+        let existing_log = guard.log(&child_id).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        let existing_started = pinned(&existing_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        if let Some(wt_s) = existing_started.params.get("child_worktree").and_then(Value::as_str) {
+            let parent_s =
+                existing_started.params.get("parent_repo").and_then(Value::as_str).ok_or_else(|| {
+                    SubflowError::Storage("child Started missing parent_repo for child_worktree".into())
+                })?;
+            let base_sha = existing_started.params.get("base_sha").and_then(Value::as_str).ok_or_else(|| {
+                SubflowError::Storage("child Started missing pinned base_sha for child_worktree".into())
+            })?;
+            let child_wt = Path::new(wt_s);
+            let parent_repo = Path::new(parent_s);
+            match std::fs::symlink_metadata(child_wt) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Crash occurred after child Started was appended and before (or during) staged worktree promotion.
+                    let wt_root = guard.root_path().join("worktrees");
+                    allocate_child_worktree_atomic(parent_repo, &wt_root, child_id.as_str(), base_sha)?;
+                }
+                Err(e) => return Err(SubflowError::Storage(format!("child worktree metadata failed: {e}"))),
+                Ok(_) => {}
+            }
+            // Always verify identity, non-symlink, repo common-dir, exact pinned base_sha HEAD, and cleanliness!
+            verify_allocated_child_worktree(child_wt, parent_repo, Some(base_sha))?;
+        }
+    } else {
+        let mut child_params = Map::new();
+        child_params.insert("item".to_string(), item.input.clone());
+        child_params.insert("item_key".to_string(), Value::String(item_key.to_string()));
+        if let Some(obj) = started.params.as_object() {
+            for (k, v) in obj {
+                child_params.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        // Always strip caller-supplied `base_sha` / `child_worktree`, pin real initial git HEAD,
+        // refuse any pre-existing path at `<flows_root>/worktrees/<child_id>`, write child Started
+        // FIRST (crash-recoverable without stranding), then allocate and verify the detached worktree.
+        child_params.remove("base_sha");
+        child_params.remove("child_worktree");
+        let mut pending_wt: Option<(PathBuf, PathBuf, String)> = None;
+        if let Some(raw_wd) = child_ir.workdir.as_deref() {
+            let wd_val = Value::Object(child_params.clone());
+            let base_wd = PathBuf::from(resolve_simple_workdir(raw_wd, &wd_val));
+            if base_wd.is_dir() && base_wd.join(".git").exists() {
+                let out = Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&base_wd)
+                    .output()
+                    .map_err(|e| SubflowError::Storage(format!("git rev-parse HEAD failed: {e}")))?;
+                if !out.status.success() {
+                    return Err(SubflowError::Storage(format!(
+                        "git rev-parse HEAD failed in {}: {}",
+                        base_wd.display(),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    )));
+                }
+                let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let wt_root = guard.root_path().join("worktrees");
+                if let Ok(meta) = std::fs::symlink_metadata(&wt_root)
+                    && meta.file_type().is_symlink()
+                {
+                    return Err(SubflowError::Storage(format!(
+                        "refusing symlinked worktrees root: {}",
+                        wt_root.display()
+                    )));
+                }
+                std::fs::create_dir_all(&wt_root).map_err(|e| SubflowError::Storage(e.to_string()))?;
+                let child_wt = wt_root.join(child_id.as_str());
+                // NEVER trust or reuse a pre-existing path (including symlinks or dangling symlinks!).
+                if std::fs::symlink_metadata(&child_wt).is_ok() {
+                    return Err(SubflowError::Storage(format!(
+                        "refusing pre-existing child worktree path (must not exist before allocation): {}",
+                        child_wt.display()
+                    )));
+                }
+                let child_wt_str = child_wt.to_string_lossy().to_string();
+                child_params.insert("parent_repo".to_string(), Value::String(base_wd.to_string_lossy().to_string()));
+                child_params.insert("repo".to_string(), Value::String(child_wt_str.clone()));
+                child_params.insert("child_worktree".to_string(), Value::String(child_wt_str));
+                child_params.insert("base_sha".to_string(), Value::String(sha.clone()));
+                pending_wt = Some((base_wd, child_wt, sha));
+            }
+        }
+        let child_started = Started {
+            flow: uses.clone(),
+            ir_hash: subflow_ir_hash.clone(),
+            ir: child_ir,
+            params: Value::Object(child_params),
+            owner: Some(caller_owner.clone()),
+            audit: None,
+            parent_ref: Some(ParentRef {
+                parent_instance: parent.to_string(),
+                node: node.to_string(),
+                iteration: iteration.clone(),
+                map_epoch,
+                item_key: item_key.to_string(),
+                retry_attempt,
+            }),
+        };
+        let ev = child_started.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+        guard.append(&child_id, 0, ev).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        if let Some((base_wd, _child_wt, sha)) = pending_wt {
+            let wt_root = guard.root_path().join("worktrees");
+            allocate_child_worktree_atomic(&base_wd, &wt_root, child_id.as_str(), &sha)?;
+        }
+    }
+
+    let parent_ev = SubflowStarted {
+        node: node.to_string(),
+        iteration,
+        map_epoch,
+        item_key: item_key.to_string(),
+        retry_attempt,
+        child_instance: child_id.to_string(),
+        child_ir_hash: subflow_ir_hash.clone(),
+        write_set: item.write_set.clone(),
+        owner_epoch,
+        performer,
+    };
+    let ev = parent_ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(parent, _seq, ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
+
+    Ok((child_id, owner_epoch))
+}
+
+/// Handles upstream staleness mid-map: preserves unchanged `(item_key, input_digest)` completed
+/// items incrementally and marks changed or removed active items `Superseded` (retaining their
+/// `write_set` reservations until `SubflowQuiesced`).
+#[allow(clippy::too_many_arguments)]
+pub fn supersede_stale_items(
+    guard: &mut WriteGuard,
+    parent: &InstanceId,
+    node: &str,
+    iteration: Iteration,
+    new_items: Vec<MapItemSpec>,
+    inputs: BTreeMap<String, String>,
+    caller_owner: &Owner,
+) -> Result<(u64, Vec<String>), SubflowError> {
+    let parent_log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    if parent_current_owner(&parent_log).as_ref() != Some(caller_owner) {
+        return Err(SubflowError::NotOwner);
+    }
+    let state = fold_map_state(&parent_log, node, &iteration);
+    let next_epoch = state.latest_epoch.map_or(0, |e| e + 1);
+    let new_map: BTreeMap<String, &MapItemSpec> = new_items.iter().map(|i| (i.key.clone(), i)).collect();
+
+    let mut superseded_children = Vec::new();
+    for (old_key, active) in &state.in_flight {
+        let unchanged = new_map
+            .get(old_key)
+            .zip(state.items.get(old_key))
+            .is_some_and(|(new_spec, old_spec)| new_spec.input_digest == old_spec.input_digest);
+        if !unchanged {
+            let sup = Superseded {
+                node: node.to_string(),
+                iteration: iteration.clone(),
+                map_epoch: active.map_epoch,
+                item_key: old_key.clone(),
+                child_instance: active.child_instance.clone(),
+                superseded_by_epoch: next_epoch,
+            };
+            let ev = sup.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+            {
+                let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+                guard.append(parent, _seq, ev)
+            }
+            .map_err(|e| SubflowError::Storage(e.to_string()))?;
+            superseded_children.push(active.child_instance.clone());
+        }
+    }
+
+    let _epoch = expand_map(guard, parent, node, iteration, new_items, inputs, caller_owner)?;
+    Ok((next_epoch, superseded_children))
+}
+
+/// Returns true if `child_log` has an open `EffectStarted` matching `(node, iteration, attempt)`
+/// that has neither `Completed` nor `EffectReconciled`.
+fn has_specific_open_effect(child_log: &Log, node: &str, iteration: &Iteration, attempt: u32) -> bool {
+    let mut open = false;
+    for ev in &child_log.events {
+        match ev.kind.as_str() {
+            EffectStarted::KIND => {
+                if let Ok(s) = serde_json::from_value::<EffectStarted>(ev.body.clone())
+                    && s.node == node
+                    && &s.iteration == iteration
+                    && s.attempt == attempt
+                {
+                    open = true;
+                }
+            }
+            Completed::KIND => {
+                if let Ok(c) = serde_json::from_value::<Completed>(ev.body.clone())
+                    && c.node == node
+                    && &c.iteration == iteration
+                    && c.attempt == attempt
+                {
+                    open = false;
+                }
+            }
+            EffectReconciled::KIND => {
+                if let Ok(r) = serde_json::from_value::<EffectReconciled>(ev.body.clone())
+                    && r.node == node
+                    && &r.iteration == iteration
+                    && r.attempt == attempt
+                {
+                    open = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    open
+}
+
+/// Atomically allocates a detached git worktree for `child_id` at `base_sha` using a sibling
+/// staging directory (`<wt_root>/.staging-<child_id>-<pid>`) followed by `git worktree move`,
+/// cleaning up any leftover staging directories from an interrupted prior `git worktree add` so
+/// crashes before OR during allocation never strand the deterministic child.
+fn allocate_child_worktree_atomic(
+    parent_repo: &Path,
+    wt_root: &Path,
+    child_id: &str,
+    base_sha: &str,
+) -> Result<PathBuf, SubflowError> {
+    if let Ok(meta) = std::fs::symlink_metadata(wt_root)
+        && meta.file_type().is_symlink()
+    {
+        return Err(SubflowError::Storage(format!("refusing symlinked worktrees root: {}", wt_root.display())));
+    }
+    std::fs::create_dir_all(wt_root).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let staging_prefix = format!(".staging-{child_id}-");
+    if let Ok(entries) = std::fs::read_dir(wt_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(&staging_prefix) {
+                let p = entry.path();
+                let _ = Command::new("git")
+                    .args(["worktree", "remove", "--force"])
+                    .arg(&p)
+                    .current_dir(parent_repo)
+                    .output();
+                let _ = std::fs::remove_dir_all(&p);
+            }
+        }
+    }
+    let _ = Command::new("git").args(["worktree", "prune"]).current_dir(parent_repo).output();
+    let child_wt = wt_root.join(child_id);
+    if std::fs::symlink_metadata(&child_wt).is_ok() {
+        return Err(SubflowError::Storage(format!(
+            "refusing pre-existing child worktree path (must not exist before allocation): {}",
+            child_wt.display()
+        )));
+    }
+    let staging = wt_root.join(format!("{staging_prefix}{}", std::process::id()));
+    let add = Command::new("git")
+        .args(["worktree", "add", "--detach", "-q"])
+        .arg(&staging)
+        .arg(base_sha)
+        .current_dir(parent_repo)
+        .output()
+        .map_err(|e| SubflowError::Storage(format!("git worktree add failed: {e}")))?;
+    if !add.status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(SubflowError::Storage(format!(
+            "git worktree add failed for {}: {}",
+            staging.display(),
+            String::from_utf8_lossy(&add.stderr).trim()
+        )));
+    }
+    verify_allocated_child_worktree(&staging, parent_repo, Some(base_sha))?;
+    let mv = Command::new("git")
+        .args(["worktree", "move"])
+        .arg(&staging)
+        .arg(&child_wt)
+        .current_dir(parent_repo)
+        .output()
+        .map_err(|e| SubflowError::Storage(format!("git worktree move failed: {e}")))?;
+    if !mv.status.success() {
+        let _ =
+            Command::new("git").args(["worktree", "remove", "--force"]).arg(&staging).current_dir(parent_repo).output();
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(SubflowError::Storage(format!(
+            "git worktree move failed for {}: {}",
+            child_wt.display(),
+            String::from_utf8_lossy(&mv.stderr).trim()
+        )));
+    }
+    verify_allocated_child_worktree(&child_wt, parent_repo, Some(base_sha))?;
+    Ok(child_wt)
+}
+
+/// Verifies that `child_wt` is an authentic, non-symlink detached git worktree belonging to
+/// `parent_repo`, distinct from `parent_repo`, and (when `expected_sha` is `Some`) clean at that
+/// exact commit.
+fn verify_allocated_child_worktree(
+    child_wt: &Path,
+    parent_repo: &Path,
+    expected_sha: Option<&str>,
+) -> Result<(), SubflowError> {
+    let wt_meta = std::fs::symlink_metadata(child_wt)
+        .map_err(|e| SubflowError::Storage(format!("child worktree metadata failed: {e}")))?;
+    if wt_meta.file_type().is_symlink() || !wt_meta.is_dir() {
+        return Err(SubflowError::Storage(format!(
+            "child worktree {} must be a real non-symlink directory",
+            child_wt.display()
+        )));
+    }
+    let dot_git = child_wt.join(".git");
+    let git_meta = std::fs::symlink_metadata(&dot_git)
+        .map_err(|e| SubflowError::Storage(format!("child worktree .git metadata failed: {e}")))?;
+    if git_meta.file_type().is_symlink() || !git_meta.is_file() {
+        return Err(SubflowError::Storage(format!(
+            "child worktree {} must have a regular .git worktree pointer file",
+            child_wt.display()
+        )));
+    }
+    let wt_canon = std::fs::canonicalize(child_wt).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let parent_canon = std::fs::canonicalize(parent_repo).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    if wt_canon == parent_canon {
+        return Err(SubflowError::Storage(format!(
+            "child worktree {} resolves to parent repo {}",
+            child_wt.display(),
+            parent_repo.display()
+        )));
+    }
+    let git_common = |dir: &Path| -> Result<PathBuf, SubflowError> {
+        let out = Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(dir)
+            .output()
+            .map_err(|e| SubflowError::Storage(format!("git rev-parse --git-common-dir failed: {e}")))?;
+        if !out.status.success() {
+            return Err(SubflowError::Storage(format!("git rev-parse --git-common-dir failed in {}", dir.display())));
+        }
+        let raw = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let abs = if raw.is_absolute() { raw } else { dir.join(raw) };
+        std::fs::canonicalize(&abs).map_err(|e| SubflowError::Storage(e.to_string()))
+    };
+    if git_common(child_wt)? != git_common(parent_repo)? {
+        return Err(SubflowError::Storage(format!(
+            "child worktree {} does not belong to parent repo {}",
+            child_wt.display(),
+            parent_repo.display()
+        )));
+    }
+    if let Some(sha) = expected_sha {
+        let head_out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(child_wt)
+            .output()
+            .map_err(|e| SubflowError::Storage(format!("git rev-parse HEAD failed: {e}")))?;
+        if !head_out.status.success() || String::from_utf8_lossy(&head_out.stdout).trim() != sha {
+            return Err(SubflowError::Storage(format!(
+                "child worktree {} HEAD does not match pinned base_sha {sha}",
+                child_wt.display()
+            )));
+        }
+        let status_out = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(child_wt)
+            .output()
+            .map_err(|e| SubflowError::Storage(format!("git status --porcelain failed: {e}")))?;
+        if !status_out.status.success() || !status_out.stdout.is_empty() {
+            return Err(SubflowError::Storage(format!(
+                "newly allocated child worktree {} is not clean",
+                child_wt.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Narrowly scoped `--reconcile-only` completion permitted on a `Superseded` child that has an
+/// open `EffectStarted` (fenced by `parent.owner` + `owner_epoch`).
+/// Requires a verified `termination_receipt` proving ALL recorded worker PIDs for this child have
+/// terminated BEFORE executing `reconcile:` (preventing a paused worker from racing reconciliation),
+/// verifies `(child_node, child_iteration, attempt)` matches an actual open `EffectStarted`, runs
+/// the node's declared `Class::Effect { reconcile, .. }` command via `exec::run` (never `run:`),
+/// and appends `EffectReconciled` only when `reconcile` exits 0.
+#[allow(clippy::too_many_arguments)]
+pub fn reconcile_superseded_effect(
+    guard: &mut WriteGuard,
+    parent: &InstanceId,
+    child: &InstanceId,
+    child_node: &str,
+    child_iteration: Iteration,
+    attempt: u32,
+    inputs: BTreeMap<String, String>,
+    reconcile_outputs: Value,
+    termination_receipt: &str,
+    caller_owner: &Owner,
+    claim_owner_epoch: u64,
+) -> Result<(), SubflowError> {
+    let parent_log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let child_log = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    check_child_write_fence(&parent_log, &child_log, caller_owner, claim_owner_epoch, true)?;
+    if !has_specific_open_effect(&child_log, child_node, &child_iteration, attempt) {
+        return Err(SubflowError::SubflowSuperseded { child: child.to_string() });
+    }
+    let child_started = pinned(&child_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    // MUST prove worker termination BEFORE executing reconciliation so a paused worker cannot
+    // race the reconcile probe and perform the effect afterward (D6 post-termination reconciliation).
+    verify_termination_receipt(termination_receipt, &child_log, &child_started, true)?;
+    let Some(node_def) = child_started.ir.nodes.get(child_node) else {
+        return Err(SubflowError::WrongClass(child_node.to_string()));
+    };
+    let Class::Effect { reconcile, .. } = &node_def.class else {
+        return Err(SubflowError::WrongClass(child_node.to_string()));
+    };
+    if reconcile.is_empty() {
+        return Err(SubflowError::QuiescenceRefused {
+            detail: format!("effect node {child_node} declares no reconcile command"),
+        });
+    }
+    let raw_wd = child_started.ir.workdir.as_deref().ok_or_else(|| SubflowError::QuiescenceRefused {
+        detail: format!("child {child} declares no workdir for reconcile"),
+    })?;
+    let mut cwd = PathBuf::from(resolve_simple_workdir(raw_wd, &child_started.params));
+    if !cwd.is_dir()
+        && let Some(parent_repo) = child_started.params.get("parent_repo").and_then(Value::as_str)
+    {
+        cwd = PathBuf::from(parent_repo);
+    }
+    if !cwd.is_absolute() || !cwd.is_dir() {
+        return Err(SubflowError::QuiescenceRefused {
+            detail: format!("child reconcile workdir invalid: {}", cwd.display()),
+        });
+    }
+    let argv: Vec<String> = reconcile.iter().map(|w| resolve_simple_workdir(w, &child_started.params)).collect();
+    match exec::run(&argv, &cwd, &Limits::default(), Feed { search: Search::Trusted, stdin: None, extra_env: &[] }) {
+        Ran::Exited { code: Some(0), .. } => {}
+        Ran::Exited { code, stderr, .. } => {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!(
+                    "reconcile command for {child_node} exited {:?}: {}",
+                    code,
+                    String::from_utf8_lossy(&stderr).trim()
+                ),
+            });
+        }
+        Ran::Failed { code, detail, .. } => {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("reconcile command failed ({code}): {detail}"),
+            });
+        }
+    }
+    let rec = EffectReconciled {
+        node: child_node.to_string(),
+        iteration: child_iteration,
+        attempt,
+        inputs,
+        outputs: reconcile_outputs,
+    };
+    let ev = rec.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(child, _seq, ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    Ok(())
+}
+
+fn validate_cgroup_dir(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || !trimmed.starts_with('/')
+        || trimmed == "/"
+        || trimmed == "/sys/fs/cgroup"
+        || trimmed == "/sys/fs/cgroup/"
+        || trimmed.contains("..")
+    {
+        return Err(format!("invalid or unconfined worker_cgroup path {raw:?}"));
+    }
+    let dir = PathBuf::from(trimmed);
+    let meta =
+        std::fs::symlink_metadata(&dir).map_err(|e| format!("worker_cgroup {} unreadable: {e}", dir.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!("worker_cgroup {} must be a non-symlink directory", dir.display()));
+    }
+    Ok(dir)
+}
+
+fn read_cgroup_regular_file(path: &Path) -> Result<String, String> {
+    let meta =
+        std::fs::symlink_metadata(path).map_err(|e| format!("cgroup file {} unreadable: {e}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(format!("cgroup file {} must be a regular non-symlink file", path.display()));
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))
+}
+
+fn parse_cgroup_populated(events_text: &str) -> Result<bool, String> {
+    for line in events_text.lines() {
+        let mut parts = line.split_whitespace();
+        if parts.next() == Some("populated") {
+            match parts.next() {
+                Some("0") => return Ok(false),
+                Some("1") => return Ok(true),
+                other => return Err(format!("unexpected cgroup.events populated value {other:?}")),
+            }
+        }
+    }
+    Err("cgroup.events missing `populated` key".to_string())
+}
+
+/// Verifies at claim time that `worker_cgroup` is a real non-symlink cgroup v2 directory with at
+/// least one live numeric PID in `cgroup.procs` and `cgroup.events` reporting `populated 1`.
+pub(crate) fn verify_cgroup_live(raw: &str) -> Result<(), String> {
+    let dir = validate_cgroup_dir(raw)?;
+    let procs_text = read_cgroup_regular_file(&dir.join("cgroup.procs"))?;
+    let mut pid_count = 0usize;
+    for line in procs_text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let pid: u32 = line.parse().map_err(|_| format!("invalid PID {line:?} in cgroup.procs"))?;
+        if pid <= 1 {
+            return Err(format!("invalid PID {pid} in cgroup.procs"));
+        }
+        pid_count += 1;
+    }
+    if pid_count == 0 {
+        return Err(format!("worker_cgroup {} has zero live PIDs in cgroup.procs at claim time", dir.display()));
+    }
+    let events_text = read_cgroup_regular_file(&dir.join("cgroup.events"))?;
+    if !parse_cgroup_populated(&events_text)? {
+        return Err(format!("worker_cgroup {} reports populated 0 at claim time", dir.display()));
+    }
+    Ok(())
+}
+
+/// Verifies at quiescence/reconciliation time that `worker_cgroup` is completely empty: zero PIDs
+/// in `cgroup.procs` AND `cgroup.events` explicitly reports `populated 0`. A worker or descendant
+/// that called `setsid()` / `setpgid()` stays in its cgroup and keeps `populated 1`, so this check
+/// fails closed against process-group escape.
+pub(crate) fn verify_cgroup_empty(raw: &str) -> Result<(), String> {
+    let dir = validate_cgroup_dir(raw)?;
+    let procs_text = read_cgroup_regular_file(&dir.join("cgroup.procs"))?;
+    let live_pids: Vec<&str> = procs_text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if !live_pids.is_empty() {
+        return Err(format!(
+            "worker_cgroup_still_populated: {} still contains live PID(s) {:?} (escaped or unexited descendants)",
+            dir.display(),
+            live_pids
+        ));
+    }
+    let events_text = read_cgroup_regular_file(&dir.join("cgroup.events"))?;
+    if parse_cgroup_populated(&events_text)? {
+        return Err(format!(
+            "worker_cgroup_still_populated: {} reports populated 1 in cgroup.events (descendant cgroup still active)",
+            dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Verifies that EVERY host-attested worker process group (`Claimed.worker_pgid`) AND dedicated
+/// OS cgroup (`Claimed.worker_cgroup`) ever recorded for this child has completely terminated
+/// (`kill(-pgid, 0) == ESRCH` AND `cgroup.procs` empty + `cgroup.events` `populated 0`).
+/// Never reads `Claimed.audit.process.pid` or caller-supplied `Started.params.worker_pgid`.
+/// Fails closed if ANY `Claimed` event lacks `worker_pgid > 1` or `worker_cgroup`, if ANY member
+/// of ANY recorded process group is still alive, or if ANY descendant (including `setsid()`/`setpgid()`
+/// escaped processes) remains in any recorded worker cgroup.
+fn verify_all_child_workers_dead(child_log: &Log) -> Result<BTreeSet<u32>, SubflowError> {
+    let mut recorded_pgids = BTreeSet::new();
+    let mut recorded_cgroups = BTreeSet::new();
+    for ev in &child_log.events {
+        if ev.kind == Claimed::KIND {
+            let c =
+                serde_json::from_value::<Claimed>(ev.body.clone()).map_err(|e| SubflowError::QuiescenceRefused {
+                    detail: format!("malformed Claimed event in child {}: {e}", child_log.instance),
+                })?;
+            let Some(pgid) = c.worker_pgid else {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "Claimed event (node={}, attempt={}) in child {} is missing dedicated worker_pgid; cannot prove worker process group terminated",
+                        c.node, c.attempt, child_log.instance
+                    ),
+                });
+            };
+            if pgid <= 1 {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "Claimed event (node={}, attempt={}) in child {} has invalid worker_pgid {pgid}",
+                        c.node, c.attempt, child_log.instance
+                    ),
+                });
+            }
+            let Some(cg) = c.worker_cgroup.filter(|s| !s.trim().is_empty()) else {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "Claimed event (node={}, attempt={}) in child {} is missing dedicated worker_cgroup containment; PGID death alone cannot rule out setsid/setpgid escape",
+                        c.node, c.attempt, child_log.instance
+                    ),
+                });
+            };
+            recorded_pgids.insert(pgid);
+            recorded_cgroups.insert(cg);
+        }
+    }
+    for &raw_pgid in &recorded_pgids {
+        let Ok(pgid_i32) = i32::try_from(raw_pgid) else {
+            return Err(SubflowError::QuiescenceRefused { detail: format!("invalid recorded worker_pgid {raw_pgid}") });
+        };
+        let Some(pgid) = rustix::process::Pid::from_raw(pgid_i32) else {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("invalid zero recorded worker_pgid {raw_pgid}"),
+            });
+        };
+        match rustix::process::test_kill_process_group(pgid) {
+            Err(rustix::io::Errno::SRCH) => {}
+            Ok(()) => {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "worker process group pgid={raw_pgid} for child {} still has live process(es); cannot mark quiescent or reconcile",
+                        child_log.instance
+                    ),
+                });
+            }
+            Err(err) => {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "worker process group pgid={raw_pgid} liveness check failed ({err}); refusing quiescence"
+                    ),
+                });
+            }
+        }
+    }
+    for cg in &recorded_cgroups {
+        verify_cgroup_empty(cg).map_err(|detail| SubflowError::QuiescenceRefused { detail })?;
+    }
+    Ok(recorded_pgids)
+}
+
+/// Recursively verifies that `root` and EVERY file and subdirectory inside it is non-symlink and
+/// has zero write bits (`mode & 0o222 == 0`). Checking only root directory mode bits is
+/// insufficient because existing writable files remain modifiable.
+#[cfg(unix)]
+fn verify_tree_readonly_recursive(root: &Path) -> Result<(), SubflowError> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let meta =
+            std::fs::symlink_metadata(&path).map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+        if meta.file_type().is_symlink() {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("symlink forbidden inside frozen child worktree: {}", path.display()),
+            });
+        }
+        let mode = meta.permissions().mode();
+        if (mode & 0o222) != 0 {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!(
+                    "entry {} inside child worktree is still writable (mode {:o})",
+                    path.display(),
+                    mode & 0o777
+                ),
+            });
+        }
+        if meta.is_dir() {
+            let entries =
+                std::fs::read_dir(&path).map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+            for entry in entries {
+                let entry = entry.map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Verifies a structured `termination_receipt` bound STRICTLY to THIS child's own allocated
+/// `child_worktree` and EVERY dedicated worker process group (`Claimed.worker_pgid`) recorded in
+/// `child_log` (never trusting CLI/MCP `Audit.process.pid`!):
+/// - ALWAYS verifies EVERY recorded `worker_pgid` process group has completely exited (`kill(-pgid, 0) == ESRCH`) first!
+/// - `pgid:<u32>:exited|reaped`: `<pgid>` MUST be in `recorded_pgids` (ALL confirmed dead via `kill(-pgid, 0)`),
+///   and when `!for_reconcile` (quiescence) any allocated `child_worktree` must ALSO be removed or recursively read-only.
+/// - `worktree_removed:<path>`: `<path>` MUST equal `child_started.params["child_worktree"]`,
+///   `symlink_metadata` must return `NotFound`, AND every recorded `worker_pgid` is confirmed dead.
+/// - `worktree_readonly:<path>`: `<path>` MUST equal `child_started.params["child_worktree"]`,
+///   be recursively read-only with zero writable files/dirs and zero symlinks, AND every recorded `worker_pgid` is dead.
+fn verify_termination_receipt(
+    receipt: &str,
+    child_log: &Log,
+    child_started: &Started,
+    for_reconcile: bool,
+) -> Result<(), SubflowError> {
+    let r = receipt.trim();
+    let expected_wt = child_started.params.get("child_worktree").and_then(Value::as_str);
+
+    // ALWAYS confirm EVERY host-attested worker process group for this child is dead before accepting ANY receipt!
+    let recorded_pgids = verify_all_child_workers_dead(child_log)?;
+
+    let check_wt_frozen_or_removed = |wt_str: &str| -> Result<(), SubflowError> {
+        let p = Path::new(wt_str);
+        match std::fs::symlink_metadata(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(SubflowError::QuiescenceRefused { detail: e.to_string() }),
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(SubflowError::QuiescenceRefused {
+                        detail: format!("child worktree {wt_str:?} is not a real directory"),
+                    });
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            verify_tree_readonly_recursive(p)
+        }
+        #[cfg(not(unix))]
+        {
+            Err(SubflowError::QuiescenceRefused { detail: format!("child worktree {wt_str:?} still exists on disk") })
+        }
+    };
+
+    if let Some(rest) = r.strip_prefix("pgid:") {
+        let parts: Vec<&str> = rest.split(':').collect();
+        if parts.len() == 2
+            && matches!(parts[1], "exited" | "reaped")
+            && let Ok(raw_pgid) = parts[0].parse::<u32>()
+            && raw_pgid > 1
+        {
+            if !recorded_pgids.contains(&raw_pgid) {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!(
+                        "pgid {raw_pgid} is not bound to child {} (recorded worker_pgid set: {recorded_pgids:?})",
+                        child_log.instance
+                    ),
+                });
+            }
+            // All recorded_pgids (including raw_pgid and any later claimants) were already verified dead above.
+            if !for_reconcile && let Some(wt_str) = expected_wt {
+                check_wt_frozen_or_removed(wt_str)?;
+            }
+            return Ok(());
+        }
+        return Err(SubflowError::QuiescenceRefused {
+            detail: format!("malformed pgid termination_receipt {r:?} (expected pgid:<pgid>:exited|reaped)"),
+        });
+    }
+    if let Some(path_str) = r.strip_prefix("worktree_removed:") {
+        let Some(exp) = expected_wt else {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("child {} has no allocated child_worktree bound in Started.params", child_log.instance),
+            });
+        };
+        if path_str != exp {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("worktree_removed path {path_str:?} does not match child's own worktree {exp:?}"),
+            });
+        }
+        let p = Path::new(path_str);
+        if !p.is_absolute() {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("worktree_removed path must be absolute: {path_str:?}"),
+            });
+        }
+        match std::fs::symlink_metadata(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            _ => {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!("child worktree still exists on disk: {path_str:?}"),
+                });
+            }
+        }
+    }
+    if let Some(path_str) = r.strip_prefix("worktree_readonly:") {
+        let Some(exp) = expected_wt else {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("child {} has no allocated child_worktree bound in Started.params", child_log.instance),
+            });
+        };
+        if path_str != exp {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("worktree_readonly path {path_str:?} does not match child's own worktree {exp:?}"),
+            });
+        }
+        let p = Path::new(path_str);
+        if !p.is_absolute() {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("worktree_readonly path must be absolute: {path_str:?}"),
+            });
+        }
+        #[cfg(unix)]
+        {
+            let meta =
+                std::fs::symlink_metadata(p).map_err(|e| SubflowError::QuiescenceRefused { detail: e.to_string() })?;
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(SubflowError::QuiescenceRefused {
+                    detail: format!("worktree_readonly path must be an existing non-symlink directory: {path_str:?}"),
+                });
+            }
+            verify_tree_readonly_recursive(p)?;
+            return Ok(());
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: "worktree_readonly verification unsupported on non-unix".into(),
+            });
+        }
+    }
+    Err(SubflowError::QuiescenceRefused {
+        detail: format!(
+            "unverifiable termination_receipt {r:?}; expected child-bound worktree_removed:<child_wt>, worktree_readonly:<child_wt>, or pid:<recorded_pid>:exited|reaped"
+        ),
+    })
+}
+
+/// Records `SubflowQuiesced` on a `Superseded` or `SubflowFailed` child, releasing its `write_set`
+/// and retry reservations.
+/// NEVER infers quiescence from wall-clock lease expiry, arbitrary strings, or unrelated paths/PIDs:
+/// verifies child-bound OS/FS proof (`verify_termination_receipt`) AND zero open `EffectStarted`!
+#[allow(clippy::too_many_arguments)]
+pub fn quiesce_subflow(
+    guard: &mut WriteGuard,
+    parent: &InstanceId,
+    node: &str,
+    iteration: Iteration,
+    item_key: &str,
+    child: &InstanceId,
+    termination_receipt: &str,
+    caller_owner: &Owner,
+) -> Result<(), SubflowError> {
+    let parent_log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    if parent_current_owner(&parent_log).as_ref() != Some(caller_owner) {
+        return Err(SubflowError::NotOwner);
+    }
+    let child_log = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let child_started = pinned(&child_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    verify_termination_receipt(termination_receipt, &child_log, &child_started, false)?;
+    if child_has_open_effect(&child_log) {
+        return Err(SubflowError::QuiescenceRefused {
+            detail: format!("child {child} still has an unreconciled EffectStarted"),
+        });
+    }
+    let state = fold_map_state(&parent_log, node, &iteration);
+    let map_epoch = if let Some(sup) = state.superseded_unquiesced.get(child.as_str()) {
+        sup.map_epoch
+    } else if let Some(fail) = state.failed_unquiesced.get(child.as_str()) {
+        fail.map_epoch
+    } else if state.quiesced_children.contains(child.as_str()) {
+        return Ok(());
+    } else {
+        return Err(SubflowError::QuiescenceRefused {
+            detail: format!("child {child} is not in superseded_unquiesced or failed_unquiesced state"),
+        });
+    };
+    let ev = SubflowQuiesced {
+        node: node.to_string(),
+        iteration,
+        map_epoch,
+        item_key: item_key.to_string(),
+        child_instance: child.to_string(),
+        termination_receipt: termination_receipt.to_string(),
+    };
+    let new_ev = ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(parent, _seq, new_ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    Ok(())
+}
+
+/// Recursively collects the deduplicated union of performers recorded across a child log (and any
+/// nested `SubflowCompleted` / `SubflowFailed` receipts inside it).
+pub fn collect_child_performers(child_log: &Log) -> Vec<Performer> {
+    let mut out: Vec<Performer> = Vec::new();
+    let mut seen: BTreeSet<(String, Option<String>, Option<String>)> = BTreeSet::new();
+    let mut push = |p: Performer| {
+        let key = (p.harness.clone(), p.model.clone(), p.session.clone());
+        if seen.insert(key) {
+            out.push(p);
+        }
+    };
+    for ev in &child_log.events {
+        match ev.kind.as_str() {
+            Claimed::KIND => {
+                if let Ok(cl) = serde_json::from_value::<Claimed>(ev.body.clone())
+                    && let Some(p) = cl.performer
+                {
+                    push(p);
+                }
+            }
+            Completed::KIND => {
+                if let Ok(c) = serde_json::from_value::<Completed>(ev.body.clone()) {
+                    if let Some(p) = c.performer {
+                        push(p);
+                    }
+                    for p in c.performers {
+                        push(p);
+                    }
+                }
+            }
+            SubflowCompleted::KIND => {
+                if let Ok(sc) = serde_json::from_value::<SubflowCompleted>(ev.body.clone()) {
+                    for p in sc.performers {
+                        push(p);
+                    }
+                }
+            }
+            SubflowFailed::KIND => {
+                if let Ok(sf) = serde_json::from_value::<SubflowFailed>(ev.body.clone()) {
+                    for p in sf.performers {
+                        push(p);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Crash Point C idempotent finalization of one `map` item:
+/// Reads the child's latched log under lock (never caller say-so), records `SubflowCompleted` or
+/// `SubflowFailed`, and once all items settle appends the parent `Completed` receipt with
+/// `item_key`-sorted outputs and deduplicated child `performers` union!
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_map_item(
+    guard: &mut WriteGuard,
+    parent: &InstanceId,
+    node: &str,
+    iteration: Iteration,
+    item_key: &str,
+    child: &InstanceId,
+    failed_error: Option<&str>,
+    inputs: BTreeMap<String, String>,
+    caller_owner: &Owner,
+) -> Result<bool, SubflowError> {
+    let parent_log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    if parent_current_owner(&parent_log).as_ref() != Some(caller_owner) {
+        return Err(SubflowError::NotOwner);
+    }
+    let started = pinned(&parent_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let Some(n) = started.ir.nodes.get(node) else {
+        return Err(SubflowError::WrongClass(node.to_string()));
+    };
+    let Class::Map { on_item_failure, item_retry_max, ready_when, subflow_ir_hash, .. } = &n.class else {
+        return Err(SubflowError::WrongClass(node.to_string()));
+    };
+    let child_log = guard.log(child).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let state = fold_map_state(&parent_log, node, &iteration);
+    let map_epoch = state.latest_epoch.unwrap_or(0);
+
+    // Idempotent Crash Point C check: already finalized for this child?
+    if state.completed.get(item_key).is_some_and(|c| c.child_instance == child.as_str()) {
+        return Ok(false);
+    }
+
+    // 1. Verify `child` is actually the active (`in_flight`) child spawned for THIS item_key (not
+    //    unrelated, not belonging to another item, and not superseded/quiesced).
+    let Some(active_started) = state.in_flight.get(item_key) else {
+        return Err(SubflowError::InvalidChild {
+            detail: format!("item {item_key:?} has no active in-flight child (supplied {child})"),
+        });
+    };
+    if active_started.child_instance != child.as_str() {
+        return Err(SubflowError::InvalidChild {
+            detail: format!(
+                "supplied child {child} is not the active child {} for item {item_key:?}",
+                active_started.child_instance
+            ),
+        });
+    }
+    if state.superseded_unquiesced.contains_key(child.as_str()) || state.quiesced_children.contains(child.as_str()) {
+        return Err(SubflowError::SubflowSuperseded { child: child.to_string() });
+    }
+
+    let mut performers = collect_child_performers(&child_log);
+    if let Some(sp) = active_started.performer.clone() {
+        let key = (sp.harness.clone(), sp.model.clone(), sp.session.clone());
+        if !performers.iter().any(|p| (p.harness.clone(), p.model.clone(), p.session.clone()) == key) {
+            performers.push(sp);
+        }
+    }
+
+    if let Some(err) = failed_error {
+        if child_has_open_effect(&child_log) {
+            return Err(SubflowError::QuiescenceRefused {
+                detail: format!("cannot fail child {child} while an EffectStarted remains unreconciled"),
+            });
+        }
+        let retry_attempt = state.failed_attempts.get(item_key).map_or(0, Vec::len) as u32;
+        let fail_ev = SubflowFailed {
+            node: node.to_string(),
+            iteration: iteration.clone(),
+            map_epoch,
+            item_key: item_key.to_string(),
+            retry_attempt,
+            child_instance: child.to_string(),
+            error: err.to_string(),
+            performers,
+        };
+        let ev = fail_ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+        {
+            let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+            guard.append(parent, _seq, ev)
+        }
+        .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    } else {
+        // 2. Verify the child instance is genuinely terminal (never convert an empty or unfinished
+        //    child log into SubflowCompleted with null outputs!).
+        let child_started = pinned(&child_log).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        let child_next =
+            next_of(&child_log, &child_started, clock::now()).map_err(|e| SubflowError::Storage(e.to_string()))?;
+        if !child_next.enabled.is_empty() {
+            let names: Vec<&str> = child_next.enabled.iter().map(|e| e.node.as_str()).collect();
+            return Err(SubflowError::ChildNotTerminal {
+                child: child.to_string(),
+                detail: format!("enabled nodes still remain: {names:?}"),
+            });
+        }
+        let non_done: Vec<(&String, State)> = child_next
+            .pending
+            .iter()
+            .filter(|(_, s)| {
+                !matches!(s.state, State::Done)
+                    && !s.unmet.iter().any(|r| matches!(r, Reason::Unreachable { .. } | Reason::Switch { .. }))
+            })
+            .map(|(k, s)| (k, s.state))
+            .collect();
+        if !non_done.is_empty() {
+            return Err(SubflowError::ChildNotTerminal {
+                child: child.to_string(),
+                detail: format!("pending non-terminal nodes remain: {non_done:?}"),
+            });
+        }
+        let has_terminal_receipt =
+            child_log.events.iter().any(|e| e.kind == Completed::KIND || e.kind == Answered::KIND);
+        if !has_terminal_receipt {
+            return Err(SubflowError::ChildNotTerminal {
+                child: child.to_string(),
+                detail: "child log contains no Completed or Answered receipt".to_string(),
+            });
+        }
+
+        // 3. Fail-closed 6-surface post-write isolation check whenever `ready_when: disjoint_writes`
+        //    or a non-empty `write_set` is declared! Never silently skip on missing workdir,
+        //    missing `.git`, or missing `base_sha`.
+        let require_ws = matches!(ready_when, Some(ReadyWhen::DisjointWrites))
+            || state.items.get(item_key).is_some_and(|i| !i.write_set.is_empty());
+        if require_ws {
+            let item_spec = state.items.get(item_key).ok_or_else(|| SubflowError::WriteSetViolation {
+                item_key: item_key.to_string(),
+                violations: vec!["missing item spec for write_set verification".into()],
+            })?;
+            if item_spec.write_set.is_empty() {
+                return Err(SubflowError::WriteSetViolation {
+                    item_key: item_key.to_string(),
+                    violations: vec!["empty write_set under disjoint_writes".into()],
+                });
+            }
+            let raw_wd = child_started.ir.workdir.as_deref().ok_or_else(|| SubflowError::WriteSetViolation {
+                item_key: item_key.to_string(),
+                violations: vec!["child declares no workdir for write_set verification".into()],
+            })?;
+            let wd_str = resolve_simple_workdir(raw_wd, &child_started.params);
+            let wd = PathBuf::from(&wd_str);
+            if !wd.is_dir() || !wd.join(".git").exists() {
+                return Err(SubflowError::WriteSetViolation {
+                    item_key: item_key.to_string(),
+                    violations: vec![format!("child workdir is not a git worktree: {}", wd.display())],
+                });
+            }
+            // Enforce unique per-child worktree isolation (never shared with parent_repo or siblings!).
+            let alloc_wt = child_started.params.get("child_worktree").and_then(Value::as_str);
+            if alloc_wt != Some(wd_str.as_str()) {
+                return Err(SubflowError::WriteSetViolation {
+                    item_key: item_key.to_string(),
+                    violations: vec![format!(
+                        "child workdir {wd_str:?} does not match unique allocated child_worktree {alloc_wt:?}"
+                    )],
+                });
+            }
+            if child_started.params.get("parent_repo").and_then(Value::as_str) == Some(wd_str.as_str()) {
+                return Err(SubflowError::WriteSetViolation {
+                    item_key: item_key.to_string(),
+                    violations: vec![format!("child shares parent repository checkout: {wd_str:?}")],
+                });
+            }
+            let base_sha = child_started.params.get("base_sha").and_then(Value::as_str);
+            let ver = verify_worktree_writes_auto(&wd, base_sha, &item_spec.write_set)
+                .map_err(|e| SubflowError::WriteSetViolation { item_key: item_key.to_string(), violations: vec![e] })?;
+            if !ver.is_ok() {
+                return Err(SubflowError::WriteSetViolation {
+                    item_key: item_key.to_string(),
+                    violations: ver.violations,
+                });
+            }
+        }
+
+        // Extract child's terminal Completed outputs directly from the child log (never say-so).
+        let child_outputs = child_log
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind == Completed::KIND)
+            .and_then(|e| serde_json::from_value::<Completed>(e.body.clone()).ok())
+            .map(|c| c.outputs)
+            .unwrap_or(Value::Null);
+        let outputs_digest = digest(&child_outputs);
+        let done_ev = SubflowCompleted {
+            node: node.to_string(),
+            iteration: iteration.clone(),
+            map_epoch,
+            item_key: item_key.to_string(),
+            child_instance: child.to_string(),
+            child_ir_hash: subflow_ir_hash.clone(),
+            terminal_status: "done".to_string(),
+            outputs_digest,
+            outputs: child_outputs,
+            performers,
+        };
+        let ev = done_ev.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+        {
+            let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+            guard.append(parent, _seq, ev)
+        }
+        .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    }
+
+    // Re-read parent log to see if the entire map node is now settled.
+    let updated_log = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?;
+    let updated = fold_map_state(&updated_log, node, &iteration);
+    if !updated.superseded_unquiesced.is_empty() || !updated.failed_unquiesced.is_empty() {
+        return Ok(false);
+    }
+
+    let all_settled = updated.items.keys().all(|k| {
+        if updated.completed.contains_key(k) {
+            return true;
+        }
+        let fails = updated.failed_attempts.get(k).map_or(0, Vec::len) as u32;
+        matches!(on_item_failure, OnItemFailure::CollectAll) && fails > *item_retry_max
+    });
+    if !all_settled {
+        return Ok(false);
+    }
+
+    // Build deterministic `item_key`-sorted outputs + deduplicated union of attested performers
+    // across BOTH completed AND failed attempts (so a provider that participated in a failed
+    // attempt before a retry succeeded can NEVER review its own work downstream!).
+    let mut items_out = Map::new();
+    let mut spine_entries = Vec::new();
+    let mut all_performers = Vec::new();
+    let mut seen_perf = BTreeSet::new();
+    let mut push_perf = |p: &Performer| {
+        let pk = (p.harness.clone(), p.model.clone(), p.session.clone());
+        if seen_perf.insert(pk) {
+            all_performers.push(p.clone());
+        }
+    };
+    for k in updated.items.keys() {
+        // Always include every failed-attempt performer even when a retry later succeeded!
+        if let Some(fails) = updated.failed_attempts.get(k) {
+            for f in fails {
+                for p in &f.performers {
+                    push_perf(p);
+                }
+            }
+        }
+        if let Some(c) = updated.completed.get(k) {
+            items_out.insert(
+                k.clone(),
+                serde_json::json!({
+                    "status": c.terminal_status,
+                    "child_instance": c.child_instance,
+                    "child_ir_hash": c.child_ir_hash,
+                    "outputs": c.outputs,
+                }),
+            );
+            spine_entries.push(serde_json::json!({
+                "item_key": k,
+                "child_ir_hash": c.child_ir_hash,
+                "terminal_status": c.terminal_status,
+            }));
+            for p in &c.performers {
+                push_perf(p);
+            }
+        } else if let Some(fails) = updated.failed_attempts.get(k) {
+            let last_err = fails.last().map(|f| f.error.as_str()).unwrap_or("failed");
+            items_out.insert(k.clone(), serde_json::json!({ "status": "failed", "error": last_err }));
+            spine_entries.push(serde_json::json!({
+                "item_key": k,
+                "child_ir_hash": subflow_ir_hash,
+                "terminal_status": "failed",
+            }));
+        }
+    }
+
+    let map_outputs = serde_json::json!({
+        "items": items_out,
+        "spine": spine_entries,
+    });
+    let _digest = performers_receipt_digest(&map_outputs, None, &serde_json::json!(all_performers));
+    let completed = Completed {
+        node: node.to_string(),
+        iteration,
+        attempt: 1,
+        inputs,
+        outputs: map_outputs,
+        verify: None,
+        performer: None,
+        performers: all_performers,
+        tool_use_id: None,
+        audit: None,
+    };
+    let ev = completed.to_event().map_err(|e| SubflowError::Storage(e.to_string()))?;
+    {
+        let _seq = guard.log(parent).map_err(|e| SubflowError::Storage(e.to_string()))?.seq();
+        guard.append(parent, _seq, ev)
+    }
+    .map_err(|e| SubflowError::Storage(e.to_string()))?;
+    Ok(true)
+}
+
+fn resolve_simple_workdir(template: &str, params: &Value) -> String {
+    let mut out = template.to_string();
+    if let Some(obj) = params.as_object() {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                out = out.replace(&format!("{{{{params.{k}}}}}"), s);
+            }
+        }
+    }
+    out
+}

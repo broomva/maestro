@@ -85,7 +85,8 @@ fn direct(id: &str, parent: Option<&str>, liveness: SessionLiveness) -> DirectSe
         liveness,
         harness: Some(Harness::Codex),
         parent_id: parent.map(str::to_string),
-        pending_permissions: vec![],
+        pid: None,
+        pending_permissions: Vec::new(),
     }
 }
 

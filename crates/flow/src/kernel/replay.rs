@@ -90,9 +90,10 @@ use super::adoption::{self, Owners, ProposalStatus};
 use super::compile::CompiledFlow;
 use super::error::KernelError;
 use super::events::{
-    Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat,
-    KernelEvent, Refused, Started, StopUnblockable, StopUnverified, Unblockable, digest, performer_receipt_digest,
-    receipt_digest,
+    Answered, AskLinked, AskPinned, AskWithdrawn, Chosen, Claimed, Completed, EffectReconciled, EffectStarted, Guarded,
+    Heartbeat, KernelEvent, MapExpanded, Refused, Started, StopUnblockable, StopUnverified, SubflowCompleted,
+    SubflowFailed, SubflowQuiesced, SubflowStarted, Superseded, Unblockable, digest, performer_receipt_digest,
+    performers_receipt_digest, receipt_digest,
 };
 use super::ir::{self, Class, Ir, Iteration, Launch, Need, RouteRef, Wait};
 use super::write;
@@ -351,6 +352,7 @@ pub fn start(
         ir: flow.ir().clone(),
         params,
         owner,
+        parent_ref: None,
         audit: session.audit().cloned(),
     };
     let event = started.to_event()?;
@@ -551,6 +553,12 @@ fn document(log: &Log, started: &Started, read: Vec<(&str, Rc<Core>)>) -> Result
         // IR version 9 (BRO-3828): the performer the receipt records, attested by the kernel.
         if started.ir.ir_version >= 9 {
             entry["performer"] = e.body.get("performer").cloned().unwrap_or(Value::Null);
+        }
+        // IR version 10: attested child performers union on a map or subflow receipt.
+        if started.ir.ir_version >= 10
+            && let Some(performers) = e.body.get("performers").filter(|p| !p.is_null())
+        {
+            entry["performers"] = performers.clone();
         }
         nodes.insert(id.to_string(), entry);
     }
@@ -886,6 +894,13 @@ impl<'a> Fold<'a> {
             Heartbeat::KIND,
             Refused::KIND,
             EffectStarted::KIND,
+            EffectReconciled::KIND,
+            MapExpanded::KIND,
+            SubflowStarted::KIND,
+            SubflowCompleted::KIND,
+            SubflowFailed::KIND,
+            Superseded::KIND,
+            SubflowQuiesced::KIND,
             AskPinned::KIND,
             AskLinked::KIND,
             AskWithdrawn::KIND,
@@ -928,13 +943,34 @@ impl<'a> Fold<'a> {
                 let mut receipt = Receipt::new(e.seq, taken, &c.outputs, value, failure, c.inputs);
                 // At IR 9 a receipt binds the performer it records (BRO-3828), the very value
                 // `document` shows the guards and the verify, so what they see is what is bound.
-                if ir.ir_version >= 9
+                if ir.ir_version >= 10
+                    && matches!(node.class, Class::Map { .. } | Class::Subflow { .. })
+                    && let Some(performers) = e.body.get("performers").filter(|p| !p.is_null())
+                {
+                    receipt.digest =
+                        Rc::from(performers_receipt_digest(&c.outputs, receipt.value.as_deref(), performers));
+                } else if ir.ir_version >= 9
                     && let Some(performer) = e.body.get("performer").filter(|p| !p.is_null())
                 {
                     receipt.digest =
                         Rc::from(performer_receipt_digest(&c.outputs, receipt.value.as_deref(), performer));
                 }
                 (receipt, c.attempt)
+            }
+            EffectReconciled::KIND => {
+                let r: EffectReconciled = body(log, e)?;
+                if let Some(started_map) = self.started_effects.get_mut(&(id, i)) {
+                    started_map.remove(&r.attempt);
+                }
+                (Receipt::new(e.seq, at, &r.outputs, None, None, r.inputs), r.attempt)
+            }
+            MapExpanded::KIND
+            | SubflowStarted::KIND
+            | SubflowCompleted::KIND
+            | SubflowFailed::KIND
+            | Superseded::KIND
+            | SubflowQuiesced::KIND => {
+                return Ok(Ok(Change::Inert));
             }
             Chosen::KIND => {
                 let c: Chosen = body(log, e)?;
@@ -1737,6 +1773,7 @@ mod tests {
             ir: flow.ir().clone(),
             params: Value::Null,
             owner: None,
+            parent_ref: None,
             audit: None,
         };
         let mut events = vec![event(1, "Started", serde_json::to_value(&started).unwrap())];
@@ -1776,6 +1813,7 @@ mod tests {
             ir: flow.ir().clone(),
             params: Value::Null,
             owner: None,
+            parent_ref: None,
             audit: None,
         };
         let mut events = vec![event(1, "Started", serde_json::to_value(&started).unwrap())];

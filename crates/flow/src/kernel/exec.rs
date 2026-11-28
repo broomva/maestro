@@ -106,12 +106,15 @@ pub(crate) enum Search {
     Caller,
 }
 
-/// What a command reads besides its argv: the `PATH` it searches, and its standard input.
+/// What a command reads besides its argv: the `PATH` it searches, its standard input, and
+/// kernel-minted extra environment variables (e.g. monotonic fencing tokens on `Class::Effect`).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Feed<'a> {
     pub search: Search,
     /// The command's JSON input, or empty input when absent.
     pub stdin: Option<&'a [u8]>,
+    /// Kernel-minted environment pairs passed to the subprocess after `env_clear()`.
+    pub extra_env: &'a [(&'a str, &'a str)],
 }
 
 /// The file a command's first word runs: the kernel's own executable for `maestro`, the trusted
@@ -216,6 +219,9 @@ pub(crate) fn run(argv: &[String], cwd: &Path, limits: &Limits, feed: Feed) -> R
                 cmd.env("PATH", path);
             }
         }
+    }
+    for (k, v) in feed.extra_env {
+        cmd.env(k, v);
     }
     match feed.stdin.map(stdin_file) {
         None => cmd.stdin(Stdio::null()),
@@ -420,7 +426,7 @@ mod tests {
     #[test]
     fn a_command_reads_its_input_from_a_file_that_never_blocks_the_kernel() {
         let tmp = tempfile::tempdir().unwrap();
-        let feed = |bytes: &'static [u8]| Feed { search: Search::Trusted, stdin: Some(bytes) };
+        let feed = |bytes: &'static [u8]| Feed { search: Search::Trusted, stdin: Some(bytes), extra_env: &[] };
         let ran = run(&argv(&["cat"]), tmp.path(), &quick(2000), feed(b"{\"receipt\":\"r\"}"));
         assert_eq!(ran, Ran::Exited { code: Some(0), stdout: b"{\"receipt\":\"r\"}".to_vec(), stderr: Vec::new() });
         // No input but the empty one without a feed.

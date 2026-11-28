@@ -270,6 +270,20 @@ fn node_section(out: &mut String, ir: &Ir, id: &str, node: &Node) {
             "nothing to claim. File its ask with `flow ask` (the first call takes `--ledger` and `--ask`), then call `flow ask` again until it says answered. The owner answers {}; never answer it yourself.",
             code(ask.trim())
         ),
+        Class::Subflow { uses, .. } => format!(
+            "claim it to spawn pinned child subflow {} under parent→child locking, drive the child instance to completion, and finalize the subflow receipt.",
+            code(uses)
+        ),
+        Class::Map { uses, max_items, ready_when, .. } => {
+            let sched = match ready_when {
+                Some(crate::kernel::ir::ReadyWhen::DisjointWrites) => " with claim-time `disjoint_writes` scheduling",
+                None => "",
+            };
+            format!(
+                "expand and claim bounded items (at most {max_items}) using pinned child subflow {}{sched}; drive each child instance to completion and finalize the map receipt.",
+                code(uses)
+            )
+        }
     };
     let _ = writeln!(out, "- Do: {todo}\n");
 }

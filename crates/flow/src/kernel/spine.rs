@@ -45,6 +45,14 @@ pub struct Spine {
     pub records: Vec<SpineRecord>,
 }
 
+/// Deterministic `item_key`-sorted child summary recorded on a `Class::Map` spine record (IR v10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct MapSpineEntry {
+    pub item_key: String,
+    pub child_ir_hash: String,
+    pub terminal_status: String,
+}
+
 /// One (node, iteration) with an accepted receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SpineRecord {
@@ -54,6 +62,9 @@ pub struct SpineRecord {
     pub edge: Option<String>,
     /// The exit status of the verify the kernel ran; none where it ran none.
     pub exit: Option<i32>,
+    /// Item-key-sorted child outcomes for `Class::Map` nodes (IR v10). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub map_items: Vec<MapSpineEntry>,
 }
 
 impl SpineRecord {
@@ -101,6 +112,14 @@ pub enum Difference {
     Edge { node: String, iteration: Iteration, index: usize, edge: Option<String>, against: Option<String> },
     /// Another verify exit status at the same place.
     Exit { node: String, iteration: Iteration, index: usize, exit: Option<i32>, against: Option<i32> },
+    /// Different item-key-sorted map child outcomes at the same place (IR v10).
+    MapItems {
+        node: String,
+        iteration: Iteration,
+        index: usize,
+        items: Vec<MapSpineEntry>,
+        against: Vec<MapSpineEntry>,
+    },
 }
 
 impl std::fmt::Display for Difference {
@@ -134,6 +153,9 @@ impl std::fmt::Display for Difference {
                 exit(e),
                 exit(against)
             ),
+            Difference::MapItems { node, iteration, index, .. } => {
+                write!(f, "at step {index}, map node {node}{} recorded different child outcomes", iter(iteration),)
+            }
         }
     }
 }
@@ -157,15 +179,33 @@ pub fn spine(guard: &ReadGuard, instance: &InstanceId) -> Result<Spine, KernelEr
         let record = match e.kind.as_str() {
             Completed::KIND => {
                 let c: Completed = body(&log, e)?;
-                SpineRecord { node: c.node, iteration: c.iteration, edge: None, exit: c.verify.map(|v| v.exit) }
+                let mut map_items: Vec<MapSpineEntry> = c
+                    .outputs
+                    .get("spine")
+                    .and_then(|v| serde_json::from_value::<Vec<MapSpineEntry>>(v.clone()).ok())
+                    .unwrap_or_default();
+                map_items.sort_by(|a, b| a.item_key.cmp(&b.item_key));
+                SpineRecord {
+                    node: c.node,
+                    iteration: c.iteration,
+                    edge: None,
+                    exit: c.verify.map(|v| v.exit),
+                    map_items,
+                }
             }
             Chosen::KIND => {
                 let c: Chosen = body(&log, e)?;
-                SpineRecord { node: c.node, iteration: c.iteration, edge: Some(c.edge), exit: None }
+                SpineRecord {
+                    node: c.node,
+                    iteration: c.iteration,
+                    edge: Some(c.edge),
+                    exit: None,
+                    map_items: Vec::new(),
+                }
             }
             Answered::KIND => {
                 let a: Answered = body(&log, e)?;
-                SpineRecord { node: a.node, iteration: a.iteration, edge: None, exit: None }
+                SpineRecord { node: a.node, iteration: a.iteration, edge: None, exit: None, map_items: Vec::new() }
             }
             _ => continue,
         };
@@ -247,6 +287,15 @@ pub fn compare(instance: &Spine, against: &Spine) -> Option<Difference> {
                 against: y.exit,
             });
         }
+        if x.map_items != y.map_items {
+            return Some(Difference::MapItems {
+                node: x.node.clone(),
+                iteration: x.iteration.clone(),
+                index,
+                items: x.map_items.clone(),
+                against: y.map_items.clone(),
+            });
+        }
     }
     None
 }
@@ -256,7 +305,13 @@ mod tests {
     use super::*;
 
     fn rec(node: &str, edge: Option<&str>, exit: Option<i32>) -> SpineRecord {
-        SpineRecord { node: node.into(), iteration: Iteration::new(), edge: edge.map(str::to_string), exit }
+        SpineRecord {
+            node: node.into(),
+            iteration: Iteration::new(),
+            edge: edge.map(str::to_string),
+            exit,
+            map_items: Vec::new(),
+        }
     }
 
     fn spine_of(records: Vec<SpineRecord>) -> Spine {
