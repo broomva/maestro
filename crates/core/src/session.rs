@@ -555,6 +555,14 @@ pub struct VerifiedSession {
     /// the events its writes append. Never an input to any check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     audit: Option<Audit>,
+    /// Dedicated worker process group ID (`pgid > 1`) for IR v10 child subflow quiescence
+    /// verification (`kill(-pgid, 0) == ESRCH`), distinct from any short-lived CLI/MCP audit PID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_pgid: Option<u32>,
+    /// Dedicated OS cgroup v2 directory path (e.g. `/sys/fs/cgroup/.../maestro-worker-<id>`)
+    /// containing the worker and all descendants (`setsid`/`setpgid` cannot escape a cgroup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_cgroup: Option<String>,
 }
 
 /// What a flow event records of the writer (BRO-3846): how its identity was established, and facts
@@ -618,6 +626,8 @@ impl VerifiedSession {
             owner_marker: None,
             pending_permissions,
             audit: None,
+            worker_pgid: None,
+            worker_cgroup: None,
         }
     }
 
@@ -629,6 +639,26 @@ impl VerifiedSession {
     /// What events record of this writer (see [`Audit`]).
     pub fn audit(&self) -> Option<&Audit> {
         self.audit.as_ref()
+    }
+
+    pub fn with_worker_pgid(mut self, pgid: u32) -> Self {
+        self.worker_pgid = Some(pgid);
+        self
+    }
+
+    /// Dedicated worker process group ID for IR v10 child subflow termination tracking.
+    pub fn worker_pgid(&self) -> Option<u32> {
+        self.worker_pgid
+    }
+
+    pub fn with_worker_cgroup(mut self, cgroup: impl Into<String>) -> Self {
+        self.worker_cgroup = Some(cgroup.into());
+        self
+    }
+
+    /// Dedicated OS cgroup v2 path providing kernel-enforced process containment for child workers.
+    pub fn worker_cgroup(&self) -> Option<&str> {
+        self.worker_cgroup.as_deref()
     }
 
     pub fn with_incarnation(mut self, incarnation: impl Into<String>) -> Self {

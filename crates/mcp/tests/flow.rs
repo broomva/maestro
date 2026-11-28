@@ -62,6 +62,7 @@ fn fx_with(children: &[(&str, Harness, &str)]) -> Fx {
             harness: None,
             pending_permissions: vec![],
             parent_id: None,
+            pid: None,
         });
     }
     for (id, harness, parent) in children {
@@ -73,6 +74,7 @@ fn fx_with(children: &[(&str, Harness, &str)]) -> Fx {
             harness: Some(harness.clone()),
             pending_permissions: vec![],
             parent_id: Some(parent.to_string()),
+            pid: None,
         });
     }
     let store = Store::new(Paths::under(&root), TreeSource::WorkingTree);

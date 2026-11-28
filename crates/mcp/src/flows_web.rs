@@ -173,6 +173,15 @@ pub fn shape(ir: &Ir) -> view::Shape {
                         facts.push(("required fields".into(), required_body_fields.join(", ")));
                     }
                 }
+                Class::Subflow { uses, .. } => {
+                    facts.push(("uses".into(), uses.clone()));
+                }
+                Class::Map { uses, over, item_key, max_items, .. } => {
+                    facts.push(("uses".into(), uses.clone()));
+                    facts.push(("over".into(), over.clone()));
+                    facts.push(("item key".into(), item_key.clone()));
+                    facts.push(("max items".into(), max_items.to_string()));
+                }
             }
             if let Some(s) = &n.snapshot {
                 facts.push(("snapshot of".into(), s.clone()));

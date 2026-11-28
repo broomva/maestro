@@ -176,6 +176,81 @@ pub fn combine(each: &[(ThreadVar, VarOutcome)]) -> Attributed {
 pub trait ProcessReader: fmt::Debug + Send + Sync {
     /// One process: its parent, command name, start time (RFC 3339) and real uid.
     fn read(&self, pid: u32) -> Result<ProcStat, String>;
+
+    /// The OS process group ID (`pgid`) of `pid`, when readable (`/proc/<pid>/stat` field 5 on
+    /// Linux, `ps -o pgid= -p <pid>` on macOS). Default returns unread for minimal test readers.
+    fn pgid(&self, _pid: u32) -> Result<u32, String> {
+        Err("pgid unread".to_string())
+    }
+
+    /// The OS cgroup v2 directory path containing `pid`, when running in a dedicated worker cgroup
+    /// (Linux `/proc/<pid>/cgroup` unified `0::<rel>` mapped under `/sys/fs/cgroup`). Default
+    /// returns unread for hosts/mocks without cgroup containment.
+    fn cgroup(&self, _pid: u32) -> Result<String, String> {
+        Err("cgroup unread".to_string())
+    }
+}
+
+/// Attests the real OS process group ID (`pgid > 1`) of a known worker process `pid` via `reader`.
+pub fn attest_worker_pgid(reader: &dyn ProcessReader, pid: u32) -> Option<u32> {
+    if pid <= 1 {
+        return None;
+    }
+    reader.pgid(pid).ok().filter(|&pgid| pgid > 1)
+}
+
+/// Attests a dedicated worker OS cgroup v2 directory path for `pid` via `reader`, rejecting empty,
+/// relative, root (`/` or `/sys/fs/cgroup`), or shared login-session cgroups so `setsid()`/`setpgid()`
+/// cannot escape containment.
+pub fn attest_worker_cgroup(reader: &dyn ProcessReader, pid: u32) -> Option<String> {
+    if pid <= 1 {
+        return None;
+    }
+    let raw = reader.cgroup(pid).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || !trimmed.starts_with('/')
+        || trimmed == "/"
+        || trimmed == "/sys/fs/cgroup"
+        || trimmed == "/sys/fs/cgroup/"
+        || trimmed.contains("..")
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Attests the worker process group ID for a live calling process (`caller_pid`):
+/// - If `caller_pid` inherited a process group (`pgid > 1 && pgid != caller_pid`), returns that
+///   inherited `pgid` (e.g. a short-lived CLI invoked by an agent in the agent's process group).
+/// - If `caller_pid` is its own process-group leader (`pgid == caller_pid`), walks its ancestors
+///   via `reader.read` to find the enclosing worker process group (`pgid > 1 && pgid != caller_pid`),
+///   falling back to `caller_pgid` only when no distinct enclosing process group exists (e.g. a
+///   long-lived MCP/daemon worker process that is its own group leader).
+pub fn attest_caller_worker_pgid(reader: &dyn ProcessReader, caller_pid: u32) -> Option<u32> {
+    if caller_pid <= 1 {
+        return None;
+    }
+    let self_pgid = reader.pgid(caller_pid).ok().filter(|&p| p > 1)?;
+    if self_pgid != caller_pid {
+        return Some(self_pgid);
+    }
+    let mut next = reader.read(caller_pid).ok().map(|s| s.ppid).unwrap_or(0);
+    let mut hops = 0usize;
+    while next > 1 && hops < MAX_ANCESTORS {
+        if let Ok(anc_pgid) = reader.pgid(next)
+            && anc_pgid > 1
+            && anc_pgid != caller_pid
+        {
+            return Some(anc_pgid);
+        }
+        next = match reader.read(next) {
+            Ok(stat) if stat.ppid != next => stat.ppid,
+            _ => 0,
+        };
+        hops += 1;
+    }
+    Some(self_pgid)
 }
 
 /// One process, as a [`ProcessReader`] reads it. A part that did not read is `Err` with why.
@@ -247,6 +322,75 @@ impl ProcessReader for SystemProcesses {
     fn read(&self, pid: u32) -> Result<ProcStat, String> {
         if std::path::Path::new("/proc/self/stat").exists() { read_proc(pid) } else { read_ps(pid) }
     }
+
+    fn pgid(&self, pid: u32) -> Result<u32, String> {
+        if std::path::Path::new("/proc/self/stat").exists() { read_proc_pgid(pid) } else { read_ps_pgid(pid) }
+    }
+
+    fn cgroup(&self, pid: u32) -> Result<String, String> {
+        if std::path::Path::new("/proc/self/cgroup").exists() {
+            read_proc_cgroup(pid)
+        } else {
+            Err("cgroup v2 unavailable on this OS".to_string())
+        }
+    }
+}
+
+/// Linux unified cgroup v2: parses `0::<rel_path>` from `/proc/<pid>/cgroup` and maps it under
+/// `/sys/fs/cgroup`. Rejects root (`/`) and generic user login sessions (`session-*.scope`) so
+/// only a dedicated worker cgroup (e.g. `maestro-worker-*`, `paseo-worker-*`, `t3-worker-*`, or a
+/// container/pod leaf scope) is attested as containment.
+fn read_proc_cgroup(pid: u32) -> Result<String, String> {
+    let text =
+        std::fs::read_to_string(format!("/proc/{pid}/cgroup")).map_err(|e| format!("/proc/{pid}/cgroup: {e}"))?;
+    for line in text.lines() {
+        if let Some(rel) = line.strip_prefix("0::") {
+            let rel = rel.trim();
+            if rel.is_empty() || rel == "/" || rel.contains("..") {
+                return Err(format!("pid {pid} is in root cgroup (not contained)"));
+            }
+            let leaf = rel.rsplit('/').next().unwrap_or("");
+            let is_dedicated = leaf.starts_with("maestro-worker-")
+                || leaf.starts_with("paseo-worker-")
+                || leaf.starts_with("t3-worker-")
+                || leaf.starts_with("docker-")
+                || leaf.starts_with("libpod-")
+                || leaf.starts_with("containerd-");
+            if !is_dedicated {
+                return Err(format!("pid {pid} cgroup {rel:?} is not a dedicated worker cgroup"));
+            }
+            let full = format!("/sys/fs/cgroup{rel}");
+            if std::path::Path::new(&full).join("cgroup.procs").is_file() {
+                return Ok(full);
+            }
+            return Err(format!("cgroup path {full} has no readable cgroup.procs"));
+        }
+    }
+    Err(format!("/proc/{pid}/cgroup has no unified v2 entry"))
+}
+
+/// Linux: `/proc/<pid>/stat` field 5 (`pgrp`, index 2 after `)`).
+fn read_proc_pgid(pid: u32) -> Result<u32, String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|e| format!("/proc/{pid}/stat: {e}"))?;
+    let close = stat.rfind(')').ok_or("stat has no command")?;
+    let rest: Vec<&str> = stat.get(close + 1..).unwrap_or_default().split_whitespace().collect();
+    // After the command: state (0), ppid (1), pgrp (2).
+    rest.get(2).and_then(|p| p.parse().ok()).ok_or_else(|| "stat has no pgrp".to_string())
+}
+
+/// Elsewhere (macOS): `ps -o pgid= -p <pid>` in the C locale.
+fn read_ps_pgid(pid: u32) -> Result<u32, String> {
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("ps: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("ps found no process {pid}"));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim().parse::<u32>().map_err(|_| format!("ps pgid {:?}", text.trim()))
 }
 
 /// Linux: `/proc/<pid>/stat` (comm, ppid, start ticks since boot), `/proc/<pid>/status` (real

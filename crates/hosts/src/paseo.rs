@@ -469,6 +469,16 @@ impl PaseoRegistry {
 
     /// Verify a caller claim against Paseo's registry (`Callers.verify`).
     pub fn verify(&self, claim: &CallerClaim) -> Result<VerifiedSession, IdentityRefusal> {
+        self.verify_with_reader(claim, &crate::attribution::SystemProcesses)
+    }
+
+    /// Verify a caller claim against Paseo's registry, attesting `worker_pgid` from `agent.pid`
+    /// through `reader` when the agent's live process group is readable.
+    pub fn verify_with_reader(
+        &self,
+        claim: &CallerClaim,
+        reader: &dyn crate::attribution::ProcessReader,
+    ) -> Result<VerifiedSession, IdentityRefusal> {
         if claim.surface != Surface::Paseo {
             return Err(IdentityRefusal::new(
                 RefusalReason::CrossSurface,
@@ -533,7 +543,7 @@ impl PaseoRegistry {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .map(|handle_id| format!("paseo-owner:{}:{handle_id}", agent.id));
-        let verified = VerifiedSession::new(
+        let mut verified = VerifiedSession::new(
             SessionRef { surface: Surface::Paseo, environment: None, id: agent.id },
             agent.cwd,
             harness,
@@ -541,10 +551,16 @@ impl PaseoRegistry {
             agent.pending_permissions,
         )
         .with_incarnation(incarnation);
-        Ok(match owner_marker {
-            Some(marker) => verified.with_owner_marker(marker),
-            None => verified,
-        })
+        if let Some(marker) = owner_marker {
+            verified = verified.with_owner_marker(marker);
+        }
+        if let Some(pgid) = agent.pid.and_then(|pid| crate::attribution::attest_worker_pgid(reader, pid)) {
+            verified = verified.with_worker_pgid(pgid);
+        }
+        if let Some(cg) = agent.pid.and_then(|pid| crate::attribution::attest_worker_cgroup(reader, pid)) {
+            verified = verified.with_worker_cgroup(cg);
+        }
+        Ok(verified)
     }
 
     /// Whether `child` is a live session `parent` directly started (`Callers.started`).

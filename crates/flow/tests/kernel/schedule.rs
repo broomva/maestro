@@ -87,6 +87,7 @@ impl Fx {
             outputs,
             verify,
             performer: None,
+            performers: Vec::new(),
             tool_use_id: None,
             audit: None,
         };
@@ -697,6 +698,7 @@ fn an_agent_this_build_lacks_is_an_unknown_agent_launch_spec_never_none() {
         ir,
         params: json!({}),
         owner: None,
+        parent_ref: None,
         audit: None,
     };
     let fi = id("fi_ghost");
@@ -938,6 +940,7 @@ fn an_instance_that_does_not_replay_is_an_error_never_an_empty_flow() {
         ir: f.flow.ir().clone(),
         params: json!({}),
         owner: None,
+        parent_ref: None,
         audit: None,
     };
     let fresh = |f: &mut Fx, name: &str, first: NewEvent| {
@@ -1344,6 +1347,7 @@ fn params_and_outputs_nested_too_deep_to_read_back_are_refused_before_anything_i
         outputs: nested(MAX_NESTING),
         verify: None,
         performer: None,
+        performers: Vec::new(),
         tool_use_id: None,
         audit: None,
     };
@@ -1489,6 +1493,7 @@ fn old_ir_replays_builtin_agent_with_the_current_binary() {
         ir,
         params: json!({}),
         owner: None,
+        parent_ref: None,
         audit: None,
     };
     let fi = id("fi_old_builtin");
@@ -1545,6 +1550,7 @@ fn old_and_new_verify_instances_have_a_definition_mismatch() {
         ir: old,
         params: verify_params(true),
         owner: None,
+        parent_ref: None,
         audit: None,
     };
     let old_id = id("fi_old_verify");

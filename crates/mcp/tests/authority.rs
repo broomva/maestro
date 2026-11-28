@@ -292,6 +292,7 @@ fn a_flow_write_changes_only_its_instance_and_the_flow_ledger() {
         harness: None,
         pending_permissions: vec![],
         parent_id: None,
+        pid: None,
     });
     let hosts = maestro_hosts::SurfaceRegistry::new(None, None, Some(direct));
     let call = |tool: &str, mut args: serde_json::Value| {
@@ -390,6 +391,7 @@ fn the_flow_ask_writes_its_instance_and_one_ask_through_the_writer_of_record() {
         harness: None,
         pending_permissions: vec![],
         parent_id: None,
+        pid: None,
     });
     let hosts = maestro_hosts::SurfaceRegistry::new(None, None, Some(direct));
     let call = |tool: &str, mut args: serde_json::Value| {
@@ -493,6 +495,7 @@ fn a_flow_proposal_writes_its_instance_and_one_ask_and_takes_no_answer() {
             harness: None,
             pending_permissions: vec![],
             parent_id: None,
+            pid: None,
         });
     }
     let hosts = maestro_hosts::SurfaceRegistry::new(None, None, Some(direct));

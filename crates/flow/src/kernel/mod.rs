@@ -54,6 +54,7 @@ mod definition;
 mod error;
 pub mod events;
 pub mod exec;
+pub mod fencing;
 pub mod guard;
 pub mod ir;
 mod jq;
@@ -67,7 +68,9 @@ mod spined;
 pub mod stop;
 #[cfg(test)]
 mod stopped;
+pub mod subflow;
 mod write;
+pub mod writeset;
 
 pub use adoption::{
     MAX_PROPOSALS, PROPOSAL_NOT_FILED, ProposalStatus, Proposed, Proposing, propose_adoption, propose_retirement,

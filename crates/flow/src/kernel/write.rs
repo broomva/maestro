@@ -134,14 +134,20 @@
 use super::adoption::{Owners, owners};
 use super::error::{KernelError, Refusal};
 use super::events::{
-    Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat, KernelEvent, Owner, Performer, Refused, Started,
-    VerifyRecord, digest, marker_digest,
+    Chosen, Claimed, Completed, EffectStarted, Guarded, Heartbeat, KernelEvent, MapItemSpec, Owner, Performer, Refused,
+    Started, VerifyRecord, digest, marker_digest,
 };
 use super::exec::{self, Feed, Limits, Ran, Search};
+use super::fencing::{FencedActuator, FencedWriteOutcome, FencingError, FencingStore};
 use super::guard::{self, GUARD_TIMEOUT, Judged};
 use super::ir::{Class, Ir, Iteration, Node, RouteRef};
 use super::replay::{Awaiting, Next, Reason, State, awaiting, guard_input, next_of, pinned, secs};
 use super::snapshot;
+use super::subflow::{
+    check_child_write_fence, child_requires_write_set, child_spawn_owner_epoch, claim_map_item, expand_map,
+    finalize_map_item, fold_map_state, parent_current_owner, parent_owner_epoch,
+};
+use super::writeset::verify_worktree_writes_auto;
 use crate::FlowError;
 use crate::clock;
 use crate::ids::InstanceId;
@@ -346,11 +352,32 @@ fn route(log: &Log, started: &Started, node: &str, who: Option<&Performer>) -> R
                 if doc.is_none() {
                     doc = Some(guard_input(log, started, node).map_err(|e| e.to_string())?);
                 }
-                let harness = doc.as_ref().and_then(|d| d["nodes"][m.as_str()]["performer"]["harness"].as_str());
-                let Some(p) = harness.and_then(provider_of) else {
-                    return Err(format!("the receipt of {m} records no attested provider (harness {harness:?})"));
-                };
-                excluded.push((m.clone(), p.to_string()));
+                let is_map_or_subflow = started
+                    .ir
+                    .nodes
+                    .get(m)
+                    .is_some_and(|n| matches!(n.class, Class::Map { .. } | Class::Subflow { .. }));
+                if is_map_or_subflow {
+                    let Some(arr) = doc.as_ref().and_then(|d| d["nodes"][m.as_str()]["performers"].as_array()) else {
+                        return Err(format!("the receipt of {m} records no performers list"));
+                    };
+                    // Empty map (0 items) excludes no providers; any completed child must be attested.
+                    for (idx, perf) in arr.iter().enumerate() {
+                        let harness = perf.get("harness").and_then(Value::as_str);
+                        let Some(p) = harness.and_then(provider_of) else {
+                            return Err(format!(
+                                "child performer #{idx} of {m} records no attested provider (harness {harness:?})"
+                            ));
+                        };
+                        excluded.push((format!("{m}[{idx}]"), p.to_string()));
+                    }
+                } else {
+                    let harness = doc.as_ref().and_then(|d| d["nodes"][m.as_str()]["performer"]["harness"].as_str());
+                    let Some(p) = harness.and_then(provider_of) else {
+                        return Err(format!("the receipt of {m} records no attested provider (harness {harness:?})"));
+                    };
+                    excluded.push((m.clone(), p.to_string()));
+                }
             }
         }
     }
@@ -409,6 +436,8 @@ struct ClaimRec {
     cancel_at: Option<Timestamp>,
     inputs: BTreeMap<String, String>,
     spent: bool,
+    /// Parent `owner_epoch` recorded at child claim time (IR v10).
+    owner_epoch: Option<u64>,
 }
 
 /// Every claim in an instance's log, folded in log order.
@@ -478,6 +507,7 @@ impl Claims {
                         cancel_at,
                         inputs: c.inputs,
                         spent: false,
+                        owner_epoch: c.owner_epoch,
                     };
                     claims.latest.insert(key, c.token_sha256.clone());
                     claims.recs.insert(c.token_sha256, rec);
@@ -610,10 +640,15 @@ pub fn claim_as(
     let started = pinned(&log)?;
     if verdicts.iter().any(|v| matches!(v, Verdict::Recorded { .. })) {
         check_writable(&log, &started)?;
-        check_owner_only(&log, &started, instance, session)?;
-    } else {
+        if started.parent_ref.is_none() {
+            check_owner_only(&log, &started, instance, session)?;
+        }
+    } else if started.parent_ref.is_none() {
         check_owner(&log, &started, instance, session)?;
+    } else {
+        check_writable(&log, &started)?;
     }
+    let child_claim_epoch = check_child_fence_in_guard(&guard, &log, &started, session, None, false)?;
     let now = wall(&log)?;
     let Some(n) = started.ir.nodes.get(node) else {
         return Err(Refusal::UnknownNode { node: node.to_string() }.into());
@@ -640,9 +675,88 @@ pub fn claim_as(
     if let Err(detail) = route(&log, &started, node, who.as_ref()) {
         return Err(Refusal::RoutingViolated { node: node.to_string(), detail }.into());
     }
+
+    // Wire `Class::Map` directly into normal kernel `claim_as`: expand `over:` on first claim,
+    // pick the next eligible item respecting `disjoint_writes` / `max_concurrency` / `reserve_providers`,
+    // spawn its deterministic child via `claim_map_item`, and bind the parent claim to it!
+    let mut map_claim_meta: Option<(String, String)> = None;
+    if let Class::Map { over, item_key: item_key_expr, item_retry_max, .. } = &n.class {
+        let caller_owner = owner(session)?;
+        let cur_state = fold_map_state(&log, node, &enabled.iteration);
+        if cur_state.latest_epoch.is_none() {
+            let doc = guard_input(&log, &started, node)?;
+            let specs = extract_map_items(&doc, over, item_key_expr).map_err(|detail| Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "invalid_map_expansion",
+                detail,
+            })?;
+            expand_map(
+                &mut guard,
+                instance,
+                node,
+                enabled.iteration.clone(),
+                specs,
+                enabled.inputs.clone(),
+                &caller_owner,
+            )
+            .map_err(|e| Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: e.code(),
+                detail: e.to_string(),
+            })?;
+        }
+        let refreshed_log = guard.log(instance)?;
+        let st = fold_map_state(&refreshed_log, node, &enabled.iteration);
+        // If empty map expanded and settled immediately, report NotEnabled(done).
+        if st.items.is_empty() {
+            return Err(Refusal::NotEnabled { node: node.to_string(), state: "done".to_string() }.into());
+        }
+        let perf = who.clone().unwrap_or_else(|| performer(session));
+        let mut last_err: Option<super::subflow::SubflowError> = None;
+        for k in st.items.keys() {
+            if st.completed.contains_key(k) || st.in_flight.contains_key(k) {
+                continue;
+            }
+            let fails = st.failed_attempts.get(k).map_or(0, Vec::len) as u32;
+            if fails > *item_retry_max {
+                continue;
+            }
+            match claim_map_item(
+                &mut guard,
+                instance,
+                node,
+                enabled.iteration.clone(),
+                k,
+                Some(perf.clone()),
+                &caller_owner,
+            ) {
+                Ok((cid, _epoch)) => {
+                    map_claim_meta = Some((k.clone(), cid.to_string()));
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+        if map_claim_meta.is_none() {
+            if let Some(e) = last_err {
+                return Err(Refusal::ChildFenced {
+                    child: instance.to_string(),
+                    code: e.code(),
+                    detail: e.to_string(),
+                }
+                .into());
+            }
+            return Err(Refusal::NotEnabled { node: node.to_string(), state: "waiting".to_string() }.into());
+        }
+    }
+
+    let log = guard.log(instance)?;
     let claims = Claims::fold(&log)?;
     let prior = claims.latest_of(&(node.to_string(), enabled.iteration.clone()));
-    if let Some(p) = prior
+    if map_claim_meta.is_none()
+        && let Some(p) = prior
         && !p.spent
         && now < p.lease_until
         && p.inputs == enabled.inputs
@@ -654,17 +768,72 @@ pub fn claim_as(
     let cancel_at = n.cancel_after.map(|after| until(now, secs(after))).transpose()?;
     let lease_until = capped(until(now, lease(n))?, cancel_at);
     let token = format!("{instance}.{}", random_epoch()?);
+    let mut claim_inputs = enabled.inputs.clone();
+    if let Some((ik, cid)) = map_claim_meta {
+        claim_inputs.insert("__map_item_key".to_string(), ik);
+        claim_inputs.insert("__map_child_instance".to_string(), cid);
+    }
+    let worker_pgid = session.worker_pgid();
+    let worker_cgroup = session.worker_cgroup().map(str::to_string);
+    if started.parent_ref.is_some() {
+        let Some(pgid) = worker_pgid.filter(|&p| p > 1) else {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "missing_worker_pgid",
+                detail: "child subflow claim requires a host-attested worker process group ID (worker_pgid > 1)".into(),
+            }
+            .into());
+        };
+        let Ok(pgid_i32) = i32::try_from(pgid) else {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "missing_worker_pgid",
+                detail: format!("invalid worker_pgid {pgid}"),
+            }
+            .into());
+        };
+        let Some(pid_handle) = rustix::process::Pid::from_raw(pgid_i32) else {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "missing_worker_pgid",
+                detail: format!("invalid zero worker_pgid {pgid}"),
+            }
+            .into());
+        };
+        if let Err(err) = rustix::process::test_kill_process_group(pid_handle) {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "dead_worker_pgid",
+                detail: format!("host-attested worker process group pgid={pgid} is not live at claim time ({err})"),
+            }
+            .into());
+        }
+        let Some(cg) = worker_cgroup.as_deref() else {
+            return Err(Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "missing_worker_cgroup",
+                detail: "child subflow claim requires host-attested OS cgroup containment (worker_cgroup); PGID alone cannot rule out setsid/setpgid escape".into(),
+            }
+            .into());
+        };
+        if let Err(detail) = super::subflow::verify_cgroup_live(cg) {
+            return Err(Refusal::ChildFenced { child: instance.to_string(), code: "dead_worker_cgroup", detail }.into());
+        }
+    }
     let claimed = Claimed {
         node: node.to_string(),
         iteration: enabled.iteration.clone(),
         attempt,
         lease_until: lease_until.to_string(),
         token_sha256: line_hash(token.as_bytes()),
-        inputs: enabled.inputs.clone(),
+        inputs: claim_inputs,
         performer: Some(who.unwrap_or_else(|| performer(session))),
         tool_use_id: None,
         cancel_at: cancel_at.map(|at| at.to_string()),
         audit: session.audit().cloned(),
+        owner_epoch: child_claim_epoch,
+        worker_pgid,
+        worker_cgroup,
     };
     let appended = append_writable(&mut guard, instance, log.seq(), claimed.to_event()?)?;
     Ok(Claim {
@@ -709,13 +878,20 @@ fn hold(
     now: Timestamp,
 ) -> Result<Held, KernelError> {
     let started = pinned(&log)?;
-    let owners = check_owner(&log, &started, instance, session)?;
+    let owners = if started.parent_ref.is_some() {
+        check_writable(&log, &started)?;
+        None
+    } else {
+        Some(check_owner(&log, &started, instance, session)?)
+    };
     let claims = Claims::fold(&log)?;
     let Some(rec) = claims.recs.get(sha).cloned() else {
         return Err(Refusal::UnknownToken { instance: instance.to_string() }.into());
     };
     // A claim the former owner took holds nothing for the new one: it runs out on its lease.
-    if rec.seq < owners.since {
+    if let Some(owners) = owners
+        && rec.seq < owners.since
+    {
         return Err(Refusal::FormerOwnersClaim { node: rec.node }.into());
     }
     if rec.spent {
@@ -723,10 +899,11 @@ fn hold(
     }
     let key = (rec.node.clone(), rec.iteration.clone());
     let latest = claims.latest.get(&key).map(String::as_str);
-    if let Some(cancel_at) = rec.cancel_at.filter(|at| latest == Some(sha) && now >= *at) {
+    let is_map_node = started.ir.nodes.get(&rec.node).is_some_and(|n| matches!(n.class, Class::Map { .. }));
+    if let Some(cancel_at) = rec.cancel_at.filter(|at| (is_map_node || latest == Some(sha)) && now >= *at) {
         return Err(Refusal::Cancelled { node: rec.node, cancel_at: cancel_at.to_string() }.into());
     }
-    if latest != Some(sha) || now >= rec.lease_until {
+    if (!is_map_node && latest != Some(sha)) || now >= rec.lease_until {
         return Err(Refusal::LeaseExpired { node: rec.node, lease_until: rec.lease_until.to_string() }.into());
     }
     let next = next_of(&log, &started, now)?;
@@ -736,7 +913,9 @@ fn hold(
     if *iteration != rec.iteration || state == Some(State::Exhausted) {
         return Err(Refusal::NotCurrentIteration { node: rec.node }.into());
     }
-    if *inputs != rec.inputs {
+    let rec_inputs_clean: BTreeMap<String, String> =
+        rec.inputs.iter().filter(|(k, _)| !k.starts_with("__map_")).map(|(k, v)| (k.clone(), v.clone())).collect();
+    if *inputs != rec_inputs_clean {
         return Err(Refusal::InputsChanged { node: rec.node }.into());
     }
     let effect_started = claims.effects.contains_key(&(rec.node.clone(), rec.iteration.clone(), rec.inputs.clone()));
@@ -946,6 +1125,7 @@ fn receipt(held: &Held, session: &VerifiedSession, outputs: Value, verify: Verif
         outputs,
         verify: Some(verify),
         performer: Some(held.who.clone()),
+        performers: Vec::new(),
         tool_use_id: None,
         audit: session.audit().cloned(),
     }
@@ -1028,6 +1208,7 @@ pub fn complete_as(
     };
     limits.check().map_err(|detail| Refusal::InvalidLimits { detail })?;
     let (instance, sha) = parse_token(token)?;
+    let fence_db_path = ledger.layout.root.join("fencing_epochs.sqlite");
     let mut guard = ledger.lock()?;
     let log = guard.log(&instance)?;
     let now = wall(&log)?;
@@ -1036,10 +1217,128 @@ pub fn complete_as(
     if let Err(detail) = route(&held.log, &held.started, &held.rec.node, Some(&held.who)) {
         return refuse(&mut guard, &held, ("routing_violated", detail), &[]);
     }
-    let plan = match prepare(&held, &outputs) {
+
+    // Wire `Class::Map` directly into normal kernel `complete_as`: finalize the claimed map item
+    // by reading the child's latched log under lock (never caller say-so!).
+    if matches!(held.node()?.class, Class::Map { .. }) {
+        let caller_owner = owner(session)?;
+        let item_key = outputs
+            .get("item_key")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .or_else(|| held.rec.inputs.get("__map_item_key").cloned())
+            .ok_or_else(|| Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "invalid_child",
+                detail: "map completion missing item_key".to_string(),
+            })?;
+        let child_str = outputs
+            .get("child_instance")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .or_else(|| held.rec.inputs.get("__map_child_instance").cloned())
+            .ok_or_else(|| Refusal::ChildFenced {
+                child: instance.to_string(),
+                code: "invalid_child",
+                detail: "map completion missing child_instance".to_string(),
+            })?;
+        let child_id = InstanceId::new(&child_str).map_err(|e| Refusal::ChildFenced {
+            child: child_str.clone(),
+            code: "invalid_child",
+            detail: e.to_string(),
+        })?;
+        let failed_err = outputs.get("failed_error").and_then(Value::as_str);
+        let clean_inputs: BTreeMap<String, String> = held
+            .rec
+            .inputs
+            .iter()
+            .filter(|(k, _)| !k.starts_with("__map_"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Err(err) = finalize_map_item(
+            &mut guard,
+            &instance,
+            &held.rec.node,
+            held.rec.iteration.clone(),
+            &item_key,
+            &child_id,
+            failed_err,
+            clean_inputs,
+            &caller_owner,
+        ) {
+            return refuse(&mut guard, &held, (err.code(), err.to_string()), &[]);
+        }
+        let log_after = guard.log(&instance)?;
+        let last_ev = log_after
+            .events
+            .last()
+            .cloned()
+            .ok_or_else(|| KernelError::Encode("empty log after map finalize".into()))?;
+        let appended = Appended { event: last_ev, cache: crate::ledger::CacheWrite::Updated };
+        let verify = VerifyRecord {
+            argv: vec!["maestro-map-finalize".to_string(), item_key, child_str],
+            exit: 0,
+            stdout_sha256: line_hash(b""),
+            ran_at: clock::now().to_string(),
+        };
+        drop(guard);
+        let verdicts = settled(ledger, session, &instance);
+        return Ok(Completion::Completed { appended, verify, stderr: String::new(), verdicts });
+    }
+
+    let mut plan = match prepare(&held, &outputs) {
         Ok(plan) => plan,
         Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
     };
+    let is_reconcile = plan.step == Step::Reconcile;
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, held.rec.owner_epoch, is_reconcile)?;
+    let mut effect_fence_cfg: Option<(String, Option<u64>, PathBuf, String, FencedActuator)> = None;
+    if is_reconcile {
+        // Real crash recovery path: `EffectStarted` is already in the flow log, so `prepare()`
+        // selected `Step::Reconcile`. If this node is a fenced built-in kernel actuator, route
+        // directly into the actuator's atomic WAL reconciliation instead of the shell `reconcile`
+        // command so crash-pending rows (`fenced_git_refs.state = 'pending'`) and Crash Point 4
+        // already-committed ops reconcile cleanly end-to-end.
+        let explicit_fencing =
+            held.started.params.get("fencing_resource").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+        if let Some(Class::Effect { run, .. }) = held.started.ir.nodes.get(&held.rec.node).map(|n| &n.class)
+            && !run.is_empty()
+        {
+            let mut effect_argv = Vec::with_capacity(run.len());
+            let mut rem = MAX_ARGV;
+            for word in run {
+                match fill(&held.started.ir, &held.started.params, word, rem) {
+                    Ok(filled) => {
+                        rem -= filled.len();
+                        effect_argv.push(filled);
+                    }
+                    Err(e) => return refuse(&mut guard, &held, ("template_invalid", e), &[]),
+                }
+            }
+            let builtin_actuator = match FencedActuator::parse(&effect_argv) {
+                Ok(act) => act,
+                Err(detail) => return refuse(&mut guard, &held, ("invalid_fenced_actuator", detail), &[]),
+            };
+            if let Some(actuator) = builtin_actuator {
+                if !explicit_fencing {
+                    return refuse(
+                        &mut guard,
+                        &held,
+                        (
+                            "unfenced_child_effect",
+                            "fenced/child Class::Effect requires explicit fencing_resource with a built-in kernel atomic actuator".to_string(),
+                        ),
+                        &[],
+                    );
+                }
+                let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
+                let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
+                let op_id = effect_op_id(&instance, &held.rec.node, &held.rec.iteration);
+                plan.argv = effect_argv;
+                effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db_path.clone(), op_id, actuator));
+            }
+        }
+    }
     if let Err(unfit) = check_receipt(&held, session, &outputs, &plan.argv) {
         return refuse(&mut guard, &held, unfit, &[]);
     }
@@ -1053,6 +1352,7 @@ pub fn complete_as(
         let log = guard.log(&instance)?;
         let judged_at = wall(&log)?;
         held = name(hold(log, session, &instance, &sha, judged_at)?);
+        check_child_fence_in_guard(&guard, &held.log, &held.started, session, held.rec.owner_epoch, false)?;
         // Another completion of this claim started the effect meanwhile: it is never run twice.
         if held.effect_started {
             let reason = "another completion started this effect; complete again to reconcile it";
@@ -1065,6 +1365,50 @@ pub fn complete_as(
             Ok(digest) => digest,
             Err(unfit) => return refuse(&mut guard, &held, unfit, &[]),
         };
+        let fence_db = fence_db_path.clone();
+        let is_child_subflow = held.started.parent_ref.is_some();
+        let explicit_fencing =
+            held.started.params.get("fencing_resource").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+        let builtin_actuator = match FencedActuator::parse(&plan.argv) {
+            Ok(act) => act,
+            Err(detail) => return refuse(&mut guard, &held, ("invalid_fenced_actuator", detail), &[]),
+        };
+        // ALL IR v10 child subflow effects and any explicitly fenced effect MUST execute a
+        // built-in kernel atomic actuator (`maestro:fenced-sqlite-kv` or `maestro:fenced-git-ref-cas`)
+        // directly in Rust (zero external shell, zero mutable wrapper delegation, zero TOCTOU).
+        // Arbitrary external shell commands cannot claim target-side atomic fencing and must use
+        // D6 option (b) post-termination reconciliation (`reconcile_superseded_effect`).
+        if is_child_subflow || explicit_fencing || builtin_actuator.is_some() {
+            if !explicit_fencing {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    (
+                        "unfenced_child_effect",
+                        "fenced/child Class::Effect requires explicit fencing_resource with a built-in kernel atomic actuator".to_string(),
+                    ),
+                    &[],
+                );
+            }
+            let Some(actuator) = builtin_actuator else {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    (
+                        "unfenced_external_effect_requires_reconcile",
+                        format!(
+                            "external command {:?} cannot run on the fenced atomic path; use a built-in kernel actuator (maestro:fenced-sqlite-kv / maestro:fenced-git-ref-cas) or post-termination reconciliation",
+                            plan.argv.first().map(String::as_str).unwrap_or("")
+                        ),
+                    ),
+                    &[],
+                );
+            };
+            let fence_resource = effect_fencing_resource(&held.started, &held.rec.node, &held.rec.inputs);
+            let pinned_epoch = held.started.params.get("fencing_epoch").and_then(Value::as_u64);
+            let op_id = effect_op_id(&instance, &held.rec.node, &held.rec.iteration);
+            effect_fence_cfg = Some((fence_resource, pinned_epoch, fence_db, op_id, actuator));
+        }
         let intent = EffectStarted {
             node: held.rec.node.clone(),
             iteration: held.rec.iteration.clone(),
@@ -1076,14 +1420,20 @@ pub fn complete_as(
     }
     // A claim's cancel deadline ends its command too: the run is no longer than what is left.
     let limits = &cancel_capped(limits, held.rec.cancel_at);
-    // The command runs with the flows lock released, so other writers and readers go on.
-    // Every command but the project's own in a snapshot searches the system's PATH (`exec`).
-    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref() };
+    // Drop the ledger lock BEFORE acquiring the per-resource fencing lock (disjoint lock order:
+    // never nested, zero deadlock).
     drop(guard);
     let ran_at = clock::now();
-    let ran = match &plan.snapshot {
-        Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
-        None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+    let feed = Feed { search: Search::Trusted, stdin: plan.stdin.as_deref(), extra_env: &[] };
+    let (ran, fence_commit_err) = match effect_fence_cfg {
+        Some(cfg) => run_fenced_effect(&plan, limits, cfg, &outputs)?,
+        None => (
+            match &plan.snapshot {
+                Some(commit) => snapshot::run_in(&plan.cwd, commit, &plan.argv, limits, plan.stdin.as_deref()),
+                None => exec::run(&plan.argv, &plan.cwd, limits, feed),
+            },
+            None,
+        ),
     };
     pause!("command_ran");
 
@@ -1092,6 +1442,7 @@ pub fn complete_as(
     let log = guard.log(&instance)?;
     let after = wall(&log)?;
     let held = name(hold(log, session, &instance, &sha, after)?);
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, held.rec.owner_epoch, is_reconcile)?;
     // The command and its input are bound to the pinned IR, params and claim inputs.
     if let Err(unfit) = prepare(&held, &outputs) {
         return refuse(&mut guard, &held, unfit, &[]);
@@ -1125,11 +1476,403 @@ pub fn complete_as(
     if let Some(unfit) = unfit {
         return refuse(&mut guard, &held, unfit, &stderr);
     }
+    if let Some((code, err)) = fence_commit_err {
+        return refuse(&mut guard, &held, (code, err), &stderr);
+    }
+    // Fail-closed 6-surface post-write isolation check for child subflow Work/Effect nodes:
+    // NEVER skips when disjoint_writes or non-empty write_set applies!
+    if let Some(parent_ref) = &held.started.parent_ref
+        && matches!(held.node()?.class, Class::Work { .. } | Class::Effect { .. })
+    {
+        let parent_id = InstanceId::new(&parent_ref.parent_instance).map_err(|_| Refusal::ChildFenced {
+            child: instance.to_string(),
+            code: "invalid_parent_ref",
+            detail: format!("invalid parent instance id {:?}", parent_ref.parent_instance),
+        })?;
+        let parent_log = guard.log(&parent_id)?;
+        let (required, ws) = child_requires_write_set(&parent_log, parent_ref);
+        if required {
+            if ws.is_empty() {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    ("write_set_violation", "empty write_set under disjoint_writes".to_string()),
+                    &stderr,
+                );
+            }
+            if !plan.cwd.is_dir() || !plan.cwd.join(".git").exists() {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    (
+                        "write_set_verification_failed",
+                        format!("child workdir is not a git worktree: {}", plan.cwd.display()),
+                    ),
+                    &stderr,
+                );
+            }
+            let cwd_str = plan.cwd.to_string_lossy();
+            let alloc_wt = held.started.params.get("child_worktree").and_then(Value::as_str);
+            if alloc_wt != Some(cwd_str.as_ref()) {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    (
+                        "write_set_violation",
+                        format!(
+                            "child workdir {cwd_str:?} does not match unique allocated child_worktree {alloc_wt:?}"
+                        ),
+                    ),
+                    &stderr,
+                );
+            }
+            if held.started.params.get("parent_repo").and_then(Value::as_str) == Some(cwd_str.as_ref()) {
+                return refuse(
+                    &mut guard,
+                    &held,
+                    ("write_set_violation", format!("child shares parent repository checkout: {cwd_str:?}")),
+                    &stderr,
+                );
+            }
+            let base_sha = held.started.params.get("base_sha").and_then(Value::as_str);
+            match verify_worktree_writes_auto(&plan.cwd, base_sha, &ws) {
+                Ok(ver) if !ver.is_ok() => {
+                    return refuse(
+                        &mut guard,
+                        &held,
+                        (
+                            "write_set_violation",
+                            format!("worktree wrote outside declared write_set: {:?}", ver.violations),
+                        ),
+                        &stderr,
+                    );
+                }
+                Err(e) => {
+                    return refuse(&mut guard, &held, ("write_set_verification_failed", e), &stderr);
+                }
+                Ok(_) => {}
+            }
+        }
+    }
     let completed = receipt(&held, session, outputs, verify.clone());
     let appended = append_writable(&mut guard, &instance, held.log.seq(), completed.to_event()?)?;
     drop(guard);
     let verdicts = settled(ledger, session, &instance);
     Ok(Completion::Completed { appended, verify, stderr: String::from_utf8_lossy(&stderr).into_owned(), verdicts })
+}
+
+/// Enforces parent-delegated ownership, `owner_epoch` adoption fencing, and `Superseded` fencing
+/// on every normal write verb (`claim_as`, `complete_as`, `choose`) for child subflow instances.
+///
+/// - When `claim_epoch` is `None` (`claim_as`), checks `parent_current_owner == caller_owner` and
+///   returns `Some(current_parent_epoch)` to stamp on the child's `Claimed` event so the new owner
+///   after adoption can continue working on existing children without stranding them.
+/// - When `claim_epoch` is `Some(ep)` (`complete_as` / `choose`), compares that claim's epoch
+///   against `parent_owner_epoch(&parent_log)` so pre-adoption claims are immediately fenced with
+///   `former_owners_claim`.
+fn check_child_fence_in_guard(
+    guard: &WriteGuard,
+    child_log: &Log,
+    child_started: &Started,
+    session: &VerifiedSession,
+    claim_epoch: Option<u64>,
+    reconcile_only: bool,
+) -> Result<Option<u64>, KernelError> {
+    let Some(parent_ref) = &child_started.parent_ref else {
+        return Ok(None);
+    };
+    let parent_id = InstanceId::new(&parent_ref.parent_instance).map_err(|_| Refusal::ChildFenced {
+        child: child_log.instance.to_string(),
+        code: "invalid_parent_ref",
+        detail: format!("invalid parent instance id {:?}", parent_ref.parent_instance),
+    })?;
+    let parent_log = guard.log(&parent_id)?;
+    let caller_owner = owner(session)?;
+    let current_epoch = parent_owner_epoch(&parent_log);
+    if parent_current_owner(&parent_log).as_ref() != Some(&caller_owner) {
+        return Err(Refusal::ChildFenced {
+            child: child_log.instance.to_string(),
+            code: "not_owner",
+            detail: "caller is not the current parent owner".to_string(),
+        }
+        .into());
+    }
+    let effective_epoch = match claim_epoch {
+        Some(ep) => ep,
+        None => {
+            // Confirm child is registered on parent, then stamp current parent epoch on this new claim.
+            if child_spawn_owner_epoch(&parent_log, child_log.instance.as_str()).is_none() {
+                return Err(Refusal::ChildFenced {
+                    child: child_log.instance.to_string(),
+                    code: "unregistered_child",
+                    detail: format!(
+                        "parent {} has no SubflowStarted record for child {}",
+                        parent_id, child_log.instance
+                    ),
+                }
+                .into());
+            }
+            current_epoch
+        }
+    };
+    check_child_write_fence(&parent_log, child_log, &caller_owner, effective_epoch, reconcile_only).map_err(|err| {
+        KernelError::from(Refusal::ChildFenced {
+            child: child_log.instance.to_string(),
+            code: err.code(),
+            detail: err.to_string(),
+        })
+    })?;
+    Ok(Some(current_epoch))
+}
+
+/// Evaluates simple dot-path expressions (e.g. `.nodes.plan_waves.outputs.lanes`, `.lane_id`)
+/// for normal `claim_as` map auto-expansion.
+fn resolve_dot_path<'a>(doc: &'a Value, expr: &str) -> Result<&'a Value, String> {
+    let trimmed = expr.trim();
+    if trimmed == "." {
+        return Ok(doc);
+    }
+    let rest = trimmed.strip_prefix('.').ok_or_else(|| format!("map expression must start with '.': {expr:?}"))?;
+    let mut cur = doc;
+    for seg in rest.split('.') {
+        if seg.is_empty() {
+            continue;
+        }
+        cur = cur.get(seg).ok_or_else(|| format!("path {expr:?} missing segment {seg:?}"))?;
+    }
+    Ok(cur)
+}
+
+fn extract_map_items(doc: &Value, over_expr: &str, item_key_expr: &str) -> Result<Vec<MapItemSpec>, String> {
+    let arr = resolve_dot_path(doc, over_expr)?
+        .as_array()
+        .ok_or_else(|| format!("over expression {over_expr:?} did not evaluate to a JSON array"))?;
+    let mut specs = Vec::with_capacity(arr.len());
+    for (idx, item) in arr.iter().enumerate() {
+        let key_val = resolve_dot_path(item, item_key_expr)?;
+        let key = key_val
+            .as_str()
+            .map(String::from)
+            .or_else(|| key_val.as_i64().map(|n| n.to_string()))
+            .or_else(|| key_val.as_u64().map(|n| n.to_string()))
+            .ok_or_else(|| format!("item[{idx}] key {item_key_expr:?} is not a string or integer"))?;
+        let write_set: Vec<String> = item
+            .get("write_set")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default();
+        specs.push(MapItemSpec { key, input_digest: digest(item), input: item.clone(), write_set });
+    }
+    Ok(specs)
+}
+
+type FencedRunOutcome = (Ran, Option<(&'static str, String)>);
+
+/// Canonical idempotency `op_id` for a fenced effect, keyed by `(instance, node, iteration)`
+/// rather than `attempt` so retries after claim lease expiry still match the crashed attempt's
+/// durable WAL entry.
+fn effect_op_id(instance: &InstanceId, node: &str, iteration: &Iteration) -> String {
+    let iter = serde_json::to_string(iteration).unwrap_or_else(|_| "{}".to_string());
+    format!("{}:{}:{}", instance.as_str(), node, iter)
+}
+
+/// Executes a built-in kernel-owned atomic fenced actuator (`FencedActuator::SqliteKvPut` or
+/// `FencedActuator::GitRefCas`) directly in Rust under the per-resource lock (zero external shell,
+/// zero wrapper scripts, zero hash-to-exec TOCTOU window).
+fn run_fenced_effect(
+    plan: &Plan,
+    _limits: &Limits,
+    (fence_resource, pinned_epoch, fence_db, op_id, actuator): (String, Option<u64>, PathBuf, String, FencedActuator),
+    outputs: &Value,
+) -> Result<FencedRunOutcome, KernelError> {
+    let is_reconcile = plan.step == Step::Reconcile;
+    let fence_store =
+        FencingStore::open(&fence_db).map_err(|e| KernelError::Encode(format!("fencing store open failed: {e}")))?;
+    let rlock = fence_store
+        .acquire_resource_lock(&fence_resource)
+        .map_err(|e| KernelError::Encode(format!("fencing lock failed: {e}")))?;
+    let payload_digest = digest(outputs);
+    let result_json = serde_json::to_string(outputs).unwrap_or_else(|_| "null".to_string());
+    let (expected_kind, expected_target) = match &actuator {
+        FencedActuator::SqliteKvPut { key, .. } => ("sqlite_kv", key.as_str()),
+        FencedActuator::GitRefCas { ref_name, .. } => ("git_ref_cas", ref_name.as_str()),
+    };
+
+    // Consult the durable per-operation ledger (`fenced_ops`) BEFORE touching epochs so an
+    // already-committed op recovers idempotently even after later ops have overwritten
+    // `resource_epochs.last_op_id`, and an unpinned `Step::Reconcile` with no durable record
+    // fails closed instead of granting a fresh epoch that could overwrite a newer writer.
+    let recorded_op = fence_store
+        .lookup_fenced_op(&fence_resource, &op_id)
+        .map_err(|e| KernelError::Encode(format!("fencing op lookup failed: {e}")))?;
+    if let Some(rec) = &recorded_op {
+        match rec.state.as_str() {
+            "committed" => {
+                let epoch_ok = pinned_epoch.is_none_or(|ep| ep == rec.epoch);
+                if epoch_ok
+                    && rec.payload_digest == payload_digest
+                    && rec.actuator_kind == expected_kind
+                    && rec.target_key == expected_target
+                {
+                    drop(rlock);
+                    let receipt = serde_json::json!({
+                        "resource": fence_resource,
+                        "epoch": rec.epoch,
+                        "op_id": op_id,
+                    });
+                    return Ok((
+                        Ran::Exited { code: Some(0), stdout: receipt.to_string().into_bytes(), stderr: Vec::new() },
+                        None,
+                    ));
+                }
+                drop(rlock);
+                return Ok((
+                    Ran::Failed {
+                        code: "stale_fencing_epoch",
+                        detail: format!(
+                            "fenced op {op_id} on {fence_resource} already committed at epoch={} with different metadata",
+                            rec.epoch
+                        ),
+                        stderr: Vec::new(),
+                    },
+                    None,
+                ));
+            }
+            "aborted" => {
+                drop(rlock);
+                return Ok((
+                    Ran::Failed {
+                        code: "stale_fencing_epoch",
+                        detail: format!("fenced op {op_id} on {fence_resource} was aborted at epoch={}", rec.epoch),
+                        stderr: Vec::new(),
+                    },
+                    None,
+                ));
+            }
+            "pending" => {
+                if let Some(ep) = pinned_epoch
+                    && ep != rec.epoch
+                {
+                    drop(rlock);
+                    return Ok((
+                        Ran::Failed {
+                            code: "stale_fencing_epoch",
+                            detail: format!(
+                                "pending fenced op {op_id} on {fence_resource} has epoch={} != pinned {ep}",
+                                rec.epoch
+                            ),
+                            stderr: Vec::new(),
+                        },
+                        None,
+                    ));
+                }
+            }
+            other => {
+                drop(rlock);
+                return Ok((
+                    Ran::Failed {
+                        code: "fencing_commit_failed",
+                        detail: format!("unexpected fenced_ops state {other:?} for ({fence_resource}, {op_id})"),
+                        stderr: Vec::new(),
+                    },
+                    None,
+                ));
+            }
+        }
+    } else if is_reconcile && pinned_epoch.is_none() {
+        // Unpinned `Step::Reconcile` with NO durable `fenced_ops` evidence: cannot distinguish
+        // pre-write crash from a concurrent newer writer without risking overwriting newer state.
+        // Fail closed instead of granting a fresh epoch.
+        drop(rlock);
+        return Ok((
+            Ran::Failed {
+                code: "effect_unreconciled",
+                detail: format!(
+                    "reconcile found no durable fenced_ops evidence for unpinned started effect ({fence_resource}, {op_id}); refusing to grant a fresh epoch"
+                ),
+                stderr: Vec::new(),
+            },
+            None,
+        ));
+    }
+
+    let epoch = match pinned_epoch {
+        Some(ep) => ep,
+        None => {
+            let pending_ep = match &actuator {
+                FencedActuator::GitRefCas { ref_name, expected_old_oid, new_oid } => fence_store
+                    .pending_git_ref_epoch(
+                        &fence_resource,
+                        ref_name,
+                        expected_old_oid,
+                        new_oid,
+                        &op_id,
+                        &payload_digest,
+                    )
+                    .map_err(|e| KernelError::Encode(format!("fencing pending lookup failed: {e}")))?,
+                FencedActuator::SqliteKvPut { .. } => None,
+            };
+            match pending_ep {
+                Some(ep) => ep,
+                None => fence_store
+                    .grant_epoch_locked(&rlock, &fence_resource)
+                    .map_err(|e| KernelError::Encode(format!("fencing grant failed: {e}")))?,
+            }
+        }
+    };
+    let outcome = match actuator {
+        FencedActuator::SqliteKvPut { key, value } => fence_store.execute_atomic_sqlite_kv(
+            &fence_resource,
+            epoch,
+            &op_id,
+            &payload_digest,
+            &result_json,
+            &key,
+            &value,
+        ),
+        FencedActuator::GitRefCas { ref_name, expected_old_oid, new_oid } => fence_store.execute_atomic_git_ref_cas(
+            &rlock,
+            &plan.cwd,
+            &fence_resource,
+            epoch,
+            &op_id,
+            &payload_digest,
+            &result_json,
+            &ref_name,
+            &expected_old_oid,
+            &new_oid,
+        ),
+    };
+    drop(rlock);
+    match outcome {
+        Ok(FencedWriteOutcome::Committed { epoch: ep })
+        | Ok(FencedWriteOutcome::IdempotentReplay { epoch: ep, .. }) => {
+            let receipt = serde_json::json!({
+                "resource": fence_resource,
+                "epoch": ep,
+                "op_id": op_id,
+            })
+            .to_string();
+            Ok((Ran::Exited { code: Some(0), stdout: receipt.into_bytes(), stderr: Vec::new() }, None))
+        }
+        Err(e) => {
+            let code = match e {
+                FencingError::StaleEpoch { .. } | FencingError::EpochAlreadyConsumed { .. } => "stale_fencing_epoch",
+                FencingError::Storage(_) => "fenced_actuator_failed",
+            };
+            Ok((Ran::Failed { code, detail: e.to_string(), stderr: Vec::new() }, None))
+        }
+    }
+}
+
+/// Computes the resource key fenced by `FencingStore` for a `Class::Effect` node.
+fn effect_fencing_resource(started: &Started, node: &str, inputs: &BTreeMap<String, String>) -> String {
+    if let Some(res) = started.params.get("fencing_resource").and_then(Value::as_str)
+        && !res.is_empty()
+    {
+        return res.to_string();
+    }
+    format!("effect:{}:{}:{}", started.ir.flow, node, digest(&serde_json::json!(inputs)))
 }
 
 /// `limits`, with the timeout no longer than what is left before `cancel_at` (at least 1 ms, the
@@ -1171,6 +1914,7 @@ pub fn choose(
     let log = guard.log(&instance)?;
     let now = wall(&log)?;
     let held = hold(log, session, &instance, &sha, now)?;
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, held.rec.owner_epoch, false)?;
     check_verb(&held, true)?;
     let reject = |guard: &mut WriteGuard, held: &Held, (code, reason): Unfit| {
         refused(guard, held, code, &reason).map(|appended| Choosing::Refused { appended, code, reason })
@@ -1193,6 +1937,7 @@ pub fn choose(
     let log = guard.log(&instance)?;
     let judged_at = wall(&log)?;
     let held = hold(log, session, &instance, &sha, judged_at)?;
+    check_child_fence_in_guard(&guard, &held.log, &held.started, session, held.rec.owner_epoch, false)?;
     if let Err(unfit) = enabled(&held) {
         return reject(&mut guard, &held, unfit);
     }

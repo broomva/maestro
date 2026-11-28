@@ -12,16 +12,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The newest IR version: 2 added workdir, 3 effect runs, 4 snapshots, 5 parameter types,
-/// 6 human ask templating and required fields, 7 receipt-aware stdin, 8 pinned agents, and 9
-/// enforced routing (`different_from`, BRO-3828).
-pub const IR_VERSION: u32 = 9;
+/// 6 human ask templating and required fields, 7 receipt-aware stdin, 8 pinned agents, 9
+/// enforced routing (`different_from`, BRO-3828), and 10 bounded dynamic `map` + version-pinned
+/// `subflow` (`uses:`, `disjoint_writes`, `reserve_providers`).
+pub const IR_VERSION: u32 = 10;
 
 /// The lowest IR version that expresses all features in this definition. Older shapes retain
 /// their original version and hash, and continue to replay under their pinned rules.
 pub fn version_for(ir: &Ir) -> u32 {
     let runs_effect = ir.nodes.values().any(|n| matches!(&n.class, Class::Effect { run, .. } if !run.is_empty()));
-    if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| !l.different_from.is_empty())) {
+    let uses_v10 = !ir.subflows.is_empty()
+        || ir.nodes.values().any(|n| matches!(&n.class, Class::Map { .. } | Class::Subflow { .. }));
+    if uses_v10 {
         IR_VERSION
+    } else if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| !l.different_from.is_empty())) {
+        9
     } else if ir.nodes.values().any(|n| n.class.launch().is_some_and(|l| l.pinned_agent.is_some())) {
         8
     } else if ir.receipt_stdin {
@@ -40,6 +45,15 @@ pub fn version_for(ir: &Ir) -> u32 {
         1
     }
 }
+
+/// The most items a single `map` node may expand (compile-time hard ceiling, IR v10).
+pub const MAX_MAP_ITEMS: u32 = 32;
+
+/// The maximum nesting depth of version-pinned `uses:` subflows (IR v10).
+pub const MAX_SUBFLOW_DEPTH: u32 = 2;
+
+/// The maximum statically bounded expanded node count across parent + subflows (IR v10).
+pub const MAX_EXPANDED_NODES: usize = 256;
 
 /// The most iterations a repeat may declare. Replay walks a repeat's iterations, so a bound keeps
 /// a replay's work bounded by the definition.
@@ -96,6 +110,10 @@ pub struct Ir {
     /// Opt in to receipt-aware stdin (IR version 7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub receipt_stdin: bool,
+    /// Pinned child subflow IRs referenced by `Class::Subflow` or `Class::Map` (`uses: name@ver`).
+    /// New in IR version 10; omitted when empty so IR v1-v9 hashes stay identical.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub subflows: BTreeMap<String, Ir>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +190,49 @@ pub enum Class {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         required_body_fields: Vec<String>,
     },
+    /// Version-pinned single child subflow (`uses: <flow>@<version>`, IR v10).
+    Subflow {
+        uses: String,
+        subflow_ir_hash: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        with: BTreeMap<String, String>,
+    },
+    /// Bounded dynamic fan-out over a verified upstream receipt (`class: map`, IR v10).
+    Map {
+        over: String,
+        item_key: String,
+        max_items: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_concurrency_param: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ready_when: Option<ReadyWhen>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reserve_providers: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provider_pool: Vec<String>,
+        #[serde(default)]
+        on_item_failure: OnItemFailure,
+        #[serde(default)]
+        item_retry_max: u32,
+        uses: String,
+        subflow_ir_hash: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        with: BTreeMap<String, String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadyWhen {
+    DisjointWrites,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnItemFailure {
+    #[default]
+    FailFast,
+    CollectAll,
 }
 
 impl Class {
@@ -183,6 +244,8 @@ impl Class {
             Class::Choice { .. } => "choice",
             Class::Effect { .. } => "effect",
             Class::Human { .. } => "human",
+            Class::Subflow { .. } => "subflow",
+            Class::Map { .. } => "map",
         }
     }
 
@@ -289,10 +352,26 @@ fn check_route(ir: &Ir, id: &str, n: &Node, refs: &[RouteRef]) -> Result<(), Com
                 let Some(target) = ir.nodes.get(m) else {
                     return Err(unknown(format!("node {id} different_from"), m));
                 };
-                if !matches!(target.class, Class::Work { .. }) {
-                    return Err(CompileError::invalid(format!(
-                        "node {id} differs from {m}, which is not a work node and records no performer"
-                    )));
+                match &target.class {
+                    Class::Work { .. } | Class::Subflow { .. } => {}
+                    Class::Map { reserve_providers, provider_pool, .. } => {
+                        let providers = super::write::PROVIDERS;
+                        let has_reserve = reserve_providers.is_some_and(|r| r >= 1 && (r as usize) < providers.len());
+                        let has_strict_pool = !provider_pool.is_empty()
+                            && provider_pool.len() < providers.len()
+                            && provider_pool.iter().all(|p| providers.contains(&p.as_str()));
+                        if !has_reserve && !has_strict_pool {
+                            return Err(CompileError::invalid(format!(
+                                "node {id} routes different_from({m}), so map node {m} must declare reserve_providers >= 1 or a strict-subset provider_pool"
+                            )));
+                        }
+                    }
+                    _ => {
+                        return Err(CompileError::invalid(format!(
+                            "node {id} differs from {m}, which is a {} node, not a work, map, or subflow node",
+                            target.class.name()
+                        )));
+                    }
                 }
                 if !n.needs.contains(&Need::Node { node: m.clone() }) {
                     return Err(CompileError::invalid(format!("node {id} differs from {m} without needing it")));
@@ -467,9 +546,187 @@ pub fn validate(ir: &Ir) -> Result<(), CompileError> {
                     return Err(CompileError::invalid(format!("human node {id} needs an ask")));
                 }
             }
+            Class::Subflow { uses, subflow_ir_hash, .. } => {
+                check_pinned_subflow(ir, id, uses, subflow_ir_hash)?;
+            }
+            Class::Map {
+                over,
+                item_key,
+                max_items,
+                max_concurrency_param,
+                reserve_providers,
+                provider_pool,
+                uses,
+                subflow_ir_hash,
+                ..
+            } => {
+                if *max_items == 0 || *max_items > MAX_MAP_ITEMS {
+                    return Err(CompileError::invalid(format!(
+                        "map node {id} needs max_items from 1 to {MAX_MAP_ITEMS}, got {max_items}"
+                    )));
+                }
+                if over.trim().is_empty() {
+                    return Err(CompileError::invalid(format!("map node {id} needs a non-empty over expression")));
+                }
+                if item_key.trim().is_empty() {
+                    return Err(CompileError::invalid(format!("map node {id} needs a non-empty item_key expression")));
+                }
+                let referenced = over_referenced_nodes(over);
+                if referenced.is_empty() {
+                    return Err(CompileError::invalid(format!(
+                        "map node {id} over expression must reference a node in needs (.nodes.<id>...)"
+                    )));
+                }
+                for m in referenced {
+                    node(&from, &m)?;
+                    if !n.needs.contains(&Need::Node { node: m.clone() }) {
+                        return Err(CompileError::invalid(format!(
+                            "map node {id} over expression reads {m} without needing it"
+                        )));
+                    }
+                }
+                if let Some(p) = max_concurrency_param {
+                    param(&from, p)?;
+                }
+                let providers = super::write::PROVIDERS;
+                if let Some(r) = reserve_providers
+                    && (*r == 0 || (*r as usize) >= providers.len())
+                {
+                    return Err(CompileError::invalid(format!(
+                        "map node {id} reserve_providers must be from 1 to {}",
+                        providers.len().saturating_sub(1)
+                    )));
+                }
+                if !provider_pool.is_empty() {
+                    let mut seen = BTreeSet::new();
+                    for p in provider_pool {
+                        if !providers.contains(&p.as_str()) {
+                            return Err(CompileError::invalid(format!(
+                                "map node {id} provider_pool names unknown provider {p:?}"
+                            )));
+                        }
+                        if !seen.insert(p.as_str()) {
+                            return Err(CompileError::invalid(format!(
+                                "map node {id} provider_pool lists {p:?} more than once"
+                            )));
+                        }
+                    }
+                }
+                check_pinned_subflow(ir, id, uses, subflow_ir_hash)?;
+            }
+        }
+    }
+    if !ir.subflows.is_empty() {
+        let mut visiting = BTreeSet::new();
+        visiting.insert(format!("{}@{}", ir.flow, ir.version));
+        let expanded = check_subflow_bounds(ir, 0, &mut visiting)?;
+        if expanded > MAX_EXPANDED_NODES {
+            return Err(CompileError::invalid(format!(
+                "statically bounded expanded node count {expanded} exceeds {MAX_EXPANDED_NODES}"
+            )));
         }
     }
     topology(ir)
+}
+
+/// Extracts node ids referenced as `.nodes.<id>` in a jq `over:` expression.
+pub fn over_referenced_nodes(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = expr.as_bytes();
+    let needle = b".nodes.";
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            let start = i + needle.len();
+            let mut end = start;
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-')
+            {
+                end += 1;
+            }
+            if end > start {
+                let id = expr[start..end].to_string();
+                if !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Parses `<name>@<version>` (pinned subflow reference).
+pub fn parse_pinned_uses(uses: &str) -> Option<(&str, u32)> {
+    let (name, ver) = uses.rsplit_once('@')?;
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return None;
+    }
+    let version: u32 = ver.parse().ok()?;
+    if version == 0 {
+        return None;
+    }
+    Some((name, version))
+}
+
+fn check_pinned_subflow(ir: &Ir, node_id: &str, uses: &str, expected_hash: &str) -> Result<(), CompileError> {
+    let Some((name, ver)) = parse_pinned_uses(uses) else {
+        return Err(CompileError::invalid(format!(
+            "node {node_id} uses {uses:?}, which must be version-pinned as <flow>@<version>"
+        )));
+    };
+    let Some(child) = ir.subflows.get(uses) else {
+        return Err(CompileError::UnknownReference { from: format!("node {node_id} uses"), name: uses.to_string() });
+    };
+    if child.flow != name || child.version != ver {
+        return Err(CompileError::invalid(format!(
+            "node {node_id} pins {uses} but subflow IR is {}@{}",
+            child.flow, child.version
+        )));
+    }
+    let actual_hash = content_hash(child)?;
+    if actual_hash != expected_hash {
+        return Err(CompileError::invalid(format!(
+            "node {node_id} subflow_ir_hash {expected_hash} does not match pinned IR {actual_hash}"
+        )));
+    }
+    Ok(())
+}
+
+fn check_subflow_bounds(ir: &Ir, depth: u32, visiting: &mut BTreeSet<String>) -> Result<usize, CompileError> {
+    if depth > MAX_SUBFLOW_DEPTH {
+        return Err(CompileError::invalid(format!(
+            "subflow nesting depth {depth} exceeds MAX_SUBFLOW_DEPTH ({MAX_SUBFLOW_DEPTH})"
+        )));
+    }
+    let mut total = ir.nodes.len();
+    for (nid, n) in &ir.nodes {
+        let (uses, mult) = match &n.class {
+            Class::Subflow { uses, .. } => (uses.as_str(), 1usize),
+            Class::Map { uses, max_items, .. } => (uses.as_str(), *max_items as usize),
+            _ => continue,
+        };
+        if !visiting.insert(uses.to_string()) {
+            return Err(CompileError::UnboundedLoop {
+                detail: format!("node {nid} creates a cyclic subflow reference through {uses}"),
+            });
+        }
+        let child = ir.subflows.get(uses).ok_or_else(|| CompileError::UnknownReference {
+            from: format!("node {nid} uses"),
+            name: uses.to_string(),
+        })?;
+        validate(child)?;
+        let child_nodes = check_subflow_bounds(child, depth + 1, visiting)?;
+        visiting.remove(uses);
+        total = total.saturating_add(child_nodes.saturating_mul(mult));
+        if total > MAX_EXPANDED_NODES {
+            return Err(CompileError::invalid(format!(
+                "statically bounded expanded node count {total} exceeds {MAX_EXPANDED_NODES}"
+            )));
+        }
+    }
+    Ok(total)
 }
 
 /// Refuses a cycle through `needs`, switches and repeat bodies (the only loops are repeats) and

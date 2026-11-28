@@ -93,6 +93,7 @@ fn fx() -> Fx {
             harness: None,
             pending_permissions: vec![],
             parent_id: None,
+            pid: None,
         });
     }
     let mut paths = Paths::under(&root);

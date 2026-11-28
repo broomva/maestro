@@ -30,6 +30,9 @@ pub(crate) struct Definition {
     /// Opt in to the receipt-aware command stdin contract.
     #[serde(default)]
     pub receipt_stdin: bool,
+    /// Optional inline pinned subflow definitions (`subflows: { "lane@1": "<yaml>" }`, IR v10).
+    #[serde(default)]
+    pub subflows: BTreeMap<String, String>,
     /// Traits (`uses: [verified-finish@1]`): phase 2.
     pub uses: Option<serde_yaml::Value>,
     /// Templates: phase 2.
@@ -45,6 +48,8 @@ pub(crate) enum ClassDef {
     Choice,
     Effect,
     Human,
+    Subflow,
+    Map,
 }
 
 impl ClassDef {
@@ -56,6 +61,8 @@ impl ClassDef {
             ClassDef::Choice => "choice",
             ClassDef::Effect => "effect",
             ClassDef::Human => "human",
+            ClassDef::Subflow => "subflow",
+            ClassDef::Map => "map",
         }
     }
 }
@@ -88,8 +95,26 @@ pub(crate) struct NodeDef {
     pub ask: Option<String>,
     pub required_body_fields: Option<Vec<String>>,
     pub wait: Option<WaitDef>,
-    /// A subflow (`uses: pr-head@1`): phase 2.
+    /// A subflow (`uses: lane@1`): valid on `subflow` and `map` nodes (IR v10).
     pub uses: Option<serde_yaml::Value>,
+    /// Input parameter bindings for `subflow` / `map` (`with: { repo: "{{params.repo}}" }`).
+    pub with: Option<BTreeMap<String, String>>,
+    /// `map` fields (IR v10).
+    pub over: Option<String>,
+    pub item_key: Option<String>,
+    pub max_items: Option<u32>,
+    pub max_concurrency_param: Option<String>,
+    pub ready_when: Option<super::ir::ReadyWhen>,
+    pub reserve_providers: Option<u32>,
+    pub provider_pool: Option<Vec<String>>,
+    pub on_item_failure: Option<super::ir::OnItemFailure>,
+    pub item_retry: Option<ItemRetryDef>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ItemRetryDef {
+    pub max: u32,
 }
 
 impl NodeDef {
@@ -111,6 +136,17 @@ impl NodeDef {
             ("ask", self.ask.is_some()),
             ("required_body_fields", self.required_body_fields.is_some()),
             ("wait", self.wait.is_some()),
+            ("uses", self.uses.is_some()),
+            ("with", self.with.is_some()),
+            ("over", self.over.is_some()),
+            ("item_key", self.item_key.is_some()),
+            ("max_items", self.max_items.is_some()),
+            ("max_concurrency_param", self.max_concurrency_param.is_some()),
+            ("ready_when", self.ready_when.is_some()),
+            ("reserve_providers", self.reserve_providers.is_some()),
+            ("provider_pool", self.provider_pool.is_some()),
+            ("on_item_failure", self.on_item_failure.is_some()),
+            ("item_retry", self.item_retry.is_some()),
         ];
         set.into_iter().filter(|(_, on)| *on).map(|(name, _)| name).collect()
     }

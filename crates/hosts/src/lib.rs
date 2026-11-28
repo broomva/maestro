@@ -501,6 +501,10 @@ pub struct DirectSession {
     /// performer of a node (BRO-3828).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    /// The OS PID of the registered Direct worker process, used by the host adapter to attest its
+    /// real OS process group ID (`worker_pgid`) for IR v10 quiescence verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_permissions: Vec<PermissionPrompt>,
 }
@@ -514,6 +518,7 @@ impl fmt::Debug for DirectSession {
             .field("liveness", &self.liveness)
             .field("harness", &self.harness)
             .field("parent_id", &self.parent_id)
+            .field("pid", &self.pid)
             .field("pending_permissions", &self.pending_permissions)
             .finish()
     }
@@ -618,6 +623,15 @@ impl DirectRegistry {
     /// registered session, not closed, whose `parent_id` is the owner's id. Its token is not
     /// asked: the owner names it, and only the registry's record of it is trusted.
     pub fn performer(&self, owner: &VerifiedSession, id: &str) -> Result<VerifiedSession, IdentityRefusal> {
+        self.performer_with_reader(owner, id, &SystemProcesses)
+    }
+
+    pub fn performer_with_reader(
+        &self,
+        owner: &VerifiedSession,
+        id: &str,
+        reader: &dyn ProcessReader,
+    ) -> Result<VerifiedSession, IdentityRefusal> {
         let unverified = |detail: String| IdentityRefusal::new(RefusalReason::PerformerUnverified, detail);
         if owner.session().surface != Surface::Direct {
             return Err(unverified("only a direct owner names a direct performer".into()));
@@ -631,16 +645,31 @@ impl DirectRegistry {
         if session.parent_id.as_deref() != Some(owner.session().id.as_str()) {
             return Err(unverified(format!("direct session {} is not a child of the owner", short_id(id))));
         }
-        Ok(VerifiedSession::new(
+        let mut verified = VerifiedSession::new(
             SessionRef { surface: Surface::Direct, environment: None, id: session.id },
             session.cwd,
             session.harness,
             session.parent_id,
             Vec::new(),
-        ))
+        );
+        if let Some(pgid) = session.pid.and_then(|pid| attribution::attest_worker_pgid(reader, pid)) {
+            verified = verified.with_worker_pgid(pgid);
+        }
+        if let Some(cg) = session.pid.and_then(|pid| attribution::attest_worker_cgroup(reader, pid)) {
+            verified = verified.with_worker_cgroup(cg);
+        }
+        Ok(verified)
     }
 
     pub fn verify(&self, claim: &CallerClaim) -> Result<VerifiedSession, IdentityRefusal> {
+        self.verify_with_reader(claim, &SystemProcesses)
+    }
+
+    pub fn verify_with_reader(
+        &self,
+        claim: &CallerClaim,
+        reader: &dyn ProcessReader,
+    ) -> Result<VerifiedSession, IdentityRefusal> {
         if claim.surface != Surface::Direct {
             return Err(IdentityRefusal::new(
                 RefusalReason::CrossSurface,
@@ -695,7 +724,7 @@ impl DirectRegistry {
         }
         let incarnation = format!("direct:{}:{}", session.cwd, hex_sha256(session.token.as_bytes()));
         let owner_marker = format!("direct-owner:{}", hex_sha256(session.token.as_bytes()));
-        Ok(VerifiedSession::new(
+        let mut verified = VerifiedSession::new(
             SessionRef { surface: Surface::Direct, environment: None, id: session.id },
             session.cwd,
             session.harness,
@@ -703,7 +732,14 @@ impl DirectRegistry {
             session.pending_permissions,
         )
         .with_incarnation(incarnation)
-        .with_owner_marker(owner_marker))
+        .with_owner_marker(owner_marker);
+        if let Some(pgid) = session.pid.and_then(|pid| attribution::attest_worker_pgid(reader, pid)) {
+            verified = verified.with_worker_pgid(pgid);
+        }
+        if let Some(cg) = session.pid.and_then(|pid| attribution::attest_worker_cgroup(reader, pid)) {
+            verified = verified.with_worker_cgroup(cg);
+        }
+        Ok(verified)
     }
 }
 
@@ -747,7 +783,12 @@ impl SurfaceRegistry {
                 self.t3.as_ref().ok_or_else(|| unverified("no T3 registry"))?.performer(owner, &performer.id)?
             }
             Surface::Direct => {
-                self.direct.as_ref().ok_or_else(|| unverified("no direct registry"))?.performer(owner, &performer.id)?
+                let reader: &dyn ProcessReader = self.processes.as_deref().unwrap_or(&SystemProcesses);
+                self.direct.as_ref().ok_or_else(|| unverified("no direct registry"))?.performer_with_reader(
+                    owner,
+                    &performer.id,
+                    reader,
+                )?
             }
             _ => return Err(unverified("only a T3 or direct session is named as a performer")),
         };
@@ -1303,10 +1344,35 @@ impl SurfaceRegistry {
             .map(|c| c.node.clone())
             .or_else(|| claim.node.clone())
             .or_else(|| self.expected_node.clone());
-        Ok(verified.with_node_and_generation(node, current_gen))
+        let mut verified = verified.with_node_and_generation(node, current_gen);
+        let reader: &dyn ProcessReader = self.processes.as_deref().unwrap_or(&SystemProcesses);
+        if verified.worker_pgid().is_none() {
+            let attested_pgid =
+                claim.peer.and_then(|peer| attribution::attest_worker_pgid(reader, peer.pid)).or_else(|| {
+                    (claim.surface == Surface::T3 && claim.attribution.is_some())
+                        .then(|| attribution::attest_caller_worker_pgid(reader, std::process::id()))
+                        .flatten()
+                });
+            if let Some(pgid) = attested_pgid {
+                verified = verified.with_worker_pgid(pgid);
+            }
+        }
+        if verified.worker_cgroup().is_none() {
+            let attested_cg =
+                claim.peer.and_then(|peer| attribution::attest_worker_cgroup(reader, peer.pid)).or_else(|| {
+                    (claim.surface == Surface::T3 && claim.attribution.is_some())
+                        .then(|| attribution::attest_worker_cgroup(reader, std::process::id()))
+                        .flatten()
+                });
+            if let Some(cg) = attested_cg {
+                verified = verified.with_worker_cgroup(cg);
+            }
+        }
+        Ok(verified)
     }
 
     fn verify_surface(&self, claim: &CallerClaim) -> Result<VerifiedSession, SessionError> {
+        let reader: &dyn ProcessReader = self.processes.as_deref().unwrap_or(&SystemProcesses);
         match &claim.surface {
             Surface::Paseo => {
                 if let Some(id) = claim.session_id.as_deref().filter(|s| !s.is_empty()) {
@@ -1326,7 +1392,7 @@ impl SurfaceRegistry {
                         detail: "Paseo registry is not configured on this host".to_string(),
                     });
                 };
-                paseo.verify(claim).map_err(Into::into)
+                paseo.verify_with_reader(claim, reader).map_err(Into::into)
             }
             Surface::T3 => {
                 if let Some(id) = claim.session_id.as_deref().filter(|s| !s.is_empty()) {
@@ -1367,7 +1433,7 @@ impl SurfaceRegistry {
                         detail: "Direct registry is not configured on this host".to_string(),
                     });
                 };
-                direct.verify(claim).map_err(Into::into)
+                direct.verify_with_reader(claim, reader).map_err(Into::into)
             }
             Surface::Other(name) => {
                 Err(IdentityRefusal::new(RefusalReason::UnsupportedSurface, format!("Unsupported surface `{name}`."))
