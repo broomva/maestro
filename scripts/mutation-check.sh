@@ -3082,6 +3082,10 @@ mutate crates/mcp/src/flows_web.rs '&& done.elapsed() < SHARED_FOR' '&& true'
 mutate crates/view/src/screens/flows_web.rs 'let linked = latest.then(|| kernel_href(&i.flow));' 'let linked = Some(kernel_href(&i.flow));'
 mutate crates/view/src/screens/flows_web.rs 'let own = ledger.unread.iter().find(|u| is_run && u.instance == what);' 'let own = ledger.unread.iter().find(|u| u.instance == what);'
 mutate crates/mcp/src/flows_web.rs 'Work::Node { node, held: true, .. } => Some(node.as_str()),' 'Work::Node { node, .. } => Some(node.as_str()),'
+# IR v10 fenced recovery guards: unpinned reconcile with no fenced_ops record fails closed, and
+# public actuators never overwrite or re-execute a historical fenced_ops row under a newer epoch.
+mutate crates/flow/src/kernel/write.rs '    } else if is_reconcile && pinned_epoch.is_none() {' '    } else if false {'
+mutate crates/flow/src/kernel/fencing.rs '            if let Some(prev) = existing_op {' '            if let Some(prev) = Option::<FencedOpRecord>::None {'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

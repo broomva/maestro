@@ -269,12 +269,9 @@ impl FencingStore {
     /// Write-time atomic check, protected mutation callback, and single-use consumption inside
     /// ONE SQLite `BEGIN IMMEDIATE` transaction.
     ///
-    /// Requires `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`.
-    /// Runs `mutate_tx(&conn)` ONLY after verifying epoch validity and BEFORE committing
-    /// `written_epoch = incoming_epoch`; if `mutate_tx` returns `Err`, the entire transaction
-    /// rolls back so the epoch is not spuriously consumed and no partial mutation commits.
-    /// If `incoming_epoch == written_epoch` AND exact `(op_id, payload_digest)` match, returns
-    /// `IdempotentReplay` without invoking `mutate_tx` a second time.
+    /// Requires no unresolved pending git-ref CAS on `resource_id`, refuses any reuse of an
+    /// existing `fenced_ops` `(resource_id, op_id)` row under a different epoch/state/metadata,
+    /// and enforces `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`.
     pub fn commit_fenced_write_with_tx<F>(
         &self,
         resource_id: &str,
@@ -282,6 +279,31 @@ impl FencingStore {
         op_id: &str,
         payload_digest: &str,
         result_json: &str,
+        mutate_tx: F,
+    ) -> Result<FencedWriteOutcome, FencingError>
+    where
+        F: FnOnce(&Connection) -> Result<(), FencingError>,
+    {
+        self.commit_fenced_write_with_tx_meta(
+            resource_id,
+            incoming_epoch,
+            op_id,
+            payload_digest,
+            result_json,
+            None,
+            mutate_tx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_fenced_write_with_tx_meta<F>(
+        &self,
+        resource_id: &str,
+        incoming_epoch: u64,
+        op_id: &str,
+        payload_digest: &str,
+        result_json: &str,
+        op_meta: Option<(&str, &str)>,
         mutate_tx: F,
     ) -> Result<FencedWriteOutcome, FencingError>
     where
@@ -302,6 +324,43 @@ impl FencingStore {
                 return Err(FencingError::Storage(format!(
                     "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS on ({resource_id}, {pending})"
                 )));
+            }
+            let existing_op: Option<FencedOpRecord> = conn
+                .query_row(
+                    "SELECT payload_digest, actuator_kind, target_key, epoch, result_json, state
+                     FROM fenced_ops WHERE resource_id = ?1 AND op_id = ?2",
+                    params![resource_id, op_id],
+                    |r| {
+                        Ok(FencedOpRecord {
+                            payload_digest: r.get(0)?,
+                            actuator_kind: r.get(1)?,
+                            target_key: r.get(2)?,
+                            epoch: r.get::<_, i64>(3)? as u64,
+                            result_json: r.get(4)?,
+                            state: r.get(5)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|e| FencingError::Storage(format!("check fenced_ops in tx: {e}")))?;
+            if let Some(prev) = existing_op {
+                let meta_ok =
+                    op_meta.is_none_or(|(kind, target)| prev.actuator_kind == kind && prev.target_key == target);
+                if prev.state == "committed"
+                    && prev.epoch == incoming_epoch
+                    && prev.payload_digest == payload_digest
+                    && meta_ok
+                {
+                    return Ok(FencedWriteOutcome::IdempotentReplay {
+                        epoch: prev.epoch,
+                        cached_result_json: prev.result_json,
+                    });
+                }
+                return Err(FencingError::EpochAlreadyConsumed {
+                    resource_id: resource_id.to_string(),
+                    incoming: incoming_epoch,
+                    written: prev.epoch,
+                });
             }
             struct EpochRow {
                 granted: i64,
@@ -472,12 +531,13 @@ impl FencingStore {
         let op_owned = op_id.to_string();
         let dig_owned = payload_digest.to_string();
         let res_json_owned = result_json.to_string();
-        let out = self.commit_fenced_write_with_tx(
+        let out = self.commit_fenced_write_with_tx_meta(
             resource_id,
             incoming_epoch,
             op_id,
             payload_digest,
             result_json,
+            Some(("sqlite_kv", key)),
             move |conn| {
                 conn.execute(
                     "INSERT INTO fenced_kv (resource_id, key, value, epoch, op_id)
@@ -492,14 +552,7 @@ impl FencingStore {
                 conn.execute(
                     "INSERT INTO fenced_ops
                        (resource_id, op_id, payload_digest, actuator_kind, target_key, epoch, result_json, state)
-                     VALUES (?1, ?2, ?3, 'sqlite_kv', ?4, ?5, ?6, 'committed')
-                     ON CONFLICT(resource_id, op_id) DO UPDATE SET
-                       payload_digest = excluded.payload_digest,
-                       actuator_kind = excluded.actuator_kind,
-                       target_key = excluded.target_key,
-                       epoch = excluded.epoch,
-                       result_json = excluded.result_json,
-                       state = 'committed'",
+                     VALUES (?1, ?2, ?3, 'sqlite_kv', ?4, ?5, ?6, 'committed')",
                     params![res_owned, op_owned, dig_owned, key_owned, incoming_epoch as i64, res_json_owned],
                 )
                 .map_err(|e| FencingError::Storage(format!("fenced_ops kv record failed: {e}")))?;
@@ -815,12 +868,13 @@ impl FencingStore {
             let op_owned = op_id.to_string();
             let dig_owned = payload_digest.to_string();
             let res_json_owned = result_json.to_string();
-            let reserved = self.commit_fenced_write_with_tx(
+            let reserved = self.commit_fenced_write_with_tx_meta(
                 resource_id,
                 incoming_epoch,
                 op_id,
                 payload_digest,
                 result_json,
+                Some(("git_ref_cas", ref_name)),
                 move |conn| {
                     let any_pending: Option<String> = conn
                         .query_row(
@@ -852,14 +906,7 @@ impl FencingStore {
                     conn.execute(
                         "INSERT INTO fenced_ops
                            (resource_id, op_id, payload_digest, actuator_kind, target_key, epoch, result_json, state)
-                         VALUES (?1, ?2, ?3, 'git_ref_cas', ?4, ?5, ?6, 'pending')
-                         ON CONFLICT(resource_id, op_id) DO UPDATE SET
-                           payload_digest = excluded.payload_digest,
-                           actuator_kind = excluded.actuator_kind,
-                           target_key = excluded.target_key,
-                           epoch = excluded.epoch,
-                           result_json = excluded.result_json,
-                           state = 'pending'",
+                         VALUES (?1, ?2, ?3, 'git_ref_cas', ?4, ?5, ?6, 'pending')",
                         params![res_owned, op_owned, dig_owned, ref_owned, incoming_epoch as i64, res_json_owned],
                     )
                     .map_err(|e| FencingError::Storage(format!("reserve fenced_ops failed: {e}")))?;

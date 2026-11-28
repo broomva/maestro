@@ -3501,5 +3501,55 @@ nodes:
             Some(("from-B".to_string(), 2, "op-B".to_string())),
             "refused unpinned reconcile MUST leave op B's KV value untouched"
         );
+
+        // 6f. Public actuator boundary immutability: reusing an earlier committed `op_id` under a
+        //     NEW granted epoch MUST fail closed inside BEGIN IMMEDIATE (both KV and GitRefCas),
+        //     leaving both target state and historical `fenced_ops` record intact!
+        let ep3 = fstore.grant_epoch("kv:interleave").unwrap();
+        assert_eq!(ep3, 3);
+        let reuse_kv = fstore
+            .execute_atomic_sqlite_kv("kv:interleave", ep3, &op_id_a, &payload_digest, "{}", "shared-k", "stale-A")
+            .unwrap_err();
+        assert!(
+            matches!(reuse_kv, FencingError::EpochAlreadyConsumed { incoming: 3, written: 1, .. }),
+            "public execute_atomic_sqlite_kv reusing earlier op_id under new epoch MUST fail closed: {reuse_kv:?}"
+        );
+        assert_eq!(
+            fstore.read_fenced_kv("kv:interleave", "shared-k").unwrap(),
+            Some(("from-B".to_string(), 2, "op-B".to_string())),
+            "rejected op_id reuse MUST NOT overwrite fenced_kv"
+        );
+        assert_eq!(
+            fstore.lookup_fenced_op("kv:interleave", &op_id_a).unwrap().unwrap().epoch,
+            1,
+            "rejected op_id reuse MUST NOT overwrite historical fenced_ops row"
+        );
+
+        let rlock_cp4 = fstore.acquire_resource_lock("git:e2e-cp4").unwrap();
+        let cep2 = fstore.grant_epoch_locked(&rlock_cp4, "git:e2e-cp4").unwrap();
+        assert_eq!(cep2, 2);
+        let reuse_git = fstore
+            .execute_atomic_git_ref_cas(
+                &rlock_cp4,
+                &repo_dir,
+                "git:e2e-cp4",
+                cep2,
+                &op_id_cp4,
+                &payload_digest,
+                "{}",
+                "refs/heads/e2e-wal-cp4",
+                &head_oid,
+                &head_oid,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(reuse_git, FencingError::EpochAlreadyConsumed { incoming: 2, written: 1, .. }),
+            "public execute_atomic_git_ref_cas reusing earlier op_id under new epoch MUST fail closed: {reuse_git:?}"
+        );
+        assert_eq!(
+            fstore.lookup_fenced_op("git:e2e-cp4", &op_id_cp4).unwrap().unwrap().epoch,
+            1,
+            "rejected git op_id reuse MUST NOT overwrite historical fenced_ops row"
+        );
     }
 }
