@@ -424,6 +424,10 @@ pub enum Resolution {
     Thread(Box<T3Thread>),
     /// No thread, more than one, or one archived or deleted: why.
     Unresolved(String),
+    /// A native id that no provider row of any thread carries (live or not, active or retired), all
+    /// rows read: a session T3 never ran, such as a nested `codex exec` started inside a thread
+    /// (BRO-4227). Refused as `Unresolved` is.
+    Unnamed(String),
 }
 
 /// T3 thread registry reader (`statev2.sqlite` or JSON snapshot).
@@ -598,6 +602,32 @@ def main():
             "pending_questions": pending_questions_of(row["thread_id"]),
         }
 
+    if mode == "native_any":
+        # Whether ANY provider row, of any thread, live or not, carries this native id
+        # (BRO-4227). A payload that does not parse means "cannot tell": exit non-zero.
+        if "orchestration_v2_projection_provider_threads" not in tables:
+            sys.stderr.write("sqlite_error: missing table orchestration_v2_projection_provider_threads\n")
+            sys.exit(2)
+        # Validated as the `native` mode validates an active row: a malformed nativeThreadRef or
+        # a non-string nativeId is "cannot tell", never "not found".
+        found = False
+        for r in conn.execute("SELECT thread_id, payload_json FROM orchestration_v2_projection_provider_threads"):
+            payload = payload_of(r["payload_json"], f"a provider row of thread {r['thread_id']}")
+            ref = payload.get("nativeThreadRef")
+            if ref is None:
+                continue
+            if not isinstance(ref, dict):
+                raise PayloadError(f"a provider row of thread {r['thread_id']} has a malformed nativeThreadRef")
+            native = ref.get("nativeId")
+            # A row whose native id is not yet assigned cannot prove it does not carry this one.
+            if native is None:
+                raise PayloadError(f"a provider row of thread {r['thread_id']} has no native id yet")
+            if not isinstance(native, str):
+                raise PayloadError(f"a provider row of thread {r['thread_id']} has a malformed nativeThreadRef")
+            if native == target_id:
+                found = True
+        print(json.dumps(found))
+        sys.exit(0)
     if mode == "native":
         # The threads whose ACTIVE provider-thread row carries this native id (a Codex
         # CODEX_THREAD_ID, or a Stop hook's session_id). A retired provider row never attributes.
@@ -982,6 +1012,100 @@ impl T3Registry {
     }
 
     /// The threads whose active provider-thread row carries `native_id`, read from the registry.
+    /// Every registry file this root could be read from (`locate` takes the first): each JSON
+    /// snapshot and SQLite database present. A candidate that does not read is unreadable.
+    fn every_source(&self) -> Read<Vec<Located>> {
+        let json = [self.root.clone(), self.root.join("threads.json")].map(|c| (c, true));
+        let sqlite = [self.root.clone(), self.root.join("statev2.sqlite"), self.root.join("userdata/statev2.sqlite")]
+            .map(|c| (c, false));
+        let mut found: Vec<Located> = Vec::new();
+        for (candidate, is_json) in json.into_iter().chain(sqlite) {
+            let ext = candidate.extension().and_then(|e| e.to_str()).unwrap_or_default();
+            if !(if is_json { ext == "json" } else { ext == "sqlite" || ext == "db" }) {
+                continue;
+            }
+            match read::is_file(&candidate) {
+                Read::Present(true) => {
+                    let l = if is_json { Located::Json(candidate) } else { Located::Sqlite(candidate) };
+                    if !found.contains(&l) {
+                        found.push(l);
+                    }
+                }
+                Read::Present(false) | Read::Absent => {}
+                Read::Unreadable(unread) => return Read::Unreadable(unread),
+            }
+        }
+        Read::Present(found)
+    }
+
+    /// Whether any provider row of any thread (archived, deleted or retired rows included) carries
+    /// `native_id`, in EVERY registry source present, not only the one `locate` reads: a stale
+    /// snapshot beside a database proves nothing about the database (BRO-4227 P20 r5). Only
+    /// [`Resolution::Unnamed`] reads it: `Ok(false)` needs at least one source, every source read
+    /// and validated, and no match. An error means "cannot tell".
+    fn native_ever_carried(&self, native_id: &str) -> Result<bool, IdentityRefusal> {
+        let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
+        let sources = match self.every_source() {
+            Read::Present(s) if !s.is_empty() => s,
+            Read::Present(_) | Read::Absent => return Err(unreadable("no T3 registry file".to_string())),
+            Read::Unreadable(why) => return Err(unreadable(format!("T3 registry is unreadable: {why}"))),
+        };
+        for source in sources {
+            let carried = match source {
+                Located::Json(path) => Self::json_carries(&path, native_id),
+                Located::Sqlite(path) => Self::sqlite_carries(&path, native_id),
+            }
+            .map_err(unreadable)?;
+            if carried {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// A JSON snapshot read raw, not through `RawT3Thread`, whose `provider_threads` defaults to
+    /// empty: every row must list its provider rows, each `native_id` a string or null.
+    fn json_carries(path: &Path, native_id: &str) -> Result<bool, String> {
+        let Read::Present(text) = read::read_text(path) else {
+            return Err("T3 JSON registry did not read".to_string());
+        };
+        let rows: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("T3 JSON registry is not JSON: {e}"))?;
+        let rows = rows.as_array().ok_or_else(|| "T3 JSON registry is not an array".to_string())?;
+        let mut found = false;
+        for row in rows {
+            let providers = row
+                .get("provider_threads")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "a T3 thread row does not list its provider rows".to_string())?;
+            for p in providers {
+                match p.get("native_id") {
+                    Some(serde_json::Value::String(id)) => found |= id == native_id,
+                    // Not yet assigned: it cannot prove it does not carry this id.
+                    _ => return Err("a provider row has no readable native_id".to_string()),
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// A SQLite registry's every provider row, validated (`native_any` in [`SQLITE_READER_PY`]).
+    fn sqlite_carries(path: &Path, native_id: &str) -> Result<bool, String> {
+        let out = Command::new("python3")
+            .arg("-I")
+            .arg("-c")
+            .arg(SQLITE_READER_PY)
+            .arg("native_any")
+            .arg(path)
+            .arg(native_id)
+            .output()
+            .map_err(|e| format!("T3 SQLite reader failed to launch: {e}."))?;
+        if out.status.code() != Some(0) {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("T3 SQLite reader returned invalid JSON: {e}."))
+    }
+
     fn native_threads(&self, native_id: &str) -> Result<Vec<String>, IdentityRefusal> {
         let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
         if self.disconnected {
@@ -1045,10 +1169,14 @@ impl T3Registry {
             let found = self.native_threads(value)?;
             match found.as_slice() {
                 [] => {
-                    return Ok(Resolution::Unresolved(format!(
-                        "no T3 thread's active provider row is {}",
-                        short_id(value)
-                    )));
+                    let why = format!("no T3 thread's active provider row is {}", short_id(value));
+                    // Unnamed only when no provider row of any thread, live or not, active or
+                    // retired, carries the id (BRO-4227): an archived or deleted thread's session is
+                    // still a thread's. Anything that does not read stays Unresolved.
+                    return Ok(match self.native_ever_carried(value) {
+                        Ok(false) => Resolution::Unnamed(why),
+                        Ok(true) | Err(_) => Resolution::Unresolved(why),
+                    });
                 }
                 [one] => one.clone(),
                 many => {

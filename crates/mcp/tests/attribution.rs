@@ -1114,6 +1114,157 @@ fn stop_gate_failed_append_is_named_in_the_alert() {
     assert!(f.ledger().contains(&format!("StopUnverified could not be recorded on: {a}")), "{}", f.ledger());
 }
 
+/// BRO-4227: a nested `codex exec` (a P20 reviewer) inside T3 thread A inherits A's
+/// `T3CODE_THREAD_ID`, and its stdin `session_id` is its own Codex session, which no thread names.
+/// When A owns no unfinished instance, no flow work can be left: the stop goes through with a
+/// note and no owner ask. Once A owns one, the same stop records `StopUnverified` and alerts.
+#[test]
+fn stop_gate_nested_reviewer_with_no_owned_work_files_no_alert() {
+    let f = fx();
+    let b = f.begin_as((T3V, B));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: attribution_unresolved")), "{out:?}");
+    assert!(out.notes.iter().any(|n| n.contains("no alert is filed")), "{out:?}");
+    assert!(out.alerts.is_empty() && out.recorded.is_empty(), "{out:?}");
+    assert_eq!(last_kind(&f, &b), "Started", "another thread's instance is untouched");
+    assert!(!f.ledger().contains("stop-gate-"), "{}", f.ledger());
+    // A now owns an unfinished instance: the same stop is recorded and alerted, as before.
+    let a = f.begin_as((T3V, A));
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert_eq!(last_kind(&f, &a), "StopUnverified");
+}
+
+/// BRO-4227 review: an ambiguous stdin id (two provider rows carry it) is not a nested process,
+/// so the stop is alerted even when the inherited thread owns nothing: the owner could be either
+/// duplicate thread, and one of them has work.
+#[test]
+fn stop_gate_ambiguous_stdin_still_alerts() {
+    let f = fx();
+    let dup = f.begin_as((T3V, "mcp:dup-1"));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("native-dup"));
+    allowed(&out);
+    assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: attribution_unresolved")), "{out:?}");
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+    assert_eq!(last_kind(&f, &dup), "Started", "not a known candidate's");
+}
+
+/// BRO-4227 review round 2: an archived or deleted thread's native id is still that thread's,
+/// never a nested process, so the stop is alerted even when the inherited thread owns nothing.
+#[test]
+fn stop_gate_archived_or_deleted_stdin_still_alerts() {
+    for native in ["native-archived", "native-deleted"] {
+        let f = fx();
+        f.begin_as((T3V, B));
+        let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+        let out = gate(&f, &hosts, Harness::Codex, &codex_stop(native));
+        allowed(&out);
+        assert_eq!(out.alerts.len(), 1, "{native}: {out:?}");
+    }
+}
+
+/// BRO-4227 review round 3: the nested shape needs the inherited `T3CODE_THREAD_ID`. A resolved
+/// `CODEX_THREAD_ID` beside an unregistered stdin id is not that shape, so it is alerted.
+#[test]
+fn stop_gate_codex_thread_var_alone_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, B));
+    let hosts = f.hosts(ATTRIB, &[(CXV, "native-a")], Reg::Good, false);
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+/// BRO-4227 review round 3: a candidate whose T3 environment is unknown may not match an owner
+/// stored with one, so "owns nothing" is not proven and the stop is alerted.
+#[test]
+fn stop_gate_unknown_environment_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, B));
+    let dir = f.root.join("t3-no-env");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut rows: Value = serde_json::from_str(&std::fs::read_to_string(&f.t3).unwrap()).unwrap();
+    for t in rows.as_array_mut().unwrap() {
+        t.as_object_mut().unwrap().remove("environment_id");
+    }
+    std::fs::write(dir.join("threads.json"), rows.to_string()).unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(dir.join("threads.json"))), None)
+        .with_identity_mode(ATTRIB)
+        .with_thread_vars(ThreadVars::from_pairs([(T3V, A.to_string())]))
+        .with_process_reader(Arc::new(FakeProcs));
+    assert!(hosts.t3_environment().is_none(), "the fixture must have no environment");
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+/// BRO-4227 review round 4: a JSON snapshot row that omits `provider_threads` does not prove
+/// that no provider row carries the stdin id, so the stop is alerted. The row is an archived
+/// thread's, which the live lookup skips, so only the Unnamed proof reads it.
+#[test]
+fn stop_gate_snapshot_without_provider_rows_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, B));
+    let dir = f.root.join("t3-omitted");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut rows: Value = serde_json::from_str(&std::fs::read_to_string(&f.t3).unwrap()).unwrap();
+    for t in rows.as_array_mut().unwrap() {
+        if t["id"] == "mcp:thread-archived" {
+            t.as_object_mut().unwrap().remove("provider_threads");
+        }
+    }
+    std::fs::write(dir.join("threads.json"), rows.to_string()).unwrap();
+    std::fs::write(dir.join("environment-id"), format!("{ENV}\n")).unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(dir.join("threads.json"))), None)
+        .with_identity_mode(ATTRIB)
+        .with_thread_vars(ThreadVars::from_pairs([(T3V, A.to_string())]))
+        .with_process_reader(Arc::new(FakeProcs));
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("native-archived"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+/// BRO-4227 independent review: the stop named as another thread (B) beside the nested shape for
+/// A has two candidates, so it is never the nested shape and is alerted.
+#[test]
+fn stop_gate_named_other_thread_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, C));
+    let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+    let out = gate_named(&f, &hosts, Harness::Codex, &format!("t3:{ENV}/{B}"), &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
+/// BRO-4227 independent review: a thread row whose environment differs from the host's may own
+/// instances stored under the host's environment, so "owns nothing" is not proven: alerted.
+#[test]
+fn stop_gate_foreign_thread_environment_is_not_nested() {
+    let f = fx();
+    f.begin_as((T3V, B));
+    let dir = f.root.join("t3-foreign-env");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut rows: Value = serde_json::from_str(&std::fs::read_to_string(&f.t3).unwrap()).unwrap();
+    for t in rows.as_array_mut().unwrap() {
+        if t["id"] == A {
+            t["environment_id"] = json!("env-elsewhere");
+        }
+    }
+    std::fs::write(dir.join("threads.json"), rows.to_string()).unwrap();
+    std::fs::write(dir.join("environment-id"), format!("{ENV}\n")).unwrap();
+    let hosts = SurfaceRegistry::new(None, Some(T3Registry::new(dir.join("threads.json"))), None)
+        .with_identity_mode(ATTRIB)
+        .with_thread_vars(ThreadVars::from_pairs([(T3V, A.to_string())]))
+        .with_process_reader(Arc::new(FakeProcs));
+    let out = gate(&f, &hosts, Harness::Codex, &codex_stop("01a22012-not-a-thread"));
+    allowed(&out);
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
+}
+
 /// The generated driver skill says how each harness writes.
 #[test]
 fn the_driver_skill_says_how_codex_and_gemini_write() {
@@ -1182,6 +1333,9 @@ fn a_direct_sessions_codex_stdin_contradicts_it_only_as_a_t3_thread() {
     let out = stop::gate(&f.paths, &hosts, Ambient::Shared, &claim, &g, &codex_stop("native-c"));
     allowed(&out);
     assert!(out.notes.iter().any(|n| n.contains("binding_unavailable: thread_mismatch")), "{out:?}");
+    // BRO-4227 review: the Direct session's own work is not among the candidates, so a mismatch is
+    // always alerted, never taken for a nested process.
+    assert_eq!(out.alerts.len(), 1, "{out:?}");
 }
 
 /// BRO-3846 review, finding 2: a failure after resolution, a named session's attribution failure,

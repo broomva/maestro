@@ -188,15 +188,117 @@ conn.commit()
 fn resolved(r: Resolution) -> String {
     match r {
         Resolution::Thread(t) => t.id,
-        Resolution::Unresolved(why) => panic!("unresolved: {why}"),
+        Resolution::Unresolved(why) | Resolution::Unnamed(why) => panic!("unresolved: {why}"),
     }
 }
 
 fn unresolved(r: Resolution) -> String {
     match r {
-        Resolution::Unresolved(why) => why,
+        Resolution::Unresolved(why) | Resolution::Unnamed(why) => why,
         Resolution::Thread(t) => panic!("resolved to {}", t.id),
     }
+}
+
+/// BRO-4227: only a native id that no provider row of any thread carries is `Unnamed`. A retired
+/// row's id, an archived or deleted thread's, and a duplicated one stay `Unresolved`, with the same
+/// text as before.
+#[test]
+fn only_a_native_id_no_row_carries_is_unnamed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t3 = T3Registry::new(sqlite(tmp.path()));
+    for id in ["native-old", "native-arch", "native-del", "native-dup"] {
+        assert!(matches!(t3.resolve(id, true).unwrap(), Resolution::Unresolved(_)), "{id}");
+    }
+    match t3.resolve("01a22012-nested-reviewer", true).unwrap() {
+        Resolution::Unnamed(why) => assert!(why.contains("no T3 thread's active provider row is"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// BRO-4227 review round 3: a provider row whose nativeThreadRef does not read, retired or not,
+/// means the registry cannot tell whether an id is carried, so it is never `Unnamed`.
+#[test]
+fn a_malformed_provider_row_never_makes_an_id_unnamed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sqlite(tmp.path());
+    let db = root.join("userdata/statev2.sqlite");
+    let script = "import sqlite3, sys\nc = sqlite3.connect(sys.argv[1])\nc.execute(\"INSERT INTO orchestration_v2_projection_provider_threads (provider_thread_id, thread_id, payload_json) VALUES ('pt-bad', 'mcp:switched', '{\\\"nativeThreadRef\\\": \\\"oops\\\"}')\")\nc.commit()\n";
+    let out = std::process::Command::new("python3").arg("-I").arg("-c").arg(script).arg(&db).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let t3 = T3Registry::new(root);
+    assert!(matches!(t3.resolve("01a22012-nested-reviewer", true).unwrap(), Resolution::Unresolved(_)));
+}
+
+/// BRO-4227 review round 5: a JSON snapshot that `locate` prefers does not prove anything about
+/// a SQLite registry beside it. Here the snapshot carries no row for the id, the database's
+/// archived thread does, so the id stays `Unresolved`, never `Unnamed`.
+#[test]
+fn a_snapshot_beside_a_database_never_makes_an_id_unnamed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sqlite(tmp.path());
+    let snapshot = serde_json::json!([{
+        "id": "mcp:snap", "cwd": "/work", "environment_id": "env-sqlite", "provider": "codex",
+        "created_at": "2026-11-17T00:00:00Z", "active_provider_thread_id": "pt-snap",
+        "provider_threads": [{ "provider_thread_id": "pt-snap", "native_id": "native-snap" }],
+    }]);
+    std::fs::write(root.join("threads.json"), snapshot.to_string()).unwrap();
+    let t3 = T3Registry::new(&root);
+    assert_eq!(resolved(t3.resolve("native-snap", true).unwrap()), "mcp:snap", "locate reads the snapshot");
+    assert!(matches!(t3.resolve("native-arch", true).unwrap(), Resolution::Unresolved(_)));
+    assert!(matches!(t3.resolve("01a22012-nested-reviewer", true).unwrap(), Resolution::Unnamed(_)));
+}
+
+/// BRO-4227 independent review: a provider row whose native id is not yet assigned (null), or a
+/// JSON one that is not a string, cannot prove it does not carry the id: never `Unnamed`.
+#[test]
+fn an_unassigned_or_malformed_native_id_never_makes_an_id_unnamed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sqlite(tmp.path());
+    let db = root.join("userdata/statev2.sqlite");
+    let script = "import sqlite3, sys\nc = sqlite3.connect(sys.argv[1])\nc.execute(\"INSERT INTO orchestration_v2_projection_provider_threads (provider_thread_id, thread_id, payload_json) VALUES ('pt-null', 'mcp:switched', '{\\\"nativeThreadRef\\\": {\\\"nativeId\\\": null}}')\")\nc.commit()\n";
+    let out = std::process::Command::new("python3").arg("-I").arg("-c").arg(script).arg(&db).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(matches!(T3Registry::new(&root).resolve("01a22012-x", true).unwrap(), Resolution::Unresolved(_)));
+    for bad in [serde_json::json!(null), serde_json::json!(7)] {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = serde_json::json!([{
+            "id": "mcp:snap", "cwd": "/work", "environment_id": "env", "provider": "codex",
+            "created_at": "2026-11-17T00:00:00Z", "active_provider_thread_id": "pt-snap",
+            "provider_threads": [{ "provider_thread_id": "pt-snap", "native_id": "native-snap" },
+                                 { "provider_thread_id": "pt-old", "native_id": bad }],
+        }]);
+        std::fs::write(dir.path().join("threads.json"), snapshot.to_string()).unwrap();
+        let t3 = T3Registry::new(dir.path().join("threads.json"));
+        // A malformed row may make the registry unreadable (an error, alerted) or the id Unresolved;
+        // either way it is never Unnamed.
+        let r = t3.resolve("01a22012-x", true);
+        assert!(!matches!(r, Ok(Resolution::Unnamed(_))), "{bad}: {r:?}");
+    }
+}
+
+/// BRO-4227: a registry source that does not read, beside one `locate` reads first, means the
+/// registry cannot prove no row carries the id: never `Unnamed`.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_second_source_never_makes_an_id_unnamed() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = sqlite(tmp.path());
+    let snapshot = serde_json::json!([{
+        "id": "mcp:snap", "cwd": "/work", "environment_id": "env-sqlite", "provider": "codex",
+        "created_at": "2026-11-17T00:00:00Z", "active_provider_thread_id": "pt-snap",
+        "provider_threads": [{ "provider_thread_id": "pt-snap", "native_id": "native-snap" }],
+    }]);
+    std::fs::write(root.join("threads.json"), snapshot.to_string()).unwrap();
+    let userdata = root.join("userdata");
+    std::fs::set_permissions(&userdata, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::metadata(userdata.join("statev2.sqlite")).is_ok();
+    let r = T3Registry::new(&root).resolve("01a22012-nested-reviewer", true);
+    std::fs::set_permissions(&userdata, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if readable {
+        return; // running as root: a 000 directory still reads, so this case cannot be built
+    }
+    assert!(!matches!(r, Ok(Resolution::Unnamed(_))), "{r:?}");
 }
 
 #[test]

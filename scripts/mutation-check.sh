@@ -2742,7 +2742,7 @@ mutate $hat '            _ => Self::Strict,' '            _ => Self::Attributed,
 mutate $hat '                .filter(|(_, v)| !v.is_empty())' '                .filter(|_| true)'
 mutate $hlb '                    None => VarOutcome::Unreadable("no T3 registry is found on this host".to_string()),' '                    None => VarOutcome::Unresolved("no T3 registry is found on this host".to_string()),'
 mutate $hat 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unreadable(_))) {' 'each.iter().find(|_| false) {'
-mutate $hat 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unresolved(_))) {' 'each.iter().find(|_| false) {'
+mutate $hat 'each.iter().find(|(_, o)| matches!(o, VarOutcome::Unresolved(_) | VarOutcome::Unnamed(_)))' 'each.iter().find(|_| false)'
 mutate $hat '    if let Some((other, other_id, _)) = threads.iter().find(|(_, t, _)| t != id) {' '    if let Some((other, other_id, _)) = threads.iter().find(|_| false) {'
 mutate $hat '    while next != 0 && ancestors.len() < MAX_ANCESTORS {' '    while next != 0 {'
 mutate $hlb '            && claim.peer.is_none()
@@ -3086,6 +3086,16 @@ mutate crates/mcp/src/flows_web.rs 'Work::Node { node, held: true, .. } => Some(
 # public actuators never overwrite or re-execute a historical fenced_ops row under a newer epoch.
 mutate crates/flow/src/kernel/write.rs '    } else if is_reconcile && pinned_epoch.is_none() {' '    } else if false {'
 mutate crates/flow/src/kernel/fencing.rs '            if let Some(prev) = existing_op {' '            if let Some(prev) = Option::<FencedOpRecord>::None {'
+# BRO-4227: the stop gate skips the owner ask only for a nested `codex exec` inside one T3 thread
+# that owns no flow work. Each guard of that shape, and of the Unnamed proof, is a mutant here.
+mutate $gt '        if self.nested && owns_nothing && failed.is_empty() {' '        if owns_nothing && failed.is_empty() {'
+mutate $gt '                    && candidates[0].environment == host_env;' '                    && true;'
+mutate $gt 'VarOutcome::Thread { id, environment: Some(env) } if v.name == T3CODE_THREAD_ID && !v.native => Some((id, env)),' 'VarOutcome::Thread { id, environment: Some(env) } if true => Some((id, env)),'
+mutate $gt '        v.name == STDIN_SESSION_ID && v.native && matches!(o, VarOutcome::Unnamed(_))' '        v.name == STDIN_SESSION_ID && v.native && matches!(o, VarOutcome::Unnamed(_) | VarOutcome::Unresolved(_))'
+mutate $ht '                        Ok(true) | Err(_) => Resolution::Unresolved(why),' '                        Ok(true) => Resolution::Unresolved(why), Err(_) => Resolution::Unnamed(why),'
+mutate $ht '                Read::Unreadable(unread) => return Read::Unreadable(unread),' '                Read::Unreadable(_) => {}'
+mutate $ht '                    _ => return Err("a provider row has no readable native_id".to_string()),' '                    _ => {}'
+mutate $ht '                raise PayloadError(f"a provider row of thread {r['"'"'thread_id'"'"']} has no native id yet")' '                continue'
 echo "mutation  $killed of $total killed (shard $shard_i/$shard_n of $seen mutants)"
 [ "$total" -gt 0 ] || { echo "shard $shard_i/$shard_n ran no mutant"; failed=1; }
 exit $failed

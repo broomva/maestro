@@ -937,6 +937,7 @@ impl SurfaceRegistry {
                             environment: t.environment_id.or_else(|| environment.clone()),
                         },
                         Ok(Resolution::Unresolved(why)) => VarOutcome::Unresolved(why),
+                        Ok(Resolution::Unnamed(why)) => VarOutcome::Unnamed(why),
                         Err(r) => VarOutcome::Unreadable(r.message),
                     },
                 };

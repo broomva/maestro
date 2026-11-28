@@ -61,7 +61,7 @@ use maestro_flow::kernel::events::{StopUnverified, Unblockable, digest};
 use maestro_flow::kernel::stop::{self as kstop, Assessment, Recorded, Refusals};
 use maestro_flow::kernel::{self, KernelError};
 use maestro_flow::{Ledger, Options, Reader};
-use maestro_hosts::{Attributed, IdentityMode, STDIN_SESSION_ID, ThreadVars, VarOutcome};
+use maestro_hosts::{Attributed, IdentityMode, STDIN_SESSION_ID, T3CODE_THREAD_ID, ThreadVars, VarOutcome};
 use maestro_store::{Paths, Store, TreeSource};
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -165,6 +165,8 @@ struct Run<'a> {
     claim: &'a Value,
     gate: &'a Gate,
     out: Outcome,
+    /// The stop is a nested Codex process inside one T3 thread (BRO-4227): see [`nested_in_thread`].
+    nested: bool,
 }
 
 /// Runs the gate over `input` (see the module docs). `claim` carries the caller's claim fields
@@ -184,7 +186,7 @@ pub fn gate(
         recorded: Vec::new(),
         alerts: Vec::new(),
     };
-    let mut run = Run { paths, hosts, ambient, claim, gate, out };
+    let mut run = Run { paths, hosts, ambient, claim, gate, out, nested: false };
     run.judge(input);
     run.out
 }
@@ -194,6 +196,27 @@ pub fn gate(
 pub fn gate_in_env(paths: &Paths, g: &Gate, input: &[u8]) -> Outcome {
     let hosts = maestro_hosts::SurfaceRegistry::from_env();
     gate(paths, &hosts, Ambient::Caller, &json!({}), g, input)
+}
+
+/// Whether the hook's variables have the shape of a nested Codex process inside one T3 thread
+/// (BRO-4227): a `codex exec` an agent starts in its thread inherits the thread's variables, which
+/// all resolve to that one thread, while its Stop hook's stdin `session_id` is its own Codex
+/// session, which no thread's active provider row carries ([`VarOutcome::Unnamed`]). An id that
+/// several rows carry, or an archived or deleted thread, is not this shape.
+fn nested_in_thread(each: &[(maestro_hosts::ThreadVar, VarOutcome)]) -> bool {
+    let unnamed_stdin = |(v, o): &&(maestro_hosts::ThreadVar, VarOutcome)| {
+        v.name == STDIN_SESSION_ID && v.native && matches!(o, VarOutcome::Unnamed(_))
+    };
+    // The inherited `T3CODE_THREAD_ID` must be among the variables and resolve, with a known
+    // environment, to the one thread every other variable names.
+    let Some((id, _)) = each.iter().find_map(|(v, o)| match o {
+        VarOutcome::Thread { id, environment: Some(env) } if v.name == T3CODE_THREAD_ID && !v.native => Some((id, env)),
+        _ => None,
+    }) else {
+        return false;
+    };
+    each.iter().filter(unnamed_stdin).count() == 1
+        && each.iter().all(|e| unnamed_stdin(&e) || matches!(&e.1, VarOutcome::Thread { id: t, .. } if t == id))
 }
 
 /// Use the same fail-open code whether the reader or the writer encounters a busy lock.
@@ -370,7 +393,17 @@ impl Run<'_> {
                 let why = "and no thread variable binds this stop, so there is no flow to gate.";
                 return self.note(format!("{unnamed} {why}"));
             }
-            Attributed::Refused(refusal) => return self.unbound(&candidates, &refusal),
+            Attributed::Refused(refusal) => {
+                // One candidate whose environment is this host's own: owners stored as `t3:-/A`
+                // or `t3:local/A` canonicalise to the host's environment, so only a candidate in
+                // that environment is matched against them (independent review, BRO-4227).
+                let host_env = self.hosts.t3_environment();
+                self.nested = nested_in_thread(&each)
+                    && candidates.len() == 1
+                    && host_env.as_deref().is_some_and(|h| !h.is_empty() && h != "-")
+                    && candidates[0].environment == host_env;
+                return self.unbound(&candidates, &refusal);
+            }
             Attributed::Resolved { attribution, environment } => (attribution, environment),
         };
         let thread = SessionRef { surface: Surface::T3, environment: environment.or(host), id: a.thread.clone() };
@@ -421,11 +454,13 @@ impl Run<'_> {
         let code = refusal.reason.code();
         let message = refusal.message.trim_end_matches('.').to_string();
         self.note(format!(
-            "binding_unavailable: {code}: {message}. The stop goes through (the gate fails open), recorded as StopUnverified."
+            "binding_unavailable: {code}: {message}. The stop goes through (the gate fails open); any unfinished instance of a candidate thread is recorded as StopUnverified."
         ));
         let host = self.hosts.t3_environment();
         let candidates = candidates.to_vec();
         let (mut made, mut failed) = (Vec::new(), Vec::new());
+        // Whether every candidate's instances were read and none is unfinished (BRO-4227).
+        let mut owns_nothing = false;
         if !candidates.is_empty()
             && let Ok(root) = crate::flow::flows_root(&self.paths.workspace)
         {
@@ -435,6 +470,7 @@ impl Run<'_> {
                 .and_then(|guard| kstop::owned_by_threads(&guard, &candidates, host.as_deref()));
             match owned {
                 Ok((owned, unread)) => {
+                    owns_nothing = owned.is_empty() && unread.is_empty();
                     for u in unread {
                         failed.push(format!("{} ({})", u.instance, u.code));
                     }
@@ -464,9 +500,19 @@ impl Run<'_> {
                         }
                     }
                 }
-                Err(missing) if missing.code() == "no_ledger" => {}
+                Err(missing) if missing.code() == "no_ledger" => owns_nothing = true,
                 Err(e) => failed.push(format!("the flow ledger ({}: {e})", busy_code(e.code()))),
             }
+        }
+        // A nested Codex process inside one T3 thread (see `nested_in_thread`) whose thread owns no
+        // unfinished instance: no flow work could be left by this stop, so no owner ask
+        // (BRO-4227). Any other refusal, an ambiguous or archived id, a mismatch, a named session
+        // that is another thread, instances not all read, or a record that failed, still alerts.
+        if self.nested && owns_nothing && failed.is_empty() {
+            let named = candidates.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            return self.note(format!(
+                "candidate thread(s) {named} own no unfinished flow instance, so this stop could leave no flow work; no alert is filed."
+            ));
         }
         let session = candidates.first().cloned().unwrap_or_else(|| SessionRef {
             surface: Surface::T3,

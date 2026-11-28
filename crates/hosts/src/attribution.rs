@@ -110,6 +110,9 @@ pub enum VarOutcome {
     Thread { id: String, environment: Option<String> },
     /// No thread, several, or an archived or deleted one.
     Unresolved(String),
+    /// A native id that no provider row of any thread carries (see `t3::Resolution::Unnamed`);
+    /// combined exactly as `Unresolved` is.
+    Unnamed(String),
     /// The registry did not read.
     Unreadable(String),
 }
@@ -139,7 +142,9 @@ pub fn combine(each: &[(ThreadVar, VarOutcome)]) -> Attributed {
             format!("{} could not be resolved: T3's registry did not read ({why}).", v.name),
         ));
     }
-    if let Some((v, VarOutcome::Unresolved(why))) = each.iter().find(|(_, o)| matches!(o, VarOutcome::Unresolved(_))) {
+    if let Some((v, VarOutcome::Unresolved(why) | VarOutcome::Unnamed(why))) =
+        each.iter().find(|(_, o)| matches!(o, VarOutcome::Unresolved(_) | VarOutcome::Unnamed(_)))
+    {
         return Attributed::Refused(IdentityRefusal::new(
             RefusalReason::AttributionUnresolved,
             format!("{} does not name one live T3 thread: {why}.", v.name),
