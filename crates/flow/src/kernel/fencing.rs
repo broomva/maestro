@@ -380,11 +380,40 @@ impl FencingStore {
         key: &str,
         value: &str,
     ) -> Result<FencedWriteOutcome, FencingError> {
+        {
+            let conn = self.connect()?;
+            let pending_ref: Option<String> = conn
+                .query_row(
+                    "SELECT ref_name FROM fenced_git_refs WHERE resource_id = ?1 AND state = 'pending' LIMIT 1",
+                    params![resource_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| FencingError::Storage(format!("check pending git refs: {e}")))?;
+            if let Some(pending) = pending_ref {
+                return Err(FencingError::Storage(format!(
+                    "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS on ({resource_id}, {pending})"
+                )));
+            }
+        }
         let res_owned = resource_id.to_string();
         let key_owned = key.to_string();
         let val_owned = value.to_string();
         let op_owned = op_id.to_string();
         self.commit_fenced_write_with_tx(resource_id, incoming_epoch, op_id, payload_digest, result_json, move |conn| {
+            let pending_ref: Option<String> = conn
+                .query_row(
+                    "SELECT ref_name FROM fenced_git_refs WHERE resource_id = ?1 AND state = 'pending' LIMIT 1",
+                    params![res_owned],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| FencingError::Storage(format!("check pending git refs: {e}")))?;
+            if let Some(pending) = pending_ref {
+                return Err(FencingError::Storage(format!(
+                    "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS on ({res_owned}, {pending})"
+                )));
+            }
             conn.execute(
                 "INSERT INTO fenced_kv (resource_id, key, value, epoch, op_id)
                      VALUES (?1, ?2, ?3, ?4, ?5)
@@ -449,20 +478,54 @@ impl FencingStore {
         Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
     }
 
+    /// Atomically marks a git-ref CAS row `'aborted'` AND clears `last_op_id`/`last_payload_digest`/
+    /// `last_result_json` in `resource_epochs` (while keeping `written_epoch` consumed) so a failed
+    /// or aborted CAS can NEVER replay as `IdempotentReplay`.
+    fn abort_git_ref_cas(
+        &self,
+        resource_id: &str,
+        ref_name: &str,
+        epoch: u64,
+        op_id: &str,
+    ) -> Result<(), FencingError> {
+        let mut conn = self.connect()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| FencingError::Storage(format!("begin abort_git_ref_cas tx: {e}")))?;
+        tx.execute(
+            "UPDATE fenced_git_refs SET state = 'aborted'
+             WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
+            params![resource_id, ref_name, epoch as i64, op_id],
+        )
+        .map_err(|e| FencingError::Storage(format!("abort fenced_git_refs: {e}")))?;
+        tx.execute(
+            "UPDATE resource_epochs
+             SET last_op_id = NULL, last_payload_digest = NULL, last_result_json = NULL
+             WHERE resource_id = ?1 AND written_epoch = ?2 AND last_op_id = ?3",
+            params![resource_id, epoch as i64, op_id],
+        )
+        .map_err(|e| FencingError::Storage(format!("clear aborted op replay metadata: {e}")))?;
+        tx.commit().map_err(|e| FencingError::Storage(format!("commit abort_git_ref_cas tx: {e}")))?;
+        Ok(())
+    }
+
     /// Built-in kernel actuator 2: crash-atomic, hook-disabled `git update-ref` compare-and-swap
     /// under the exclusive per-resource lock (`_rlock`):
     /// 1. Validates ref format and target commit OID with hooks/fsmonitor disabled (`safe_git_cmd`).
-    /// 2. **Write-ahead epoch consumption BEFORE touching git:** inside ONE SQLite `BEGIN IMMEDIATE`
-    ///    transaction, verifies no unresolved `'pending'` CAS exists for another op, checks
-    ///    `incoming_epoch == granted_epoch && incoming_epoch > written_epoch`, consumes
-    ///    `written_epoch = incoming_epoch`, and records `fenced_git_refs(state = 'pending')`.
-    ///    It is therefore impossible for a crash to mutate a git ref without a consumed epoch.
+    /// 2. **Resource-wide pending guard + write-ahead epoch consumption BEFORE touching git:**
+    ///    checks `fenced_git_refs` across ALL refs in `resource_id` for any `'pending'` row.
+    ///    - If another op/ref is `'pending'`, fails closed (`pending_git_ref_cas_recovery_required`).
+    ///    - If this exact `(ref_name, epoch, op_id, payload_digest, old_oid, new_oid)` is `'pending'`,
+    ///      reconciles against `git rev-parse`: if already at `new_oid`, commits & replays; if still
+    ///      at `old_oid`, re-checks `granted_epoch == incoming_epoch` before executing `git update-ref`
+    ///      (aborting with `StaleEpoch` if a newer epoch was granted).
+    ///    - Otherwise, inside ONE SQLite `BEGIN IMMEDIATE` transaction, verifies `incoming_epoch ==
+    ///      granted_epoch && incoming_epoch > written_epoch`, consumes `written_epoch = incoming_epoch`,
+    ///      and inserts `fenced_git_refs(state = 'pending')`.
     /// 3. Executes `git -c core.hooksPath=/dev/null update-ref -- <ref_name> <new_oid> <expected_old_oid>`.
-    /// 4. Marks `fenced_git_refs.state = 'committed'` on success, or `'aborted'` on CAS failure
-    ///    (keeping `written_epoch` consumed so the single-use epoch can never be reused).
-    /// 5. If a crash occurs between step 2 and step 4, any other writer is refused fail-closed
-    ///    (`pending_git_ref_cas_recovery_required`) while retrying the exact `(op_id, payload_digest)`
-    ///    reconciles against `git rev-parse <ref_name>` to finish cleanly.
+    /// 4. Marks `fenced_git_refs.state = 'committed'` on success, or atomically marks `'aborted'`
+    ///    AND clears `resource_epochs` replay metadata on CAS failure (keeping `written_epoch`
+    ///    consumed so an aborted CAS can NEVER replay as `IdempotentReplay`).
     #[allow(clippy::too_many_arguments)]
     pub fn execute_atomic_git_ref_cas(
         &self,
@@ -478,12 +541,12 @@ impl FencingStore {
         new_oid: &str,
     ) -> Result<FencedWriteOutcome, FencingError> {
         struct PendingRefRow {
+            ref_name: String,
             old_oid: String,
             new_oid: String,
             epoch: i64,
             op_id: String,
             payload_digest: String,
-            state: String,
         }
 
         // 1. Validate ref format and target commit existence with hooks completely disabled.
@@ -502,45 +565,69 @@ impl FencingStore {
             return Err(FencingError::Storage(format!("target commit {new_oid} does not exist in {}", repo.display())));
         }
 
-        // 2. Check for an existing crash-pending op OR reserve (consume written_epoch + insert
-        //    state='pending') atomically in SQLite BEFORE touching git!
+        // 2. Resource-wide fail-closed pending guard across ALL refs under `resource_id`, plus
+        //    explicit refusal if this exact op was previously aborted.
         let mut recovering_same_pending = false;
         {
             let conn = self.connect()?;
-            let existing: Option<PendingRefRow> = conn
-                .query_row(
-                    "SELECT old_oid, new_oid, epoch, op_id, payload_digest, state
-                     FROM fenced_git_refs WHERE resource_id = ?1 AND ref_name = ?2",
-                    params![resource_id, ref_name],
-                    |r| {
+            let pending_rows: Vec<PendingRefRow> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT ref_name, old_oid, new_oid, epoch, op_id, payload_digest
+                         FROM fenced_git_refs WHERE resource_id = ?1 AND state = 'pending'",
+                    )
+                    .map_err(|e| FencingError::Storage(format!("prepare pending fenced_git_refs: {e}")))?;
+                let iter = stmt
+                    .query_map(params![resource_id], |r| {
                         Ok(PendingRefRow {
-                            old_oid: r.get(0)?,
-                            new_oid: r.get(1)?,
-                            epoch: r.get(2)?,
-                            op_id: r.get(3)?,
-                            payload_digest: r.get(4)?,
-                            state: r.get(5)?,
+                            ref_name: r.get(0)?,
+                            old_oid: r.get(1)?,
+                            new_oid: r.get(2)?,
+                            epoch: r.get(3)?,
+                            op_id: r.get(4)?,
+                            payload_digest: r.get(5)?,
                         })
-                    },
-                )
-                .optional()
-                .map_err(|e| FencingError::Storage(format!("read fenced_git_refs: {e}")))?;
-            if let Some(row) = existing
-                && row.state == "pending"
-            {
-                if row.epoch as u64 == incoming_epoch
-                    && row.op_id == op_id
-                    && row.payload_digest == payload_digest
-                    && row.old_oid == expected_old_oid
-                    && row.new_oid == new_oid
+                    })
+                    .map_err(|e| FencingError::Storage(format!("query pending fenced_git_refs: {e}")))?;
+                let mut out = Vec::new();
+                for row in iter {
+                    out.push(row.map_err(|e| FencingError::Storage(format!("read pending fenced_git_refs: {e}")))?);
+                }
+                out
+            };
+            if !pending_rows.is_empty() {
+                if pending_rows.len() == 1
+                    && pending_rows[0].ref_name == ref_name
+                    && pending_rows[0].epoch as u64 == incoming_epoch
+                    && pending_rows[0].op_id == op_id
+                    && pending_rows[0].payload_digest == payload_digest
+                    && pending_rows[0].old_oid == expected_old_oid
+                    && pending_rows[0].new_oid == new_oid
                 {
                     recovering_same_pending = true;
                 } else {
+                    let blocking = &pending_rows[0];
                     return Err(FencingError::Storage(format!(
-                        "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS for ({resource_id}, {ref_name}) at epoch={} op_id={}",
-                        row.epoch, row.op_id
+                        "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS for ({resource_id}, {}) at epoch={} op_id={}",
+                        blocking.ref_name, blocking.epoch, blocking.op_id
                     )));
                 }
+            }
+            let was_aborted: Option<i64> = conn
+                .query_row(
+                    "SELECT epoch FROM fenced_git_refs
+                     WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4 AND state = 'aborted'",
+                    params![resource_id, ref_name, incoming_epoch as i64, op_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| FencingError::Storage(format!("check aborted fenced_git_refs: {e}")))?;
+            if let Some(ep) = was_aborted {
+                return Err(FencingError::EpochAlreadyConsumed {
+                    resource_id: resource_id.to_string(),
+                    incoming: incoming_epoch,
+                    written: ep as u64,
+                });
             }
         }
 
@@ -564,15 +651,31 @@ impl FencingStore {
                 });
             }
             if !still_at_old {
-                let conn = self.connect()?;
-                let _ = conn.execute(
-                    "UPDATE fenced_git_refs SET state = 'aborted'
-                     WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
-                    params![resource_id, ref_name, incoming_epoch as i64, op_id],
-                );
+                self.abort_git_ref_cas(resource_id, ref_name, incoming_epoch, op_id)?;
                 return Err(FencingError::Storage(format!(
                     "git_ref_cas_diverged: pending recovery expected {expected_old_oid} or {new_oid}, found {current_oid:?}"
                 )));
+            }
+            // Ref has NOT been mutated yet — re-verify incoming_epoch is STILL the current granted_epoch
+            // before executing git update-ref! If a newer epoch was granted, abort and refuse StaleEpoch.
+            let granted = {
+                let conn = self.connect()?;
+                conn.query_row(
+                    "SELECT granted_epoch FROM resource_epochs WHERE resource_id = ?1",
+                    params![resource_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(|e| FencingError::Storage(format!("read granted_epoch during pending recovery: {e}")))?
+                .unwrap_or(0) as u64
+            };
+            if incoming_epoch != granted {
+                self.abort_git_ref_cas(resource_id, ref_name, incoming_epoch, op_id)?;
+                return Err(FencingError::StaleEpoch {
+                    resource_id: resource_id.to_string(),
+                    incoming: incoming_epoch,
+                    granted,
+                });
             }
         } else {
             let res_owned = resource_id.to_string();
@@ -588,6 +691,19 @@ impl FencingStore {
                 payload_digest,
                 result_json,
                 move |conn| {
+                    let any_pending: Option<String> = conn
+                        .query_row(
+                            "SELECT ref_name FROM fenced_git_refs WHERE resource_id = ?1 AND state = 'pending' LIMIT 1",
+                            params![res_owned],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .map_err(|e| FencingError::Storage(format!("check pending in reserve tx: {e}")))?;
+                    if let Some(p) = any_pending {
+                        return Err(FencingError::Storage(format!(
+                            "pending_git_ref_cas_recovery_required: unresolved pending git-ref CAS on ({res_owned}, {p})"
+                        )));
+                    }
                     conn.execute(
                         "INSERT INTO fenced_git_refs
                            (resource_id, ref_name, old_oid, new_oid, epoch, op_id, payload_digest, state)
@@ -606,7 +722,27 @@ impl FencingStore {
                 },
             )?;
             if let FencedWriteOutcome::IdempotentReplay { .. } = reserved {
-                return Ok(reserved);
+                // Only honor IdempotentReplay if fenced_git_refs explicitly confirms state == 'committed'
+                // for this exact ref, epoch, op_id, and payload_digest!
+                let conn = self.connect()?;
+                let committed: Option<i64> = conn
+                    .query_row(
+                        "SELECT 1 FROM fenced_git_refs
+                         WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3
+                           AND op_id = ?4 AND payload_digest = ?5 AND state = 'committed'",
+                        params![resource_id, ref_name, incoming_epoch as i64, op_id, payload_digest],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|e| FencingError::Storage(format!("verify committed fenced_git_refs: {e}")))?;
+                if committed.is_some() {
+                    return Ok(reserved);
+                }
+                return Err(FencingError::EpochAlreadyConsumed {
+                    resource_id: resource_id.to_string(),
+                    incoming: incoming_epoch,
+                    written: incoming_epoch,
+                });
             }
         }
 
@@ -617,12 +753,7 @@ impl FencingStore {
             .output()
             .map_err(|e| FencingError::Storage(format!("git update-ref spawn: {e}")))?;
         if !upd.status.success() {
-            let conn = self.connect()?;
-            let _ = conn.execute(
-                "UPDATE fenced_git_refs SET state = 'aborted'
-                 WHERE resource_id = ?1 AND ref_name = ?2 AND epoch = ?3 AND op_id = ?4",
-                params![resource_id, ref_name, incoming_epoch as i64, op_id],
-            );
+            self.abort_git_ref_cas(resource_id, ref_name, incoming_epoch, op_id)?;
             return Err(FencingError::Storage(format!(
                 "git_ref_cas_failed: git update-ref {ref_name} {new_oid} {expected_old_oid} failed: {}",
                 String::from_utf8_lossy(&upd.stderr).trim()

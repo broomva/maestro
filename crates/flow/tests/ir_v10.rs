@@ -3015,26 +3015,34 @@ nodes:
         conn.execute("UPDATE fenced_git_refs SET state = 'pending' WHERE resource_id = 'git:crash-wal'", []).unwrap();
         drop(conn);
 
-        // A different writer (epoch 2, op-2) MUST be refused fail-closed while 'pending' is unresolved!
+        // A different writer targeting a DIFFERENT ref (refs/heads/other-ref) under the SAME
+        // resource_id MUST ALSO fail closed while refs/heads/wal-ship is pending!
         let ep2 = fstore.grant_epoch_locked(&rlock, "git:crash-wal").unwrap();
         assert_eq!(ep2, 2);
-        let blocked = fstore
+        let blocked_other_ref = fstore
             .execute_atomic_git_ref_cas(
                 &rlock,
                 &repo_dir,
                 "git:crash-wal",
                 ep2,
-                "op-2",
-                "sha256:dig2",
+                "op-other-ref",
+                "sha256:dig-other",
                 "{}",
-                "refs/heads/wal-ship",
-                &head_oid,
+                "refs/heads/other-ref",
+                &zero_oid,
                 &head_oid,
             )
             .unwrap_err();
         assert!(
-            blocked.to_string().contains("pending_git_ref_cas_recovery_required"),
-            "different writer must fail closed on pending crash-recovery row, got: {blocked}"
+            blocked_other_ref.to_string().contains("pending_git_ref_cas_recovery_required"),
+            "different ref under same resource_id must fail closed on pending crash-recovery row, got: {blocked_other_ref}"
+        );
+        // SQLite KV write under the SAME resource_id MUST ALSO fail closed while pending!
+        let blocked_kv =
+            fstore.execute_atomic_sqlite_kv("git:crash-wal", ep2, "op-kv", "sha256:dkv", "{}", "k", "v").unwrap_err();
+        assert!(
+            blocked_kv.to_string().contains("pending_git_ref_cas_recovery_required"),
+            "SQLite KV under same resource_id must fail closed on pending git-ref row, got: {blocked_kv}"
         );
 
         // Exact retry of `(ep1, op-1, sha256:dig1)` reconciles against git rev-parse -> committed!
@@ -3070,5 +3078,91 @@ nodes:
             )
             .unwrap();
         assert_eq!(out2, FencedWriteOutcome::Committed { epoch: 2 });
+
+        // 4. Stale pending recovery (crashed BEFORE git update-ref, then a newer epoch was granted):
+        //    retrying old epoch MUST refuse StaleEpoch without mutating git, and clear pending!
+        let ep3 = fstore.grant_epoch_locked(&rlock, "git:crash-wal").unwrap();
+        assert_eq!(ep3, 3);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE resource_epochs SET written_epoch = 3, last_op_id = 'op-stale', last_payload_digest = 'sha256:stale', last_result_json = '{}' WHERE resource_id = 'git:crash-wal'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO fenced_git_refs (resource_id, ref_name, old_oid, new_oid, epoch, op_id, payload_digest, state)
+             VALUES ('git:crash-wal', 'refs/heads/stale-ref', ?1, ?2, 3, 'op-stale', 'sha256:stale', 'pending')",
+            rusqlite::params![zero_oid, head_oid],
+        )
+        .unwrap();
+        drop(conn);
+        let ep4 = fstore.grant_epoch_locked(&rlock, "git:crash-wal").unwrap();
+        assert_eq!(ep4, 4);
+        let stale_rec = fstore
+            .execute_atomic_git_ref_cas(
+                &rlock,
+                &repo_dir,
+                "git:crash-wal",
+                ep3,
+                "op-stale",
+                "sha256:stale",
+                "{}",
+                "refs/heads/stale-ref",
+                &zero_oid,
+                &head_oid,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(stale_rec, FencingError::StaleEpoch { incoming: 3, granted: 4, .. }),
+            "stale pending recovery must refuse StaleEpoch, got: {stale_rec:?}"
+        );
+        assert!(
+            !Command::new("git")
+                .args(["rev-parse", "--verify", "--quiet", "refs/heads/stale-ref"])
+                .current_dir(&repo_dir)
+                .status()
+                .unwrap()
+                .success(),
+            "stale pending recovery MUST NOT create refs/heads/stale-ref"
+        );
+
+        // 5. Failed CAS MUST NEVER replay as IdempotentReplay on exact retry!
+        let bad_old_oid = "1".repeat(head_oid.len());
+        let first_fail = fstore
+            .execute_atomic_git_ref_cas(
+                &rlock,
+                &repo_dir,
+                "git:crash-wal",
+                ep4,
+                "op-fail-cas",
+                "sha256:failcas",
+                "{}",
+                "refs/heads/fail-cas-ref",
+                &bad_old_oid,
+                &head_oid,
+            )
+            .unwrap_err();
+        assert!(
+            first_fail.to_string().contains("git_ref_cas_failed"),
+            "expected git_ref_cas_failed, got: {first_fail}"
+        );
+        let retry_fail = fstore
+            .execute_atomic_git_ref_cas(
+                &rlock,
+                &repo_dir,
+                "git:crash-wal",
+                ep4,
+                "op-fail-cas",
+                "sha256:failcas",
+                "{}",
+                "refs/heads/fail-cas-ref",
+                &bad_old_oid,
+                &head_oid,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(retry_fail, FencingError::EpochAlreadyConsumed { incoming: 4, .. }),
+            "exact retry of an aborted CAS MUST fail closed (EpochAlreadyConsumed), NEVER IdempotentReplay: {retry_fail:?}"
+        );
     }
 }
