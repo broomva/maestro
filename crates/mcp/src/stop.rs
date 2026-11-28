@@ -447,7 +447,7 @@ impl Run<'_> {
         let code = refusal.reason.code();
         let message = refusal.message.trim_end_matches('.').to_string();
         self.note(format!(
-            "binding_unavailable: {code}: {message}. The stop goes through (the gate fails open), recorded as StopUnverified."
+            "binding_unavailable: {code}: {message}. The stop goes through (the gate fails open); any unfinished instance of a candidate thread is recorded as StopUnverified."
         ));
         let host = self.hosts.t3_environment();
         let candidates = candidates.to_vec();

@@ -1152,6 +1152,20 @@ fn stop_gate_ambiguous_stdin_still_alerts() {
     assert_eq!(last_kind(&f, &dup), "Started", "not a known candidate's");
 }
 
+/// BRO-4227 review round 2: an archived or deleted thread's native id is still that thread's,
+/// never a nested process, so the stop is alerted even when the inherited thread owns nothing.
+#[test]
+fn stop_gate_archived_or_deleted_stdin_still_alerts() {
+    for native in ["native-archived", "native-deleted"] {
+        let f = fx();
+        f.begin_as((T3V, B));
+        let hosts = f.hosts(ATTRIB, &[(T3V, A)], Reg::Good, false);
+        let out = gate(&f, &hosts, Harness::Codex, &codex_stop(native));
+        allowed(&out);
+        assert_eq!(out.alerts.len(), 1, "{native}: {out:?}");
+    }
+}
+
 /// The generated driver skill says how each harness writes.
 #[test]
 fn the_driver_skill_says_how_codex_and_gemini_write() {

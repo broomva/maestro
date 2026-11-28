@@ -601,6 +601,21 @@ def main():
             "pending_questions": pending_questions_of(row["thread_id"]),
         }
 
+    if mode == "native_any":
+        # Whether ANY provider row, of any thread, live or not, carries this native id
+        # (BRO-4227). A payload that does not parse means "cannot tell": exit non-zero.
+        if "orchestration_v2_projection_provider_threads" not in tables:
+            sys.stderr.write("sqlite_error: missing table orchestration_v2_projection_provider_threads\n")
+            sys.exit(2)
+        found = False
+        for r in conn.execute("SELECT payload_json FROM orchestration_v2_projection_provider_threads"):
+            payload = payload_of(r["payload_json"], "a provider row")
+            ref = payload.get("nativeThreadRef")
+            if isinstance(ref, dict) and ref.get("nativeId") == target_id:
+                found = True
+                break
+        print(json.dumps(found))
+        sys.exit(0)
     if mode == "native":
         # The threads whose ACTIVE provider-thread row carries this native id (a Codex
         # CODEX_THREAD_ID, or a Stop hook's session_id). A retired provider row never attributes.
@@ -985,6 +1000,35 @@ impl T3Registry {
     }
 
     /// The threads whose active provider-thread row carries `native_id`, read from the registry.
+    /// Whether any provider row of any thread (archived, deleted or retired rows included) carries
+    /// `native_id`. Only [`Resolution::Unnamed`] reads it; an error means "cannot tell".
+    fn native_ever_carried(&self, native_id: &str) -> Result<bool, IdentityRefusal> {
+        let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
+        if let Some(json_file) = self.json_path() {
+            let rows = Self::snapshot_rows(&json_file).map_err(|e| unreadable(e.message))?;
+            return Ok(rows
+                .iter()
+                .any(|raw| raw.provider_threads.iter().any(|p| p.native_id.as_deref() == Some(native_id))));
+        }
+        if let Some(db_file) = self.sqlite_path() {
+            let out = Command::new("python3")
+                .arg("-I")
+                .arg("-c")
+                .arg(SQLITE_READER_PY)
+                .arg("native_any")
+                .arg(&db_file)
+                .arg(native_id)
+                .output()
+                .map_err(|e| unreadable(format!("T3 SQLite reader failed to launch: {e}.")))?;
+            if out.status.code() != Some(0) {
+                return Err(unreadable(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+            }
+            return serde_json::from_slice(&out.stdout)
+                .map_err(|e| unreadable(format!("T3 SQLite reader returned invalid JSON: {e}.")));
+        }
+        Err(unreadable("no T3 registry file".to_string()))
+    }
+
     fn native_threads(&self, native_id: &str) -> Result<Vec<String>, IdentityRefusal> {
         let unreadable = |detail: String| IdentityRefusal::new(RefusalReason::RegistryUnavailable, detail);
         if self.disconnected {
@@ -1048,10 +1092,14 @@ impl T3Registry {
             let found = self.native_threads(value)?;
             match found.as_slice() {
                 [] => {
-                    return Ok(Resolution::Unnamed(format!(
-                        "no T3 thread's active provider row is {}",
-                        short_id(value)
-                    )));
+                    let why = format!("no T3 thread's active provider row is {}", short_id(value));
+                    // Unnamed only when no provider row of any thread, live or not, active or
+                    // retired, carries the id (BRO-4227): an archived or deleted thread's session is
+                    // still a thread's. Anything that does not read stays Unresolved.
+                    return Ok(match self.native_ever_carried(value) {
+                        Ok(false) => Resolution::Unnamed(why),
+                        Ok(true) | Err(_) => Resolution::Unresolved(why),
+                    });
                 }
                 [one] => one.clone(),
                 many => {

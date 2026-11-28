@@ -199,6 +199,22 @@ fn unresolved(r: Resolution) -> String {
     }
 }
 
+/// BRO-4227: only a native id that no provider row of any thread carries is `Unnamed`. A retired
+/// row's id, an archived or deleted thread's, and a duplicated one stay `Unresolved`, with the same
+/// text as before.
+#[test]
+fn only_a_native_id_no_row_carries_is_unnamed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let t3 = T3Registry::new(sqlite(tmp.path()));
+    for id in ["native-old", "native-arch", "native-del", "native-dup"] {
+        assert!(matches!(t3.resolve(id, true).unwrap(), Resolution::Unresolved(_)), "{id}");
+    }
+    match t3.resolve("01a22012-nested-reviewer", true).unwrap() {
+        Resolution::Unnamed(why) => assert!(why.contains("no T3 thread's active provider row is"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn native_ids_resolve_through_the_active_provider_row_only() {
     let tmp = tempfile::tempdir().unwrap();
